@@ -267,7 +267,11 @@ describe('QuickJsSandbox: no ambient authority', () => {
 
   it('runs the child process under the Node permission model of the running Node', async () => {
     const target = join(tmpdir(), `acm-permission-probe-${process.pid}`);
-    const server = createServer((socket) => socket.end('hello'));
+    const server = createServer((socket) => {
+      // Where Node allows the connection (before Node 25) the probe exits right away and resets it.
+      socket.on('error', () => undefined);
+      socket.end('hello');
+    });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     const port = typeof address === 'object' && address !== null ? address.port : 0;
