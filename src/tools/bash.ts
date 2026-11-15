@@ -1,0 +1,190 @@
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { ToolError } from '../core/errors.js';
+import type { BashEffect, BashResult } from '../core/types.js';
+import { withSandbox } from './sandbox.js';
+
+/** Default `bash` timeout. */
+export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
+/** Largest `bash` timeout. */
+export const MAX_BASH_TIMEOUT_MS = 600_000;
+/** Bytes kept of each of stdout and stderr. */
+export const DEFAULT_OUTPUT_CAP_BYTES = 1024 * 1024;
+/** After the shell exits, how long to wait for the output pipes to close. */
+const DRAIN_MS = 200;
+
+/** Quotes a string for POSIX sh as one word. */
+export function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+let cachedShell: string | null | undefined;
+
+/** The bash to run commands with: `/bin/bash` or `bash` on PATH; Git Bash on Windows. Null when none. */
+export function findBash(): string | null {
+  if (cachedShell !== undefined) return cachedShell;
+  if (process.platform === 'win32') {
+    const candidates = [
+      process.env['ProgramFiles'] && path.join(process.env['ProgramFiles'], 'Git', 'bin', 'bash.exe'),
+      process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Git', 'bin', 'bash.exe'),
+      process.env['LOCALAPPDATA'] && path.join(process.env['LOCALAPPDATA'], 'Programs', 'Git', 'bin', 'bash.exe'),
+    ].filter((p): p is string => typeof p === 'string' && p !== '');
+    cachedShell = candidates.find((p) => existsSync(p)) ?? null;
+    return cachedShell;
+  }
+  if (existsSync('/bin/bash')) cachedShell = '/bin/bash';
+  else {
+    const which = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' });
+    const found = which.status === 0 ? which.stdout.trim() : '';
+    cachedShell = found !== '' ? found : null;
+  }
+  return cachedShell;
+}
+
+class Capture {
+  readonly #chunks: Buffer[] = [];
+  #size = 0;
+  truncated = false;
+
+  constructor(private readonly cap: number) {}
+
+  push(chunk: Buffer): void {
+    if (this.#size >= this.cap) {
+      this.truncated = true;
+      return;
+    }
+    const room = this.cap - this.#size;
+    const kept = chunk.length > room ? chunk.subarray(0, room) : chunk;
+    if (kept.length < chunk.length) this.truncated = true;
+    this.#chunks.push(kept);
+    this.#size += kept.length;
+  }
+
+  text(): string {
+    // A cut in the middle of a multi-byte character becomes U+FFFD.
+    return Buffer.concat(this.#chunks).toString('utf8');
+  }
+}
+
+/** Kills the whole process group of `child` (POSIX) or its tree (Windows). */
+function killGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+export interface BashRunOptions {
+  readonly outputCapBytes?: number;
+  /** Paths a sandboxed command may never write (from the host's protected paths). */
+  readonly denyWrite?: readonly string[];
+}
+
+function spawnAndWait(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+  cap: number,
+): Promise<BashResult> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new ToolError('cancelled', 'the run was stopped before bash started'));
+      return;
+    }
+    const [file, ...args] = argv;
+    if (file === undefined) {
+      reject(new ToolError('tool-error', 'empty command line'));
+      return;
+    }
+    const child = spawn(file, args, {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
+    const out = new Capture(cap);
+    const err = new Capture(cap);
+    child.stdout?.on('data', (c: Buffer) => out.push(c));
+    child.stderr?.on('data', (c: Buffer) => err.push(c));
+
+    let timedOut = false;
+    let settled = false;
+    let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
+
+    const finish = (): void => {
+      if (settled || !exit) return;
+      settled = true;
+      clearTimeout(timer);
+      if (drainTimer) clearTimeout(drainTimer);
+      signal.removeEventListener('abort', onAbort);
+      // No process of the call outlives it: background children are killed too.
+      killGroup(child);
+      if (signal.aborted && !timedOut) {
+        reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
+        return;
+      }
+      resolve({
+        exitCode: exit.code,
+        signal: exit.signal,
+        stdout: out.text(),
+        stderr: err.text(),
+        truncated: out.truncated || err.truncated,
+        timedOut,
+      });
+    };
+    const onAbort = (): void => killGroup(child);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(child);
+    }, timeoutMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    child.once('error', (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(new ToolError('tool-error', `bash failed to start: ${e.message}`));
+    });
+    child.once('exit', (code, sig) => {
+      exit = { code, signal: sig };
+      // Background children may keep the pipes open; do not wait for them long.
+      drainTimer = setTimeout(finish, DRAIN_MS);
+    });
+    child.once('close', () => finish());
+  });
+}
+
+/** Runs a prepared `bash` effect. */
+export async function runBash(effect: BashEffect, signal: AbortSignal, opts: BashRunOptions = {}): Promise<BashResult> {
+  if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
+  const shell = findBash();
+  if (shell === null) {
+    throw new ToolError('tool-error', process.platform === 'win32' ? 'bash requires Git Bash, which was not found' : 'bash was not found');
+  }
+  const cap = opts.outputCapBytes ?? DEFAULT_OUTPUT_CAP_BYTES;
+  const containment = effect.containment;
+  if (containment.mode === 'none') {
+    return spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap);
+  }
+  return withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], (wrapped) => {
+    if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
+    return spawnAndWait(wrapped.argv, { ...process.env, ...wrapped.env }, effect.cwd, effect.timeoutMs, signal, cap);
+  });
+}
