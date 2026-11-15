@@ -31,11 +31,12 @@ import { z } from 'zod';
 import { runCommandHook, type CommandHookResult } from '../../core/command-hook.js';
 import type { DenySource } from '../../core/types.js';
 import { ConfigError, getPath, isTable, type CodexConfig, type ConfigIo, type TomlTable } from './config.js';
+import { rustRegexToJs } from './rust-regex.js';
 import { shellQuote } from './shell.js';
 
 export type HookTrustMode = 'trusted' | 'deny-only';
 
-export type HookMatcher = { readonly kind: 'all' } | { readonly kind: 'exact'; readonly names: readonly string[] } | { readonly kind: 'regex'; readonly source: string };
+export type HookMatcher = { readonly kind: 'all' } | { readonly kind: 'exact'; readonly names: readonly string[] } | { readonly kind: 'regex'; readonly source: string; readonly flags: string };
 
 /** One PreToolUse handler Codex would consider. */
 export interface HookHandler {
@@ -161,14 +162,13 @@ export function hookKey(sourcePath: string, groupIndex: number, handlerIndex: nu
 export function compileMatcher(pattern: string | null | undefined, where: string): HookMatcher {
   if (pattern === undefined || pattern === null || pattern === '' || pattern === '*') return { kind: 'all' };
   if (/^[A-Za-z0-9_|]+$/.test(pattern)) return { kind: 'exact', names: pattern.split('|') };
-  try {
-    new RegExp(pattern);
-  } catch (err) {
-    // Codex drops a group whose matcher is not a valid Rust regex. A matcher
-    // JavaScript cannot compile may still be valid for Codex, so fail closed.
-    throw new ConfigError(`hook matcher ${JSON.stringify(pattern)} in ${where} cannot be compiled: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return { kind: 'regex', source: pattern };
+  // Codex matchers are Rust regexes. When one cannot be translated to an
+  // equivalent JavaScript RegExp, the hook matches every call: a blocking
+  // hook must never silently stop matching. (Codex itself drops a group
+  // whose matcher is not a valid Rust regex; matching it is stricter.)
+  void where;
+  const js = rustRegexToJs(pattern);
+  return js === undefined ? { kind: 'all' } : { kind: 'regex', source: js.source, flags: js.flags };
 }
 
 export function matcherMatches(m: HookMatcher, names: readonly string[]): boolean {
@@ -178,7 +178,7 @@ export function matcherMatches(m: HookMatcher, names: readonly string[]): boolea
     case 'exact':
       return names.some((n) => m.names.includes(n));
     case 'regex': {
-      const re = new RegExp(m.source);
+      const re = new RegExp(m.source, m.flags);
       return names.some((n) => re.test(n));
     }
   }
@@ -427,8 +427,8 @@ const nonEmpty = (s: string | undefined): string | undefined => {
 /**
  * Interprets a finished command hook like Codex `pre_tool_use.rs`, except
  * that every result Codex treats as a non-blocking failure is an error here
- * (fail closed): non-zero exit other than 2, exit 2 without stderr, invalid
- * JSON, unsupported fields or decisions (`ask`, `allow` without
+ * (fail closed): non-zero exit other than 2, exit 2 without stderr, stdout
+ * that is not JSON (Codex ignores it), invalid JSON, unsupported fields or decisions (`ask`, `allow` without
  * `updatedInput`, `continue: false`, ...), timeouts and crashes.
  */
 export function interpretHookResult(r: CommandHookResult, label: string): HookOutcome {
@@ -446,8 +446,9 @@ export function interpretHookResult(r: CommandHookResult, label: string): HookOu
     return { kind: 'error', source: 'hook-error', reason: `${label} failed (${r.exitCode === null ? `signal ${r.signal ?? 'unknown'}` : `exit code ${r.exitCode}`})${detail ? `: ${detail.slice(0, 500)}` : ''}` };
   }
   const stdout = r.stdout.trim();
-  // Codex ignores output that does not look like JSON.
-  if (stdout === '' || !(stdout.startsWith('{') || stdout.startsWith('['))) return { kind: 'none' };
+  if (stdout === '') return { kind: 'none' };
+  // Codex ignores stdout that does not look like JSON; we fail closed.
+  if (!(stdout.startsWith('{') || stdout.startsWith('['))) return { kind: 'error', source: 'hook-error', reason: `${label} printed output that is not JSON` };
   let json: unknown;
   try {
     json = JSON.parse(stdout);

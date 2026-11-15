@@ -15,7 +15,9 @@
  * every line ends with a line ending afterwards. Added files are the `+` lines
  * joined with LF. So the format cannot express a missing final newline or a
  * line ending different from the file's first one; `generatePatch` reports
- * that gap (`exact: false`) and the line texts are still exact.
+ * that gap (`exact: false`) and the line texts are still exact. The adapter
+ * denies such a change when a hook would see the patch, so a hook never
+ * approves a change different from the one applied.
  */
 
 export type PatchHunk =

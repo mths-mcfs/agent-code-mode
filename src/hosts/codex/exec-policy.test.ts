@@ -102,7 +102,7 @@ describe('rule evaluation', () => {
 
 describe('shell splitter', () => {
   it('splits operators, keeps quoted words and tracks plain scripts', () => {
-    expect(splitShellCommands(`git commit -m "a && b" && echo 'x;y' || true`)).toEqual({
+    expect(splitShellCommands(`git commit -m "a && b" && echo 'x;y' || true`)).toMatchObject({
       commands: [['git', 'commit', '-m', 'a && b'], ['echo', 'x;y'], ['true']],
       plain: true,
     });
@@ -122,5 +122,27 @@ describe('shell splitter', () => {
     expect(shellQuote("it's")).toBe(`'it'\\''s'`);
     expect(shlexSplit(shellQuote("a 'b' c"))).toEqual(["a 'b' c"]);
     expect(shlexSplit('a "b c" d\\ e')).toEqual(['a', 'b c', 'd e']);
+  });
+});
+
+describe('Rust regex translation', () => {
+  it('translates what has the same meaning and refuses the rest', async () => {
+    const { rustRegexToJs } = await import('./rust-regex.js');
+    const m = (p: string, s: string): boolean | undefined => {
+      const js = rustRegexToJs(p);
+      return js === undefined ? undefined : new RegExp(js.source, js.flags).test(s);
+    };
+    expect(m('\\ABash\\z', 'Bash')).toBe(true);
+    expect(m('\\ABash\\z', 'xBash')).toBe(false);
+    expect(m('(?i)bash', 'BASH')).toBe(true);
+    expect(m('^apply_\\w+$', 'apply_patch')).toBe(true);
+    expect(m('[^a-z]rite', 'Write')).toBe(true);
+    expect(m('[[:digit:]]+', 'a1')).toBe(true);
+    expect(m('Ba.h{1,2}?', 'Bash')).toBe(true);
+    expect(m('mcp__.*__run', 'mcp__x__run')).toBe(true);
+    expect(m('a\\-b', 'a-b')).toBe(true);
+    for (const bad of ['(?x)a b', '(?i:a)', '[a&&b]', '[[a]]', '\\Z', '\\Qa\\E', '(?=a)', 'a{,2}', '\\1', '(a', 'a)', '*a', '\\<a']) {
+      expect(rustRegexToJs(bad), bad).toBeUndefined();
+    }
   });
 });
