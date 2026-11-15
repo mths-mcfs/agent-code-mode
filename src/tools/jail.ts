@@ -1,5 +1,5 @@
 /*
- * `realpathWithSuffix`, `isInsideDir` and `windowsPathProblem` are adapted
+ * `isInsideDir` and `windowsPathProblem` are adapted
  * from Turnpack's src/security.ts (https://github.com/OnlyTerp/turnpack,
  * Copyright 2026 OnlyTerp, licensed under the Apache License, Version 2.0:
  * http://www.apache.org/licenses/LICENSE-2.0).
@@ -16,11 +16,9 @@ import { DEFAULT_CASE_INSENSITIVE, findMatchingPattern } from '../core/paths.js'
  * Workspace jail: every path a tool touches is resolved to an absolute real
  * path and must live under one of the allowed roots.
  *
- * Resolution follows Turnpack's `realpathWithSuffix`: the deepest part of the
- * path that exists is found with `lstat` (not `exists`, which follows links
- * and would call a dangling symlink "missing"), resolved with `realpath`, and
- * the missing rest is joined back. A dangling link is followed by hand so the
- * boundary check sees where a write would really land.
+ * Resolution walks the path one component at a time with `lstat` and follows
+ * each link by hand (`resolvePhysical`), so a dangling link and `link/..` are
+ * judged by where the operating system would really land.
  */
 
 const MAX_LINK_HOPS = 40;
@@ -42,30 +40,103 @@ async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
   }
 }
 
-/** Real path of `target`, which may not exist yet. */
-export async function realpathWithSuffix(target: string, hops = 0): Promise<string> {
-  if (hops > MAX_LINK_HOPS) throw new ToolError('outside-workspace', `too many symbolic links while resolving ${target}`);
-  let cursor = path.resolve(target);
-  const trailing: string[] = [];
-  let stat = await lstatOrNull(cursor);
-  while (!stat) {
-    const parent = path.dirname(cursor);
-    if (parent === cursor) throw new ToolError('outside-workspace', `no existing ancestor for ${target}`);
-    trailing.push(path.basename(cursor));
-    cursor = parent;
-    stat = await lstatOrNull(cursor);
+/** What resolving a path found. */
+export interface Resolution {
+  /** Absolute real path (the missing tail, if any, joined to the deepest existing real directory). */
+  readonly real: string;
+  /** Absolute locations of every symbolic link followed on the way, in order. */
+  readonly links: readonly string[];
+  /** True when the path's own last component is a symbolic link. */
+  readonly finalIsLink: boolean;
+}
+
+function splitComponents(p: string): string[] {
+  return p.split(IS_WINDOWS ? /[\\/]+/ : /\/+/);
+}
+
+function stripVerbatim(target: string): string {
+  return IS_WINDOWS && target.startsWith('\\\\?\\') ? target.slice(4) : target;
+}
+
+/**
+ * Resolves `input` (absolute, or relative to the real directory `base`)
+ * component by component with POSIX semantics: a symbolic link is replaced
+ * by its target before the next component is looked at, so `link/..` is the
+ * parent of the link's target, not the directory holding the link. Nothing
+ * is normalized lexically first. A `..` after a component that does not
+ * exist is refused, as the operating system would refuse it.
+ */
+export async function resolvePhysical(input: string, base: string): Promise<Resolution> {
+  let current: string;
+  let rest: string;
+  if (path.isAbsolute(input)) {
+    const root = path.parse(input).root;
+    current = path.resolve(root);
+    rest = input.slice(root.length);
+  } else {
+    current = base;
+    rest = input;
   }
-  let realBase: string;
+  const queue = splitComponents(rest);
+  const links: string[] = [];
+  const meaningful = (q: readonly string[]): boolean => q.some((c) => c !== '' && c !== '.');
+  let hops = 0;
+  let missing = false;
+  let finalIsLink = false;
+  while (queue.length > 0) {
+    const c = queue.shift() ?? '';
+    if (c === '' || c === '.') continue;
+    if (c === '..') {
+      if (missing) throw new ToolError('not-found', `${input}: ".." after a component that does not exist`);
+      current = path.dirname(current);
+      continue;
+    }
+    const next = path.join(current, c);
+    if (missing) {
+      current = next;
+      continue;
+    }
+    const st = await lstatOrNull(next);
+    if (!st) {
+      missing = true;
+      current = next;
+      continue;
+    }
+    if (st.isSymbolicLink()) {
+      if (++hops > MAX_LINK_HOPS) throw new ToolError('outside-workspace', `${input}: too many symbolic links`);
+      links.push(next);
+      if (!meaningful(queue)) finalIsLink = true;
+      const target = stripVerbatim(await fs.readlink(next));
+      if (path.isAbsolute(target)) {
+        const root = path.parse(target).root;
+        current = path.resolve(root);
+        queue.unshift(...splitComponents(target.slice(root.length)));
+      } else {
+        queue.unshift(...splitComponents(target));
+      }
+      continue;
+    }
+    if (!st.isDirectory() && meaningful(queue)) {
+      throw new ToolError('not-found', `${input}: ${next} is not a directory`);
+    }
+    current = next;
+  }
+  // Canonical spelling (case, Windows short names) of the existing part.
+  let existing = current;
+  const tail: string[] = [];
+  while (!(await lstatOrNull(existing))) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    tail.unshift(path.basename(existing));
+    existing = parent;
+  }
+  let realExisting = existing;
   try {
-    realBase = await fs.realpath(cursor);
-  } catch (err) {
-    if (!stat.isSymbolicLink()) throw err;
-    // Dangling link: follow it by hand so the check sees its destination.
-    const linkTarget = await fs.readlink(cursor);
-    const parentReal = await fs.realpath(path.dirname(cursor));
-    realBase = await realpathWithSuffix(path.resolve(parentReal, linkTarget), hops + 1);
+    realExisting = await fs.realpath(existing);
+  } catch {
+    // Dangling final link target: keep the spelling.
   }
-  return trailing.length === 0 ? realBase : path.resolve(realBase, ...trailing.reverse());
+  return { real: tail.length === 0 ? realExisting : path.join(realExisting, ...tail), links, finalIsLink };
 }
 
 /** True when `target` is `base` or below it. Both must be real absolute paths. */
@@ -209,6 +280,25 @@ export class Jail {
    * absolute real path inside the roots, or throws `ToolError`.
    */
   async resolve(input: string): Promise<string> {
+    return (await this.#resolve(input)).real;
+  }
+
+  /**
+   * Like `resolve`, for a write or an edit: also refuses a path whose last
+   * component is a symbolic link (write to its target instead), and refuses a
+   * protected path whether it is named by the real path or by any link the
+   * resolution went through.
+   */
+  async resolveForWrite(input: string): Promise<string> {
+    const r = await this.#resolve(input);
+    for (const p of [r.real, ...r.links]) this.assertWritable(p);
+    if (r.finalIsLink) {
+      throw new ToolError('invalid-args', `${input} is a symbolic link; write to its target (${r.real}) instead`);
+    }
+    return r.real;
+  }
+
+  async #resolve(input: string): Promise<Resolution> {
     if (input.includes('\0')) throw new ToolError('invalid-args', 'path must not contain NUL characters');
     const trimmed = input.trim();
     if (trimmed === '') throw new ToolError('invalid-args', 'path must not be empty');
@@ -217,10 +307,9 @@ export class Jail {
       if (problem) throw new ToolError('outside-workspace', `${trimmed}: ${problem}`);
     }
     const expanded = expandTilde(trimmed);
-    const candidate = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(this.cwd, expanded);
-    let real: string;
+    let r: Resolution;
     try {
-      real = await realpathWithSuffix(candidate);
+      r = await resolvePhysical(expanded, this.cwd);
     } catch (err) {
       if (err instanceof ToolError) throw err;
       const code = errnoCode(err);
@@ -228,14 +317,14 @@ export class Jail {
       if (code === 'ELOOP') throw new ToolError('outside-workspace', `${trimmed}: too many symbolic links`);
       throw new ToolError('tool-error', `cannot resolve ${trimmed}: ${code ?? String(err)}`);
     }
-    if (this.rootOf(real) === undefined) {
-      throw new ToolError('outside-workspace', `${trimmed} resolves to ${real}, outside the workspace (${this.roots.join(', ')})`);
+    if (this.rootOf(r.real) === undefined) {
+      throw new ToolError('outside-workspace', `${trimmed} resolves to ${r.real}, outside the workspace (${this.roots.join(', ')})`);
     }
     if (this.#windowsChecks) {
-      const problem = windowsPathProblem(real);
+      const problem = windowsPathProblem(r.real);
       if (problem) throw new ToolError('outside-workspace', `${trimmed}: ${problem}`);
     }
-    return real;
+    return r;
   }
 
   /** Throws `protected-path` when `abs` must not be written or edited. */

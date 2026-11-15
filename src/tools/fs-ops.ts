@@ -58,7 +58,89 @@ async function assertHandleAt(handle: FileHandle, abs: string): Promise<Stats> {
   if (!lst || lst.isSymbolicLink() || !sameFile(st, lst)) {
     throw new ToolError('stale', `file changed since prepared: ${abs} was replaced while it was opened`);
   }
+  // Without /proc, the directory holding the opened file must still be itself:
+  // a parent swapped for a link would make `lstat(abs)` agree with the handle.
+  if (!IS_LINUX) await assertDirUnchanged(path.dirname(abs));
   return st;
+}
+
+/**
+ * Opens a regular file for reading and checks the handle is the file at
+ * `abs` reached without any link (final component or parent). Returns null
+ * when the file is not there or not a regular file reachable that way.
+ */
+export async function readFileInside(abs: string, maxBytes: number): Promise<Buffer | null> {
+  let handle: FileHandle;
+  try {
+    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW);
+  } catch {
+    return null;
+  }
+  try {
+    const st = await assertHandleAt(handle, abs);
+    if (!st.isFile() || st.size > maxBytes) return null;
+    return await handle.readFile();
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Identity: what a commit checks to know the path still names what prepare saw.
+// ---------------------------------------------------------------------------
+
+/** dev+ino of a path and of each directory above it up to a root. */
+export interface PathIdentity {
+  readonly entries: readonly { readonly path: string; readonly dev: bigint; readonly ino: bigint }[];
+}
+
+/**
+ * Records the identity of `abs` (when it exists) and of every existing
+ * directory from its parent up to `root` (inclusive).
+ */
+export async function captureIdentity(abs: string, root: string): Promise<PathIdentity> {
+  const entries: { path: string; dev: bigint; ino: bigint }[] = [];
+  let cursor = abs;
+  for (;;) {
+    const st = await fs.lstat(cursor, { bigint: true }).catch(() => null);
+    if (st) entries.push({ path: cursor, dev: st.dev, ino: st.ino });
+    const same = IS_WINDOWS ? cursor.toLowerCase() === root.toLowerCase() : cursor === root;
+    const parent = path.dirname(cursor);
+    if (same || parent === cursor) break;
+    cursor = parent;
+  }
+  return { entries };
+}
+
+/** Throws `stale` when any path recorded by `captureIdentity` now names something else. */
+export async function assertIdentity(identity: PathIdentity): Promise<void> {
+  for (const e of identity.entries) {
+    const st = await fs.lstat(e.path, { bigint: true }).catch(() => null);
+    if (!st || st.dev !== e.dev || st.ino !== e.ino) {
+      throw new ToolError('stale', `file changed since prepared: ${e.path} was replaced`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-path lock: check-and-replace of one path is atomic within the process.
+// ---------------------------------------------------------------------------
+
+const locks = new Map<string, Promise<unknown>>();
+
+/** Runs `fn` while holding the in-process lock of `abs`. */
+export function withPathLock<T>(abs: string, fn: () => Promise<T>): Promise<T> {
+  const key = IS_WINDOWS || process.platform === 'darwin' ? abs.toLowerCase() : abs;
+  const prev = locks.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.catch(() => undefined);
+  locks.set(key, tail);
+  void tail.then(() => {
+    if (locks.get(key) === tail) locks.delete(key);
+  });
+  return next;
 }
 
 export interface RegularFile {
@@ -122,22 +204,46 @@ async function missingDirs(dir: string): Promise<string[]> {
   return missing.reverse();
 }
 
+export interface AtomicWriteOptions {
+  /** Runs after the checks and before anything is written (the journal snapshots there). */
+  readonly beforeWrite?: (before: RegularFile | null, createdDirs: readonly string[]) => Promise<void>;
+  /** Checked again right before the rename; an abort refuses the write. */
+  readonly signal?: AbortSignal;
+  /** Identity recorded at prepare; checked before writing and right before the rename. */
+  readonly identity?: PathIdentity;
+  /** Mode of the new file; defaults to the mode of the file it replaces. */
+  readonly mode?: number;
+}
+
+function hashMatches(expect: Expectation, current: RegularFile | null): boolean {
+  if (expect.kind === 'absent') return current === null;
+  return current !== null && sha256(current.bytes) === expect.sha256;
+}
+
+/** Atomically replaces (or creates) `abs` under its per-path lock; see `writeLocked`. */
+export function atomicWrite(abs: string, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions = {}): Promise<WriteOutcome> {
+  return withPathLock(abs, () => writeLocked(abs, bytes, expect, opts));
+}
+
+function assertNotAborted(signal: AbortSignal | undefined, abs: string): void {
+  if (signal?.aborted) throw new ToolError('cancelled', `the run was stopped before ${abs} was written`);
+}
+
 /**
- * Atomically replaces (or creates) `abs` with `bytes`:
+ * Replaces (or creates) `abs` with `bytes`, holding its per-path lock:
  * 1. the parent directory must still resolve to itself (no symlink swapped in);
- * 2. the current content must match `expect` (else `ToolError('stale')`, no write);
+ * 2. the identity recorded at prepare and the content must match (else `stale`, no write);
  * 3. the bytes go to a temp file in the same directory (fsync), keep the old mode,
  *    and are renamed over the target; a create uses `link` so it never replaces
  *    a file that appeared meanwhile.
- * `beforeWrite` runs after the checks and before anything is written (the
+ * Right before the rename the signal, the identity and the content hash are
+ * checked again. `beforeWrite` runs after the checks and before anything is written (the
  * transaction journal snapshots the original there).
  */
-export async function atomicWrite(
-  abs: string,
-  bytes: Buffer,
-  expect: Expectation,
-  beforeWrite?: (before: RegularFile | null, createdDirs: readonly string[]) => Promise<void>,
-): Promise<WriteOutcome> {
+async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions): Promise<WriteOutcome> {
+  const { beforeWrite, signal, identity } = opts;
+  assertNotAborted(signal, abs);
+  if (identity) await assertIdentity(identity);
   const dir = path.dirname(abs);
   const toCreate = await missingDirs(dir);
   const existingAncestor = toCreate.length > 0 ? path.dirname(toCreate[0] ?? dir) : dir;
@@ -165,18 +271,24 @@ export async function atomicWrite(
   await assertDirUnchanged(dir);
 
   const tmp = path.join(dir, `.${path.basename(abs)}.acm-${randomBytes(6).toString('hex')}.tmp`);
-  const mode = before?.mode ?? 0o666;
+  const mode = opts.mode ?? before?.mode ?? 0o666;
   const handle = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | NOFOLLOW, mode);
   let placed = false;
   try {
     try {
       await handle.writeFile(bytes);
-      if (before && !IS_WINDOWS) await handle.chmod(before.mode);
+      if ((opts.mode !== undefined || before) && !IS_WINDOWS) await handle.chmod(mode);
       await handle.sync();
     } finally {
       await handle.close();
     }
+    // Last checks before the irreversible step.
+    assertNotAborted(signal, abs);
     await assertDirUnchanged(dir);
+    if (identity) await assertIdentity(identity);
+    if (!hashMatches(expect, await readRegularFile(abs))) {
+      throw new ToolError('stale', `file changed since prepared: ${abs} changed while it was being written`);
+    }
     if (expect.kind === 'absent') {
       try {
         await fs.link(tmp, abs);
@@ -196,12 +308,42 @@ export async function atomicWrite(
   }
 }
 
-/** Removes `abs` if it is a regular file (never follows a link). */
-export async function removeRegularFile(abs: string): Promise<void> {
-  const st = await fs.lstat(abs).catch(() => null);
-  if (!st) return;
-  if (!st.isFile()) throw new ToolError('stale', `${abs} is no longer a regular file`);
-  await fs.unlink(abs);
+/**
+ * Removes `abs` when it is a regular file holding `expectHash`, reached
+ * without any link (its directory must still resolve to itself).
+ */
+export function removeRegularFile(abs: string, expectHash: string): Promise<void> {
+  return withPathLock(abs, async () => {
+    await assertDirUnchanged(path.dirname(abs));
+    const current = await readRegularFile(abs);
+    if (current === null) return;
+    if (sha256(current.bytes) !== expectHash) throw new ToolError('stale', `${abs} changed; not removed`);
+    await fs.unlink(abs);
+  });
+}
+
+/**
+ * Removes `dir` when it is an empty real directory (not a link, not reached
+ * through one) strictly inside one of `roots`. Returns whether it was removed.
+ */
+export async function removeEmptyDirInside(dir: string, roots: readonly string[]): Promise<boolean> {
+  if (!path.isAbsolute(dir)) return false;
+  const st = await fs.lstat(dir).catch(() => null);
+  if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
+  const real = await fs.realpath(dir).catch(() => null);
+  const same = real !== null && (IS_WINDOWS ? real.toLowerCase() === dir.toLowerCase() : real === dir);
+  if (!same) return false;
+  const inside = roots.some((root) => {
+    const rel = path.relative(IS_WINDOWS ? root.toLowerCase() : root, IS_WINDOWS ? dir.toLowerCase() : dir);
+    return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+  });
+  if (!inside) return false;
+  try {
+    await fs.rmdir(dir);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** fsyncs a directory where the platform allows it. */

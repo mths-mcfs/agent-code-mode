@@ -91,7 +91,9 @@ afterEach(() => {
 
 describe('path traversal', () => {
   it('refuses ../, absolute paths outside and ~', async () => {
-    for (const p of ['../outside/secret.txt', `${outside}/secret.txt`, 'a/../../outside/new.txt', '~/acm-must-not-exist.txt', '~']) {
+    // `..` after a missing component fails as the operating system would.
+    expect(await code(prep('write', { path: 'a/../../outside/new.txt', content: 'x' }))).toBe('not-found');
+    for (const p of ['../outside/secret.txt', `${outside}/secret.txt`, '~/acm-must-not-exist.txt', '~']) {
       expect(await code(prep('read', { path: p }))).toBe('outside-workspace');
       expect(await code(prep('write', { path: p, content: 'x' }))).toBe('outside-workspace');
       expect(await code(prep('edit', { path: p, oldString: 'secret', newString: 'x' }))).toBe('outside-workspace');
