@@ -1,10 +1,11 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
-import { childEntryPath, childEnv, childExecArgv, QuickJsSandbox, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
+import { childEntryPath, childEnv, childExecArgv, permissionFlag, QuickJsSandbox, SandboxUnavailableError, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
 
 interface Recorded {
   readonly outcome: SandboxOutcome;
@@ -264,18 +265,53 @@ describe('QuickJsSandbox: no ambient authority', () => {
     expect(childEnv({ ACM_TEST_CANARY: 'secret', SystemRoot: 'C:\\Windows' }, 'win32')).toEqual({ SystemRoot: 'C:\\Windows' });
   });
 
-  it.runIf(process.allowedNodeEnvironmentFlags.has('--permission'))('runs the child process under the Node permission model', () => {
+  it('runs the child process under the Node permission model of the running Node', async () => {
     const target = join(tmpdir(), `acm-permission-probe-${process.pid}`);
+    const server = createServer((socket) => socket.end('hello'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const port = typeof address === 'object' && address !== null ? address.port : 0;
     const probe = `const r = {}; const fs = require('fs');
       try { fs.writeFileSync(${JSON.stringify(target)}, 'x'); r.write = 'allowed'; } catch (e) { r.write = e.code; }
       try { require('child_process').execFileSync(process.execPath, ['-e', '0']); r.spawn = 'allowed'; } catch (e) { r.spawn = e.code; }
+      try { new (require('worker_threads').Worker)('0', { eval: true }).terminate(); r.worker = 'allowed'; } catch (e) { r.worker = e.code; }
       try { new Function('return 1')(); r.codegen = 'allowed'; } catch (e) { r.codegen = e.name; }
       r.env = Object.keys(process.env).filter((k) => !PLATFORM_ENV.has(k.toUpperCase()));
-      console.log(JSON.stringify(r));`;
-    const flags = childExecArgv(childEntryPath(), 256).filter((flag) => flag !== '--experimental-strip-types');
-    const out = spawnSync(process.execPath, [...flags, '-e', probe.replace('PLATFORM_ENV', `new Set(${JSON.stringify([...PLATFORM_ENV])})`)], { env: childEnv(), encoding: 'utf8' });
-    expect(JSON.parse(out.stdout)).toEqual({ write: 'ERR_ACCESS_DENIED', spawn: 'ERR_ACCESS_DENIED', codegen: 'EvalError', env: [] });
-    expect(existsSync(target)).toBe(false);
+      const done = (v) => { r.socket = v; console.log(JSON.stringify(r)); process.exit(0); };
+      try {
+        const s = require('net').connect(${port}, '127.0.0.1');
+        s.on('connect', () => done('allowed'));
+        s.on('error', (e) => done(e.code));
+      } catch (e) { done(e.code); }`;
+    try {
+      const flags = childExecArgv(childEntryPath(), 256).filter((flag) => flag !== '--experimental-strip-types');
+      const child = spawn(process.execPath, [...flags, '-e', probe.replace('PLATFORM_ENV', `new Set(${JSON.stringify([...PLATFORM_ENV])})`)], {
+        env: childEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+      await new Promise((resolve) => child.on('close', resolve));
+      const result = JSON.parse(stdout) as Record<string, unknown>;
+      expect({ ...result, socket: undefined }).toEqual({ write: 'ERR_ACCESS_DENIED', spawn: 'ERR_ACCESS_DENIED', worker: 'ERR_ACCESS_DENIED', codegen: 'EvalError', env: [], socket: undefined });
+      expect(existsSync(target)).toBe(false);
+      // Node's permission model covers the network only from Node 25 (the release that added --allow-net).
+      if (process.allowedNodeEnvironmentFlags.has('--allow-net')) expect(result.socket).toBe('ERR_ACCESS_DENIED');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('uses whichever permission flag this Node has and refuses to start without one', async () => {
+    expect(permissionFlag(new Set(['--permission', '--experimental-permission']))).toBe('--permission');
+    expect(permissionFlag(new Set(['--experimental-permission']))).toBe('--experimental-permission');
+    const legacy = childExecArgv('child.js', 64, new Set(['--experimental-permission']));
+    expect(legacy).toContain('--experimental-permission');
+    const grants = legacy.filter((flag) => flag.startsWith('--allow-fs-read='));
+    expect(grants).toHaveLength(1);
+    expect(grants[0]?.slice('--allow-fs-read='.length).split(',').every((path) => path.endsWith('*'))).toBe(true);
+    expect(() => childExecArgv('child.js', 64, new Set())).toThrow(SandboxUnavailableError);
+    expect(permissionFlag()).toBeDefined();
   });
 
   it('never lets the script observe a canary secret from the server env', async () => {
@@ -438,6 +474,37 @@ describe('QuickJsSandbox: resource abuse', () => {
   });
 });
 
+describe('QuickJsSandbox: reply buffering', () => {
+  const bigRead = (): Promise<CallReply> =>
+    Promise.resolve(ok({ path: '/example.txt', content: 'x'.repeat(1024 * 1024), startLine: 1, totalLines: 1, truncated: false }));
+
+  it('ends a run whose script stops reading binding results instead of buffering them', async () => {
+    const before = process.memoryUsage();
+    const { outcome, calls, elapsedMs } = await run('for (let i = 0; i < 200; i++) read({ path: "x" }); while (true) {}', {
+      timeoutMs: 10_000,
+      onCall: bigRead,
+      sandbox: { maxPendingReplyBytes: 16 * 1024 * 1024 },
+    });
+    const f = failure(outcome);
+    expect(f.kind).toBe('oom');
+    expect(f.error.name).toBe('ReplyBufferFull');
+    expect(calls.length).toBeGreaterThan(16);
+    expect(elapsedMs).toBeLessThan(5_000);
+    const after = process.memoryUsage();
+    expect(after.external + after.arrayBuffers - (before.external + before.arrayBuffers)).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it('caps the total bytes of binding results per run', async () => {
+    const { outcome } = await run('for (let i = 0; i < 20; i++) await read({ path: "x" }); return "read all";', {
+      onCall: bigRead,
+      sandbox: { maxReplyBytes: 8 * 1024 * 1024 },
+    });
+    expect(failure(outcome).error.name).toBe('ReplyBufferFull');
+    const fine = await run('for (let i = 0; i < 20; i++) await read({ path: "x" }); return "read all";', { onCall: bigRead });
+    expect(value(fine.outcome)).toBe('read all');
+  });
+});
+
 describe('QuickJsSandbox: concurrency', () => {
   it('resolves Promise.all of 200 bindings answered in reverse order', async () => {
     const waiting: (() => void)[] = [];
@@ -493,6 +560,25 @@ describe('QuickJsSandbox: cancellation', () => {
     expect(processGone(pid)).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(calls).toEqual([{ tool: 'read', args: { path: 'first' } }]);
+  });
+
+  it('stops the run when the signal is aborted while the child starts', async () => {
+    const controller = new AbortController();
+    let pid = 0;
+    const { outcome, calls } = await run('await write({ path: "example.txt", content: "x" }); return 42;', {
+      signal: controller.signal,
+      sandbox: {
+        onSpawn: (p) => {
+          pid = p;
+          controller.abort();
+        },
+      },
+    });
+    expect(failure(outcome).kind).toBe('killed');
+    expect(calls).toEqual([]);
+    const started = Date.now();
+    while (!processGone(pid) && Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(processGone(pid)).toBe(true);
   });
 
   it('does not start a child when the signal is already aborted', async () => {
