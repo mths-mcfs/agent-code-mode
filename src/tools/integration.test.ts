@@ -11,7 +11,7 @@ let base: string;
 let ws: string;
 
 beforeEach(() => {
-  base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'acm-int-')));
+  base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-int-')));
   ws = path.join(base, 'ws');
   mkdirSync(ws);
   writeFileSync(path.join(ws, 'a.txt'), 'alpha\n');

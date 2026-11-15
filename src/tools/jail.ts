@@ -112,6 +112,39 @@ export function isInsideGitDir(absPath: string): boolean {
     });
 }
 
+/**
+ * Adds, for each pattern, the same pattern with its literal directory prefix
+ * replaced by that directory's real path. Paths are checked as real paths, so
+ * a pattern written through an alias of the workspace (a symlinked cwd,
+ * macOS `/var` vs `/private/var`, a Windows 8.3 short name) must match too.
+ */
+async function withRealPrefixes(patterns: readonly string[]): Promise<string[]> {
+  const out = new Set<string>(patterns);
+  for (const pattern of patterns) {
+    const fwd = pattern.replace(/\\/g, '/');
+    const wild = fwd.search(/[*?[]/);
+    const literal = wild === -1 ? fwd : fwd.slice(0, wild);
+    const cut = literal.lastIndexOf('/');
+    if (cut <= 0) continue;
+    // Resolve the deepest existing directory of the literal prefix.
+    let dir = fwd.slice(0, cut);
+    let rest = fwd.slice(cut);
+    for (;;) {
+      try {
+        const real = (await fs.realpath(dir)).replace(/\\/g, '/');
+        if (real !== dir) out.add(real + rest);
+        break;
+      } catch {
+        const up = dir.lastIndexOf('/');
+        if (up <= 0 || /^[A-Za-z]:$/.test(dir.slice(0, up))) break;
+        rest = dir.slice(up) + rest;
+        dir = dir.slice(0, up);
+      }
+    }
+  }
+  return [...out];
+}
+
 export interface JailOptions {
   /** Absolute directory relative paths resolve against. */
   readonly cwd: string;
@@ -157,7 +190,7 @@ export class Jail {
         // A root that does not exist grants nothing.
       }
     }
-    const protectedPaths = opts.protectedPaths.map((p) => expandTilde(p));
+    const protectedPaths = await withRealPrefixes(opts.protectedPaths.map((p) => expandTilde(p)));
     return new Jail(cwd, roots, protectedPaths, opts.windowsChecks ?? IS_WINDOWS);
   }
 

@@ -33,7 +33,7 @@ function deadPid(): number {
 }
 
 beforeEach(() => {
-  base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'acm-journal-')));
+  base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-journal-')));
   ws = path.join(base, 'ws');
   outside = path.join(base, 'outside');
   stateDir = path.join(base, 'state');

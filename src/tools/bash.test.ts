@@ -53,7 +53,7 @@ async function eventually(check: () => boolean, ms = 3000): Promise<boolean> {
 }
 
 beforeEach(() => {
-  base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'acm-bash-')));
+  base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-bash-')));
   ws = path.join(base, 'ws');
   mkdirSync(ws);
   ctx = makeContext(ws);
