@@ -7,6 +7,7 @@ import { errorMessage } from '../core/errors.js';
 import type { Sandbox, SandboxOutcome, SandboxRunOptions } from '../core/types.js';
 import type { ParentMessage, SandboxLimits } from './protocol.js';
 import { ChildSession, killedOutcome } from './session.js';
+import { BoundedWriter } from './writer.js';
 
 /** Default QuickJS heap limit when `memoryBytes` is not usable. */
 export const DEFAULT_SANDBOX_MEMORY_BYTES = 128 * 1024 * 1024;
@@ -25,6 +26,14 @@ export interface QuickJsSandboxOptions {
   readonly maxArgsChars?: number;
   /** QuickJS stack limit. Default 128 KiB: the WASM build runs on the Node stack, and 256 KiB already overflows it on macOS with Node 22. */
   readonly stackBytes?: number;
+  /**
+   * Most bytes of binding results that may wait for the child to read them.
+   * A script that starts calls and then never yields (a busy loop) stops
+   * reading; past this cap the run ends with outcome `oom`. Default 16 MiB.
+   */
+  readonly maxPendingReplyBytes?: number;
+  /** Most bytes of binding results sent to the child in one run; past it the run ends with outcome `oom`. Default 512 MiB. */
+  readonly maxReplyBytes?: number;
   /** `--max-old-space-size` of the child process, in MiB. Default 256. */
   readonly childHeapMb?: number;
   /** Called with the pid of each child process (tests use it to check the child is gone). */
@@ -39,6 +48,8 @@ const DEFAULTS = {
   maxArgsChars: 4 * 1024 * 1024,
   stackBytes: 128 * 1024,
   childHeapMb: 256,
+  maxPendingReplyBytes: 16 * 1024 * 1024,
+  maxReplyBytes: 512 * 1024 * 1024,
 } as const;
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -98,17 +109,44 @@ function readableRoots(): string[] {
   return [...roots];
 }
 
-function supportsFlag(flag: string): boolean {
-  return process.allowedNodeEnvironmentFlags.has(flag);
+/** Thrown when this Node cannot start the child under its permission model. */
+export class SandboxUnavailableError extends Error {
+  override readonly name = 'SandboxUnavailableError';
 }
 
-/** Node flags of the child. */
-export function childExecArgv(entry: string, heapMb: number): string[] {
+/**
+ * The flag that turns on Node's permission model: `--permission` (Node
+ * 22.13+, 23.5+) or `--experimental-permission` (Node 22.0 to 22.12).
+ */
+export function permissionFlag(flags: ReadonlySet<string> = process.allowedNodeEnvironmentFlags): '--permission' | '--experimental-permission' | undefined {
+  if (flags.has('--permission')) return '--permission';
+  if (flags.has('--experimental-permission')) return '--experimental-permission';
+  return undefined;
+}
+
+/**
+ * Node flags of the child. Fails closed: without a permission model the
+ * child would have the server's full file, process and worker access, so
+ * this throws `SandboxUnavailableError` instead of returning flags without it.
+ */
+export function childExecArgv(entry: string, heapMb: number, flags: ReadonlySet<string> = process.allowedNodeEnvironmentFlags): string[] {
+  const permission = permissionFlag(flags);
+  if (permission === undefined) {
+    throw new SandboxUnavailableError(`Node ${process.version} has no permission model (--permission or --experimental-permission); the sandbox refuses to start without it`);
+  }
   const args = [`--max-old-space-size=${heapMb}`, '--disallow-code-generation-from-strings'];
   if (entry.endsWith('.ts') && !('typescript' in process.features && process.features.typescript)) args.push('--experimental-strip-types');
-  if (supportsFlag('--permission')) {
-    args.push('--permission');
-    for (const root of readableRoots()) args.push(`--allow-fs-read=${root}`);
+  args.push(permission);
+  const roots = readableRoots();
+  if (permission === '--permission') {
+    for (const root of roots) args.push(`--allow-fs-read=${root}`);
+  } else {
+    // Node 22.0 to 22.12: repeated grants do not add up (only one comma-separated list works), and a
+    // directory grant covers only the directory itself unless it ends with the `*` wildcard.
+    if (roots.some((root) => root.includes(','))) {
+      throw new SandboxUnavailableError(`Node ${process.version} cannot grant read access to a path that contains a comma; upgrade to Node 22.13 or later`);
+    }
+    args.push(`--allow-fs-read=${roots.map((root) => join(root, '*')).join(',')}`);
   }
   return args;
 }
@@ -150,9 +188,16 @@ export class QuickJsSandbox implements Sandbox {
     // Each string field is bounded in characters; JSON escaping turns one character into at most 6 bytes.
     const maxFrameBytes = 6 * Math.max(limits.maxArgsChars, limits.maxResultChars, limits.maxLogLineChars + 200) + 64 * 1024;
 
+    let execArgv: string[];
+    try {
+      execArgv = childExecArgv(this.#entry, positive(o.childHeapMb, DEFAULTS.childHeapMb));
+    } catch (err) {
+      return Promise.resolve({ ok: false, kind: 'killed', error: { name: 'SandboxUnavailable', message: errorMessage(err) } });
+    }
+
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(process.execPath, [...childExecArgv(this.#entry, positive(o.childHeapMb, DEFAULTS.childHeapMb)), this.#entry], {
+      child = spawn(process.execPath, [...execArgv, this.#entry], {
         env: childEnv(),
         cwd: here,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -166,41 +211,65 @@ export class QuickJsSandbox implements Sandbox {
       child.kill('SIGKILL');
       return Promise.resolve(killedOutcome('the sandbox process has no stdio pipes'));
     }
-    if (child.pid !== undefined) o.onSpawn?.(child.pid);
 
+    let session: ChildSession | undefined;
+    const writer = new BoundedWriter(stdin, {
+      maxPendingBytes: positive(o.maxPendingReplyBytes, DEFAULTS.maxPendingReplyBytes),
+      maxTotalBytes: positive(o.maxReplyBytes, DEFAULTS.maxReplyBytes),
+      onOverflow: (message) => session?.finish({ ok: false, kind: 'oom', error: { name: 'ReplyBufferFull', message } }),
+    });
     const write = (message: ParentMessage): void => {
-      if (!stdin.destroyed) stdin.write(`${JSON.stringify(message)}\n`);
+      writer.write(`${JSON.stringify(message)}\n`);
     };
-    const session = new ChildSession({
+    const active = new ChildSession({
       limits,
       maxFrameBytes,
       hooks: {
-        onCall: (tool, args) => opts.onCall(tool, args),
+        onCall: (tool, args) => {
+          // Never forward a call once the run is stopped, even if the abort event has not been seen yet.
+          if (opts.signal.aborted) {
+            active.kill('the run was stopped');
+            return Promise.resolve({ ok: false, error: { name: 'ToolError', code: 'cancelled', message: 'the run was stopped' } });
+          }
+          return opts.onCall(tool, args);
+        },
         onLog: (level, text) => opts.onLog(level, text),
         send: write,
         kill: () => {
+          writer.close();
           child.kill('SIGKILL');
           stdin.destroy();
         },
       },
     });
+    session = active;
 
-    stdout.on('data', (chunk: Buffer) => session.feed(chunk));
-    stderr.on('data', (chunk: Buffer) => session.stderr(chunk));
+    // Listen for abort before any callback runs, then re-check: an abort during `onSpawn` must stop the run.
+    const onAbort = (): void => active.kill('the run was stopped');
+    opts.signal.addEventListener('abort', onAbort, { once: true });
+    if (child.pid !== undefined) {
+      try {
+        o.onSpawn?.(child.pid);
+      } catch (err) {
+        active.kill(`onSpawn failed: ${errorMessage(err)}`);
+      }
+    }
+    if (opts.signal.aborted) active.kill('the run was stopped before the script started');
+
+    stdout.on('data', (chunk: Buffer) => active.feed(chunk));
+    stderr.on('data', (chunk: Buffer) => active.stderr(chunk));
     stdin.on('error', () => undefined);
-    child.on('error', (err) => session.kill(`sandbox process error: ${errorMessage(err)}`));
-    child.on('close', (exitCode, signal) => session.exited(exitCode, signal));
+    child.on('error', (err) => active.kill(`sandbox process error: ${errorMessage(err)}`));
+    child.on('close', (exitCode, signal) => active.exited(exitCode, signal));
 
     const timer = setTimeout(
-      () => session.finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: `the script did not finish within ${timeoutMs} ms` } }),
+      () => active.finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: `the script did not finish within ${timeoutMs} ms` } }),
       timeoutMs,
     );
-    const onAbort = (): void => session.kill('the run was stopped');
-    opts.signal.addEventListener('abort', onAbort, { once: true });
 
-    write({ type: 'start', code, timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)), limits });
+    if (!active.finished) write({ type: 'start', code, timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)), limits });
 
-    return session.outcome.finally(() => {
+    return active.outcome.finally(() => {
       clearTimeout(timer);
       opts.signal.removeEventListener('abort', onAbort);
     });
