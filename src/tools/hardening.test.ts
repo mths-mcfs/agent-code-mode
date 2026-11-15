@@ -241,7 +241,9 @@ describe.skipIf(IS_WINDOWS)('8. path oracle: accepted iff the real path is insid
       const input = comps.join('/');
       let real: string | null;
       try {
-        // Native realpath resolves components in order, as the kernel does.
+        // The kernel decides whether the path resolves (macOS realpath(3) alone
+        // accepts `file/..`); native realpath then gives where it lands.
+        await fsp.stat(`${ws}/${input}`);
         real = await fsp.realpath(`${ws}/${input}`);
       } catch {
         real = null;
