@@ -150,7 +150,8 @@ describe('Bash file targets', () => {
 });
 
 describe('recursive grep and glob', () => {
-  it('the policy exposes isReadDenied so the tools layer can drop denied files from results', async () => {
+  // MemoryToolRuntime is a POSIX virtual file system.
+  it.skipIf(!posix)('the policy exposes isReadDenied so the tools layer can drop denied files from results', async () => {
     const s = await setup({ permissions: { deny: ['Read(./.env)'] } }, 'bypassPermissions');
     const tools = new MemoryToolRuntime({ root: s.project, files: { '.env': 'SECRET=fixture\n', 'a.txt': 'SECRET mention\n' } });
     const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: s.ctx, policy: s.policy });

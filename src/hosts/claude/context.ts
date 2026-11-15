@@ -1,6 +1,5 @@
 import { constants } from 'node:fs';
-import { randomBytes } from 'node:crypto';
-import { open, rename, rm } from 'node:fs/promises';
+import { open, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { stateDirPath } from '../../core/state-dir.js';
@@ -53,31 +52,35 @@ export class FileHookContextStore implements HookContextStore {
   async lookup(toolUseId: string): Promise<HookContextRecord | undefined> {
     if (!SAFE_TOOL_USE_ID.test(toolUseId)) return undefined;
     const file = path.join(this.#dir, `${toolUseId}.json`);
-    // Claim the record atomically: only the reader whose rename succeeds gets it.
-    const claimed = path.join(this.#dir, `.${toolUseId}.${randomBytes(8).toString('hex')}.claimed`);
+    // Claim the record: exclusive creation (O_EXCL, atomic on every platform)
+    // of a claim file lets exactly one concurrent reader through.
+    const claim = path.join(this.#dir, `.${toolUseId}.claim`);
+    let claimHandle;
     try {
-      await rename(file, claimed);
+      claimHandle = await open(claim, 'wx', 0o600);
     } catch {
       return undefined;
     }
-    let text: string;
+    let text: string | undefined;
     try {
-      // O_NOFOLLOW: a symlink planted under the name is not followed (rename moves the link itself).
+      // O_NOFOLLOW: a symlink planted under the name is not followed.
       const flags = constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
-      const handle = await open(claimed, flags);
+      const handle = await open(file, flags);
       try {
         const st = await handle.stat();
-        if (!st.isFile() || st.size > MAX_CONTEXT_FILE_BYTES) return undefined;
-        text = await handle.readFile('utf8');
+        if (st.isFile() && st.size <= MAX_CONTEXT_FILE_BYTES) text = await handle.readFile('utf8');
       } finally {
         await handle.close();
       }
     } catch {
-      return undefined;
+      text = undefined;
     } finally {
-      // Read once: the record is consumed whatever it held.
-      await rm(claimed, { force: true }).catch(() => undefined);
+      // Read once: the record is consumed whatever it held, then the claim is released.
+      await rm(file, { force: true }).catch(() => undefined);
+      await claimHandle.close().catch(() => undefined);
+      await rm(claim, { force: true }).catch(() => undefined);
     }
+    if (text === undefined) return undefined;
     let json: unknown;
     try {
       json = JSON.parse(text);
