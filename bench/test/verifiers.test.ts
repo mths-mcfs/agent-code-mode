@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -67,6 +67,54 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T4.verify({ ...ctx, answer: `ANSWER: ${[top[1], top[0], top[2]].join(', ')}` })).pass).toBe(false);
     expect((await TASKS.T4.verify({ ...ctx, answer: `ANSWER: ${top.join(', ')}` })).pass).toBe(true);
     expect((await TASKS.T1.verify({ ...ctx, answer: `ANSWER: ${ws.fixture.facts.retryLimit + 5}` })).pass).toBe(false);
+  });
+
+  it('read-only tasks fail when the workspace changed, even with the right answer', async () => {
+    for (const id of ['T1', 'T3', 'T4'] as const) {
+      const ws = await workspace(id);
+      const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
+      const ctx = { workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial };
+      expect((await TASKS[id].verify(ctx)).pass).toBe(true);
+      await writeFile(path.join(ws.dir, 'notes.txt'), 'scratch\n');
+      expect((await TASKS[id].verify(ctx)).pass).toBe(false);
+      await rm(path.join(ws.dir, 'notes.txt'));
+      await writeFile(path.join(ws.dir, 'config', 'app.json'), '{}\n');
+      const result = await TASKS[id].verify(ctx);
+      expect(result.pass).toBe(false);
+      expect(result.details.join('\n')).toContain('modified config/app.json');
+    }
+  });
+
+  it('edit tasks fail when a file outside the task changed or was deleted', async () => {
+    for (const id of ['T2', 'T5', 'T6', 'T7', 'T8'] as const) {
+      const ws = await workspace(id);
+      const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
+      await writeFile(path.join(ws.dir, 'README.md'), 'rewritten\n');
+      const result = await TASKS[id].verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial });
+      expect(result.pass, id).toBe(false);
+      expect(result.details.join('\n')).toContain('changed outside the task: modified README.md');
+    }
+    const ws = await workspace('T5');
+    const answer = await TASKS.T5.solution(ws.dir, ws.fixture.facts);
+    await rm(path.join(ws.dir, 'config', 'regions.json'));
+    expect((await TASKS.T5.verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial })).pass).toBe(false);
+  });
+
+  it('T6 requires 2-space indented JSON, in any key order', async () => {
+    const ws = await workspace('T6');
+    const answer = await TASKS.T6.solution(ws.dir, ws.fixture.facts);
+    const ctx = { workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial };
+    const first = ws.fixture.facts.paidOrderFiles[0] ?? '';
+    const file = path.join(ws.dir, ...first.split('/'));
+    const order: Record<string, unknown> = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, `${JSON.stringify({ itemCount: order['itemCount'], ...order }, null, 2)}\n`);
+    expect((await TASKS.T6.verify(ctx)).pass).toBe(true);
+    await writeFile(file, JSON.stringify(order));
+    const minified = await TASKS.T6.verify(ctx);
+    expect(minified.pass).toBe(false);
+    expect(minified.details.join('\n')).toContain(`not 2-space indented JSON: ${first}`);
+    await writeFile(file, `${JSON.stringify(order, null, 4)}\n`);
+    expect((await TASKS.T6.verify(ctx)).pass).toBe(false);
   });
 
   it('workspaces are reproducible: same tree, same initial commit', async () => {

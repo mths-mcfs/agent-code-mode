@@ -21,6 +21,27 @@ export interface ProcessOutcome {
   readonly wallMs: number;
 }
 
+const liveChildren = new Set<number>();
+
+function killGroup(pid: number): void {
+  try {
+    if (process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
+    else process.kill(pid, 'SIGKILL');
+  } catch {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/** Kills every host process (and its process group) still running. Used by the signal handlers. */
+export function killLiveChildren(): void {
+  for (const pid of [...liveChildren]) killGroup(pid);
+  liveChildren.clear();
+}
+
 /** Runs a process with a wall timeout; on timeout kills its whole process group. */
 export function runProcess(spec: ProcessSpec): Promise<ProcessOutcome> {
   return new Promise((resolve, reject) => {
@@ -33,6 +54,7 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessOutcome> {
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
+    if (child.pid !== undefined) liveChildren.add(child.pid);
     let timedOut = false;
     const kill = (): void => {
       timedOut = true;
@@ -52,6 +74,7 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessOutcome> {
     });
     child.on('close', (exitCode, signal) => {
       clearTimeout(timer);
+      if (child.pid !== undefined) liveChildren.delete(child.pid);
       const wallMs = Math.round(performance.now() - started);
       let pending = 2;
       const done = (): void => {

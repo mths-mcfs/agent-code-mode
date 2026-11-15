@@ -39,17 +39,38 @@ const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/\bxox[abpr]-[A-Za-z0-9-]{10,}/g, '<token>'],
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<token>'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g, '$1 <token>'],
-  [/("(?:access_token|refresh_token|id_token|api_key|apiKey|token|password|secret)"\s*:\s*")[^"]+(")/gi, '$1<token>$2'],
+  // "key": "value" pairs, also inside JSON text that was escaped one or more times (\" or \\\").
+  [/(\\*"(?:api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|authorization|password|passwd|secret|client[_-]?secret|cookie|private[_-]?key)\\*"\s*:\s*(\\*)")(?:(?!\2").)*(\2")/gi, '$1<redacted>$3'],
+  // key = value / key: value in TOML, env files and headers.
+  [/\b((?:[A-Z0-9]+_)*(?:API_?KEY|ACCESS_TOKEN|REFRESH_TOKEN|AUTH_TOKEN|SECRET|PASSWORD|AUTHORIZATION)|api_?key|access_token|refresh_token|auth_token|secret|password|authorization)(\s*[=:]\s*)(?!<redacted>)("?)[^\s"',;]+/gi, '$1$2$3<redacted>'],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
 ];
 
-/**
- * Removes what identifies the machine or the person from a transcript: known absolute paths
- * (workspace, repo, temp homes), the home directory, the username, the hostname, emails and
- * token-shaped strings. Tool names, workspace-relative arguments and usage numbers stay.
- */
-export function sanitize(text: string, ctx: SanitizeContext): string {
-  let out = text;
+/** Keys whose string values are always secrets or account identifiers, whatever they look like. */
+const SECRET_KEYS = new Set([
+  'apikey', 'xapikey', 'token', 'accesstoken', 'refreshtoken', 'idtoken', 'authtoken', 'sessiontoken', 'bearertoken',
+  'authorization', 'auth', 'password', 'passwd', 'secret', 'clientsecret', 'cookie', 'setcookie', 'credential', 'credentials',
+  'privatekey', 'accountid', 'creatoraccountid', 'creatoruserid', 'userid', 'email', 'useremail',
+]);
+
+export function isSecretKey(key: string): boolean {
+  const k = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return SECRET_KEYS.has(k) || /(apikey|secret|password|accesstoken|refreshtoken|authtoken)$/.test(k);
+}
+
+/** Decodes %XX runs (URL-encoded paths), leaving malformed runs as they are. */
+function urlDecode(text: string): string {
+  return text.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
+
+function sanitizeText(text: string, ctx: SanitizeContext): string {
+  let out = urlDecode(text);
   const labeled = [...ctx.paths, ...(ctx.home.length > 1 ? [{ path: ctx.home, label: '~' }] : [])]
     .flatMap((p) => pathForms(p.path).map((form) => ({ form, label: p.label })))
     .sort((a, b) => b.form.length - a.form.length);
@@ -58,9 +79,55 @@ export function sanitize(text: string, ctx: SanitizeContext): string {
   // Generic home-directory paths of any user (e.g. in error messages).
   out = out.replace(/\/(home|Users)\/[^/\s"'\\]+/g, '/$1/<user>');
   out = out.replace(/-(home|Users)-[^-\s"'/\\]+/g, '-$1-<user>');
-  out = out.replace(/([A-Za-z]:\\\\?Users\\\\?)[^\\\s"']+/g, '$1<user>');
+  out = out.replace(/([A-Za-z]:(?:\\\\?|\/)Users(?:\\\\?|\/))[^\\/\s"']+/g, '$1<user>');
   for (const [word, label] of [[ctx.hostname, '<host>'], [ctx.username, '<user>']] as const) {
     if (word.length >= 3) out = out.replace(new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(word)}(?![A-Za-z0-9_])`, 'g'), label);
   }
   return out;
+}
+
+function parseStructured(text: string): unknown {
+  const t = text.trim();
+  if (!(t.startsWith('{') || t.startsWith('['))) return undefined;
+  try {
+    const value: unknown = JSON.parse(t);
+    return value !== null && typeof value === 'object' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeValue(value: unknown, ctx: SanitizeContext, depth: number): unknown {
+  if (typeof value === 'string') {
+    // A string that is itself JSON (tool arguments, MCP results) is decoded and sanitized as a value.
+    const inner = depth < 8 ? parseStructured(value) : undefined;
+    return inner === undefined ? sanitizeText(value, ctx) : JSON.stringify(sanitizeValue(inner, ctx, depth + 1));
+  }
+  if (Array.isArray(value)) return value.map((v) => sanitizeValue(v, ctx, depth + 1));
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[sanitizeText(k, ctx)] = isSecretKey(k) && v !== null && typeof v !== 'number' && typeof v !== 'boolean' ? '<redacted>' : sanitizeValue(v, ctx, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Removes what identifies the machine or the person from a transcript, after decoding it: each line
+ * that is JSON is parsed (recursively, strings holding JSON included) and every string is sanitized;
+ * values under secret-looking keys are redacted whatever they contain. Other lines are URL-decoded and
+ * sanitized as text: known absolute paths (workspace, repo, temp homes), the home directory, the
+ * username, the hostname, emails and token-shaped strings. Tool names, workspace-relative arguments and
+ * usage numbers stay.
+ */
+export function sanitize(text: string, ctx: SanitizeContext): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const value = parseStructured(line);
+      return value === undefined ? sanitizeText(line, ctx) : JSON.stringify(sanitizeValue(value, ctx, 0));
+    })
+    .join('\n');
 }

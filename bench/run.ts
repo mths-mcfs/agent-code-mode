@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
 import { claudeArgs, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
 import { catalogForArm, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
+import { authWasReplaced, createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
 import { ARM_LABELS, checkArm, checkSurface, HOST_ARMS, RunRecordSchema, type ArmId, type ParsedRun, type RunRecord } from './lib/record.ts';
@@ -127,8 +128,9 @@ export function runId(p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>): str
   return `${p.host}-${p.task}-${p.arm}-r${p.run}`;
 }
 
-export function runResultDir(resultsDir: string, p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>): string {
-  return path.join(resultsDir, p.host, p.task, p.arm, String(p.run));
+/** Results of a run live under its config hash, so a run made with other settings is never taken for this one. */
+export function runResultDir(resultsDir: string, p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>, configHash: string): string {
+  return path.join(resultsDir, p.host, p.task, p.arm, configHash, String(p.run));
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -177,20 +179,83 @@ function sourceCodexHome(): string {
   return env !== undefined && env !== '' ? env : path.join(os.homedir(), '.codex');
 }
 
-/** Creates a temporary CODEX_HOME holding only a copy of auth.json (mode 0600). */
-async function makeCodexHome(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await copyFile(path.join(sourceCodexHome(), 'auth.json'), path.join(dir, 'auth.json'));
-  if (process.platform !== 'win32') await chmod(path.join(dir, 'auth.json'), 0o600);
-}
-
-interface Context {
+export interface Context {
   readonly opts: Options;
   readonly date: string;
   readonly resultsDir: string;
   readonly pricing: Pricing;
   readonly serverEntry: string;
   readonly rawCatalog: string | null;
+  /** Order seed of this invocation. */
+  readonly seed: number;
+  readonly versions: Readonly<Record<string, string | null>>;
+  readonly git: { readonly commit: string | null; readonly dirty: boolean | null };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/** What the host is actually given for an arm (args, settings, config), with machine paths replaced by placeholders. */
+function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'>): string {
+  const task = TASKS[p.task];
+  const fixture = generateFixture(ctx.opts.fixtureSeed);
+  let def: unknown;
+  if (p.host === 'claude') {
+    def = {
+      args: claudeArgs({ arm: p.arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
+      settings: claudeProjectSettings(task, fixture),
+      mcp: claudeMcpConfig(p.arm, '<server>'),
+    };
+  } else {
+    const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
+    def = {
+      args: codexArgs('<ws>', task.protectedHook),
+      config: codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome: '<home>', catalogFile: catalog === null ? null : '<catalog>', serverEntry: '<server>', nodePath: 'node' }),
+      hooks: task.protectedHook ? codexHooksJson(CODEX_HOOK_MATCHER, hookCommand(fixture.facts.protectedFile)) : null,
+      catalogSha256: catalog === null ? null : sha256(catalog),
+    };
+  }
+  return stableJson(def).split(REPO_ROOT).join('<repo>').split(JSON.stringify(process.execPath).slice(1, -1)).join('node');
+}
+
+/** Everything a run's numbers depend on. Two runs are comparable only when this is equal. */
+export function runConfig(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'>): Record<string, unknown> {
+  const fixture = generateFixture(ctx.opts.fixtureSeed);
+  return {
+    host: p.host,
+    task: p.task,
+    arm: p.arm,
+    hostVersion: ctx.versions[p.host] ?? null,
+    model: p.host === 'claude' ? ctx.opts.claudeModel : ctx.opts.codexModel,
+    effort: p.host === 'claude' ? ctx.opts.claudeEffort : ctx.opts.codexEffort,
+    maxTurns: p.host === 'claude' ? ctx.opts.maxTurns : null,
+    timeoutMin: ctx.opts.timeoutMin,
+    seed: ctx.seed,
+    fixtureSeed: ctx.opts.fixtureSeed,
+    fixtureSha256: treeHash(fixture.files),
+    promptSha256: sha256(TASKS[p.task].prompt(fixture.facts)),
+    armDefinitionSha256: sha256(armDefinition(ctx, p)),
+    agentCodeModeCommit: ctx.git.commit,
+    agentCodeModeDirty: ctx.git.dirty,
+    dryRun: ctx.opts.dryRun,
+  };
+}
+
+export function configHash(config: Record<string, unknown>): string {
+  return sha256(stableJson(config)).slice(0, 12);
 }
 
 interface HostOutput {
@@ -237,6 +302,7 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
   const codexHome = path.join(runWork, 'codex-home');
   await mkdir(codexHome, { recursive: true, mode: 0o700 });
   try {
+    // The auth link is placed last, right before the host runs, and the home is registered for cleanup.
     const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
     const catalogFile = catalog === null ? null : path.join(codexHome, 'catalog.json');
     if (catalogFile !== null && catalog !== null) await writeFile(catalogFile, catalog);
@@ -248,7 +314,8 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
     const configs: Record<string, string> = { 'codex-config.toml': config, 'command.txt': `codex ${args.join(' ')}\n` };
     if (hooks !== null) configs['codex-hooks.json'] = hooks;
     if (ctx.opts.dryRun) return { ...(await cannedTranscript('codex', p.arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
-    await makeCodexHome(codexHome);
+    const authMode = createCodexHome(codexHome, sourceCodexHome());
+    configs['auth.txt'] = `auth.json ${authMode === 'symlink' ? 'linked to the user auth file (no copy)' : 'copied (symlinks unavailable)'}\n`;
     let availableTools: string[] | null = null;
     try {
       const promptInput = execFileSync('codex', ['debug', 'prompt-input'], { cwd: ws, encoding: 'utf8', env: hostEnv({ CODEX_HOME: codexHome }), timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
@@ -263,10 +330,11 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
     const rollouts = await findFiles(path.join(codexHome, 'sessions'), '.jsonl');
     let requests = '';
     for (const r of rollouts) requests += extractCodexRequests(await readFile(r, 'utf8'));
+    if (authWasReplaced(codexHome, authMode)) configs['auth.txt'] += 'Codex replaced the linked auth.json with a file during the run; it was deleted with the temp home.\n';
     return { stdout: await readFile(stdoutFile, 'utf8'), stderr: await readFile(stderrFile, 'utf8'), requests: rollouts.length > 0 ? requests : null, ...outcome, configs, availableTools };
   } finally {
-    // The temporary home holds a copy of the user's auth file: always delete it.
-    await rm(codexHome, { recursive: true, force: true });
+    // Signal handlers and the startup sweep cover the cases where this never runs.
+    removeCodexHome(codexHome);
   }
 }
 
@@ -320,7 +388,9 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     invalidReasons.push(...arm.reasons);
   }
 
-  const outDir = runResultDir(ctx.resultsDir, p);
+  const config = runConfig(ctx, p);
+  const hash = configHash(config);
+  const outDir = runResultDir(ctx.resultsDir, p, hash);
   await mkdir(outDir, { recursive: true });
   const sctx: SanitizeContext = defaultSanitizeContext([
     { path: ws, label: '<workspace>' },
@@ -344,6 +414,8 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
   const record: RunRecord = RunRecordSchema.parse({
     schema: 1,
     id,
+    configHash: hash,
+    config,
     host: p.host,
     arm: p.arm,
     armLabel: ARM_LABELS[p.host][p.arm] ?? p.arm,
@@ -379,6 +451,21 @@ function gitInfo(): { commit: string | null; dirty: boolean | null } {
   return { commit, dirty: status === null ? null : status !== '' };
 }
 
+/** Platform, arch and kernel major.minor only: the full release string can name the distro or build. */
+export function osLabel(platform: string = os.platform(), release: string = os.release(), arch: string = os.arch()): string {
+  const m = /^(\d+)\.(\d+)/.exec(release);
+  return `${platform} ${m ? `${m[1]}.${m[2]}` : 'unknown'} ${arch}`;
+}
+
+async function lastSeed(resultsDir: string): Promise<number | undefined> {
+  try {
+    const env = z.object({ invocations: z.array(z.object({ seed: z.number().int().nonnegative() }).passthrough()) }).safeParse(JSON.parse(await readFile(path.join(resultsDir, 'env.json'), 'utf8')));
+    return env.success ? env.data.invocations.at(-1)?.seed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function appendEnvironment(resultsDir: string, invocation: Record<string, unknown>): Promise<void> {
   const file = path.join(resultsDir, 'env.json');
   let invocations: unknown[] = [];
@@ -410,12 +497,15 @@ function line(r: RunRecord): string {
 export async function main(argv: readonly string[]): Promise<number> {
   const opts = parseOptions(argv);
   const date = opts.date ?? new Date().toISOString().slice(0, 10);
-  const seed = opts.seed ?? Math.floor(Math.random() * 2 ** 31);
   const workDir = path.resolve(opts.workDir);
+  installCleanupHandlers();
+  for (const stale of sweepStaleHomes(workDir)) process.stderr.write(`removed a temp CODEX_HOME left by an interrupted run: ${path.relative(workDir, stale)}\n`);
   const resultsRoot = opts.out !== undefined ? path.resolve(opts.out) : opts.dryRun ? path.join(workDir, 'dry-run', 'results') : path.join(BENCH_DIR, 'results');
   const resultsDir = path.join(resultsRoot, date);
   // A dry run always starts clean (its results are throwaway, under the work dir).
   if (opts.dryRun && opts.out === undefined) await rm(resultsDir, { recursive: true, force: true });
+  // Without --seed, a resume reuses the seed of the last invocation for this date (it is part of the config hash).
+  const seed = opts.seed ?? (await lastSeed(resultsDir)) ?? Math.floor(Math.random() * 2 ** 31);
   const hosts: HostId[] = opts.host === 'all' ? ['claude', 'codex'] : [opts.host];
   const tasks: TaskId[] = opts.tasks ?? [...TASK_IDS];
   const plan = planRuns(hosts, tasks, opts.arms, opts.runs, seed);
@@ -439,12 +529,12 @@ export async function main(argv: readonly string[]): Promise<number> {
     if (opts.dryRun) {
       rawCatalog = await readFile(path.join(PARSER_FIXTURES, 'codex-catalog.json'), 'utf8');
     } else {
-      const home = path.join(workDir, 'codex-catalog-home');
-      await makeCodexHome(home);
+      const home = path.join(workDir, `codex-catalog-home-${process.pid}`);
+      createCodexHome(home, sourceCodexHome());
       try {
         rawCatalog = execFileSync('codex', ['debug', 'models'], { encoding: 'utf8', env: hostEnv({ CODEX_HOME: home }), timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
       } finally {
-        await rm(home, { recursive: true, force: true });
+        removeCodexHome(home);
       }
     }
     if (!catalogHasModel(rawCatalog, opts.codexModel)) {
@@ -479,19 +569,20 @@ export async function main(argv: readonly string[]): Promise<number> {
           : { version: versions['codex'], model: opts.codexModel, effort: opts.codexEffort, maxTurns: null, catalogSha256: rawCatalog === null ? null : sha256(rawCatalog) },
       ]),
     ),
-    os: `${os.platform()} ${os.release()} ${os.arch()}`,
+    os: osLabel(),
     node: process.version,
     agentCodeModeCommit: git.commit,
     agentCodeModeDirty: git.dirty,
   });
 
-  const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog };
+  const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog, seed, versions, git };
   process.stdout.write(`${opts.dryRun ? 'DRY RUN ' : ''}${plan.length} runs, seed ${seed}, results in ${path.relative(process.cwd(), resultsDir) || resultsDir}\n`);
   let failures = 0;
   for (const p of plan) {
-    const recordFile = path.join(runResultDir(resultsDir, p), 'record.json');
+    const hash = configHash(runConfig(ctx, p));
+    const recordFile = path.join(runResultDir(resultsDir, p, hash), 'record.json');
     if (!opts.force && (await exists(recordFile))) {
-      process.stdout.write(`skip ${runId(p)} (already recorded)\n`);
+      process.stdout.write(`skip ${runId(p)} (already recorded with config ${hash})\n`);
       continue;
     }
     try {
@@ -504,10 +595,6 @@ export async function main(argv: readonly string[]): Promise<number> {
   const { markdown } = await writeReport(resultsDir);
   process.stdout.write(`\n${markdown}`);
   return failures === 0 ? 0 : 1;
-}
-
-function sha256(text: string): string {
-  return createHash('sha256').update(text).digest('hex');
 }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === import.meta.filename) {

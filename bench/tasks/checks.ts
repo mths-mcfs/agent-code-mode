@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { VerifyResult } from './types.ts';
 
@@ -80,4 +80,59 @@ export function getFile(tree: ReadonlyMap<string, string>, file: string): string
   const text = tree.get(file);
   if (text === undefined) throw new Error(`fixture has no ${file}`);
   return text;
+}
+
+export interface TreeChanges {
+  readonly modified: readonly string[];
+  readonly deleted: readonly string[];
+  readonly added: readonly string[];
+}
+
+async function listFiles(root: string, rel = ''): Promise<string[]> {
+  const out: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(path.join(root, ...rel.split('/').filter(Boolean)), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const child = rel === '' ? e.name : `${rel}/${e.name}`;
+    if (e.isDirectory()) {
+      if (child !== '.git') out.push(...(await listFiles(root, child)));
+    } else {
+      out.push(child);
+    }
+  }
+  return out;
+}
+
+/** Every difference between the workspace and its initial tree (`.git` excluded), like `git status --untracked-files=all`. */
+export async function treeChanges(workspace: string, initial: ReadonlyMap<string, string>): Promise<TreeChanges> {
+  const now = new Set(await listFiles(workspace));
+  const modified: string[] = [];
+  const deleted: string[] = [];
+  for (const [file, text] of initial) {
+    if (!now.has(file)) deleted.push(file);
+    else if ((await readWorkspaceFile(workspace, file)) !== text) modified.push(file);
+  }
+  const added = [...now].filter((f) => !initial.has(f)).sort();
+  return { modified: modified.sort(), deleted: deleted.sort(), added };
+}
+
+/**
+ * Checks that nothing outside `allowed` changed. Read-only tasks pass no `allowed` and also forbid new
+ * files (the workspace must equal its initial commit); edit tasks may leave new files (listed, not failed)
+ * but may not modify or delete any file they were not asked to touch.
+ */
+export async function checkScope(checks: Checks, workspace: string, initial: ReadonlyMap<string, string>, allowed?: (file: string) => boolean): Promise<void> {
+  const c = await treeChanges(workspace, initial);
+  if (allowed === undefined) {
+    const all = [...c.modified.map((f) => `modified ${f}`), ...c.deleted.map((f) => `deleted ${f}`), ...c.added.map((f) => `added ${f}`)];
+    checks.check(all.length === 0, all.length === 0 ? 'workspace unchanged (read-only task)' : `read-only task changed the workspace: ${all.join(', ')}`);
+    return;
+  }
+  const outside = [...c.modified.filter((f) => !allowed(f)).map((f) => `modified ${f}`), ...c.deleted.map((f) => `deleted ${f}`)];
+  checks.check(outside.length === 0, outside.length === 0 ? 'no file outside the task changed' : `changed outside the task: ${outside.join(', ')}`);
+  if (c.added.length > 0) checks.check(true, `new files (allowed): ${c.added.join(', ')}`);
 }

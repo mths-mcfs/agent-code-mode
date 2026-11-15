@@ -60,6 +60,9 @@ export type ParsedRun = z.infer<typeof ParsedRunSchema>;
 export const RunRecordSchema = z.object({
   schema: z.literal(1),
   id: z.string(),
+  /** Hash of `config`: runs are pooled and resumed only within one config. */
+  configHash: z.string().regex(/^[0-9a-f]{12}$/),
+  config: z.record(z.string(), z.unknown()),
   host: z.enum(['claude', 'codex']),
   arm: z.enum(['A', 'B', 'C']),
   armLabel: z.string(),
@@ -79,7 +82,7 @@ export const RunRecordSchema = z.object({
   costUsd: z.number().nonnegative().nullable(),
   costSource: z.enum(['host', 'pricing.json', 'none']),
   verify: z.object({ pass: z.boolean(), details: z.array(z.string()) }),
-  /** The arm used agent-code-mode but the model also used native file/shell tools. */
+  /** An agent-code-mode arm where the model also made native file/shell tool calls. In the strict arms this also makes the run invalid. */
   fallback: z.boolean(),
   /** False when the observed tool usage does not match the arm label, or the run did not complete. */
   valid: z.boolean(),
@@ -101,6 +104,8 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
   if (acm) {
     if (calls.run === 0) reasons.push('agent-code-mode arm made no run call');
     if (calls.codeMode > 0) reasons.push('agent-code-mode arm used Codex code mode');
+    // Both agent-code-mode arms are strict: a native file/shell call means the arm did not run as labeled.
+    if (calls.native > 0) reasons.push(`strict agent-code-mode arm made ${calls.native} native file/shell tool call(s)`);
     return { fallback: calls.native > 0, reasons };
   }
   if (calls.run > 0) reasons.push('arm made agent-code-mode run calls');
