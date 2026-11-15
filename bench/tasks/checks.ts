@@ -48,14 +48,15 @@ export interface NodeTestRun {
 /** Runs `node --test` in the workspace (same Node as the harness), with a timeout. */
 export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--test'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
+    const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
     let output = '';
     child.stdout.on('data', (d: Buffer) => (output += d.toString('utf8')));
     child.stderr.on('data', (d: Buffer) => (output += d.toString('utf8')));
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.on('close', (code) => {
       clearTimeout(timer);
-      const num = (label: string): number => Number(new RegExp(`^ℹ ${label} (\\d+)`, 'm').exec(output)?.[1] ?? '0');
+      // Spec reporter prints `ℹ pass 13`, TAP prints `# pass 13` (Node 22 without a TTY).
+      const num = (label: string): number => Number(new RegExp(`^(?:ℹ|#) ${label} (\\d+)`, 'm').exec(output)?.[1] ?? '0');
       resolve({ ok: code === 0, pass: num('pass'), fail: num('fail'), output: output.slice(-4000) });
     });
   });
