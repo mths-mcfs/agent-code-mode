@@ -22,6 +22,8 @@ import type {
 export const DEFAULT_MEMORY_BYTES = 256 * 1024 * 1024;
 /** How long to wait for the sandbox to return after it was told to stop. */
 export const DEFAULT_STOP_GRACE_MS = 2_000;
+/** Upper bound of a transaction rollback. */
+export const DEFAULT_ROLLBACK_TIMEOUT_MS = 30_000;
 const MAX_LOG_LINES = 5_000;
 const MAX_LOG_CHARS = 1_000_000;
 
@@ -35,8 +37,66 @@ export interface RunDeps<P = unknown> {
   /** Server cap of the timeout (lower for hosts with short tool timeouts). Never above `MAX_RUN_TIMEOUT_MS`. */
   readonly maxTimeoutMs?: number;
   readonly memoryBytes?: number;
-  /** Grace after a stop before the sandbox is considered killed. */
+  /** Grace after a stop before the sandbox, in-flight calls and hooks are abandoned. */
   readonly stopGraceMs?: number;
+  /** Upper bound of a transaction rollback. */
+  readonly rollbackTimeoutMs?: number;
+}
+
+type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
+
+/**
+ * Awaits adapter or runtime code without letting it hold the run hostage:
+ * resolves when `work` settles, when `signal` aborts, or after `ms`.
+ * A rejection of `work` is rethrown.
+ */
+function bounded<T>(work: () => Promise<T>, opts: { signal?: AbortSignal; ms?: number }): Promise<Bounded<T>> {
+  return new Promise((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined;
+    const cleanup = (): void => {
+      if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      cleanup();
+      resolve({ done: false, why: 'aborted' });
+    };
+    if (opts.signal?.aborted) return resolve({ done: false, why: 'aborted' });
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts.ms !== undefined) {
+      timer = setTimeout(() => {
+        cleanup();
+        resolve({ done: false, why: 'timeout' });
+      }, Math.max(0, opts.ms));
+    }
+    let pending: Promise<T>;
+    try {
+      pending = Promise.resolve(work());
+    } catch (err) {
+      pending = Promise.reject(err);
+    }
+    pending.then(
+      (value) => {
+        cleanup();
+        resolve({ done: true, value });
+      },
+      (err: unknown) => {
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
+
+async function rollbackBounded(tx: Transaction, ms: number, warnings: string[]): Promise<RollbackReport | undefined> {
+  try {
+    const r = await bounded(() => tx.rollback(), { ms });
+    if (r.done) return r.value;
+    warnings.push(`rollback did not finish within ${ms} ms; some files may not be restored.`);
+  } catch (err) {
+    warnings.push(`rollback failed: ${errorMessage(err)}`);
+  }
+  return undefined;
 }
 
 /** Applies defaults and clamps the timeout to `[1, min(maxTimeoutMs, MAX_RUN_TIMEOUT_MS)]`. */
@@ -145,11 +205,15 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
   deps.signal?.addEventListener('abort', onExternalAbort, { once: true });
   if (deps.signal?.aborted) stop('cancelled');
 
-  let timer: NodeJS.Timeout | undefined;
+  const rollbackMs = deps.rollbackTimeoutMs ?? DEFAULT_ROLLBACK_TIMEOUT_MS;
+  // Backup deadline for the whole run, policy loading included. The sandbox
+  // enforces `timeoutMs` itself; this fires only if something does not return.
+  let timer: NodeJS.Timeout | undefined = setTimeout(() => stop('timeout'), timeoutMs + graceMs);
   try {
     let policy: PolicySnapshot<P> | PolicyLoadError;
     try {
-      policy = await deps.adapter.loadPolicy(deps.ctx);
+      const loaded = await bounded(() => deps.adapter.loadPolicy(deps.ctx), { signal: controller.signal });
+      policy = loaded.done ? loaded.value : { error: 'the run stopped while the host policy was loading' };
     } catch (err) {
       policy = { error: errorMessage(err) };
     }
@@ -164,9 +228,6 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     });
     const active = dispatcher;
     if (stopReason !== undefined) void active.stop(stopReason);
-
-    // Backup timer: the sandbox enforces `timeoutMs` itself; this fires only if it does not.
-    timer = setTimeout(() => stop('timeout'), timeoutMs + graceMs);
 
     let outcome: SandboxOutcome;
     if (stopReason !== undefined) {
@@ -189,18 +250,14 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     clearTimeout(timer);
     timer = undefined;
 
-    // No call may start after the script ended; wait for in-flight ones.
-    await active.stop(stopReason ?? 'finished');
+    // No call may start after the script ended; wait (bounded) for in-flight ones.
+    await active.stop(stopReason ?? 'finished', graceMs);
 
     const error = runError(stopReason, outcome, denied, timeoutMs);
     const warnings = [...active.warnings];
     let rolledBack: RollbackReport | undefined;
     if (tx && error) {
-      try {
-        rolledBack = await tx.rollback();
-      } catch (err) {
-        warnings.push(`rollback failed: ${errorMessage(err)}`);
-      }
+      rolledBack = await rollbackBounded(tx, rollbackMs, warnings);
       if (active.bashCommits > 0) {
         warnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
       }
@@ -217,16 +274,9 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     if (error) return { ok: false, error, ...base };
     return { ok: true, result: outcome.ok ? (outcome.value ?? null) : null, ...base };
   } catch (err) {
-    if (dispatcher) await dispatcher.stop(stopReason ?? 'finished');
+    if (dispatcher) await dispatcher.stop(stopReason ?? 'finished', graceMs);
     const warnings = dispatcher ? [...dispatcher.warnings] : [];
-    let rolledBack: RollbackReport | undefined;
-    if (tx) {
-      try {
-        rolledBack = await tx.rollback();
-      } catch (rollbackErr) {
-        warnings.push(`rollback failed: ${errorMessage(rollbackErr)}`);
-      }
-    }
+    const rolledBack = tx ? await rollbackBounded(tx, rollbackMs, warnings) : undefined;
     return {
       ok: false,
       error: { kind: 'internal', name: 'InternalError', message: errorMessage(err) },
@@ -241,11 +291,9 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     if (timer) clearTimeout(timer);
     deps.signal?.removeEventListener('abort', onExternalAbort);
     if (tx) {
-      try {
-        await tx.dispose();
-      } catch {
-        // Disposing only releases the journal.
-      }
+      const journal = tx;
+      // Disposing only releases the journal; do not let it hold the result.
+      await bounded(() => journal.dispose(), { ms: graceMs }).catch(() => undefined);
     }
   }
 }
