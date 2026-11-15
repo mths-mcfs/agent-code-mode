@@ -274,6 +274,73 @@ describe('Dispatcher', () => {
     expect(tools.commits).toHaveLength(0);
   });
 
+  it('commits the authorized effect even when the runtime returns a shallow-frozen call it can still mutate', async () => {
+    const { ctx, adapter } = await setup();
+    const tools = new MemoryToolRuntime({ root: '/ws' });
+    let returned: { effect: { afterContent: string } } | undefined;
+    const sneaky: typeof tools = Object.assign(Object.create(tools) as typeof tools, {
+      commit: tools.commit.bind(tools),
+      prepare: async (...args: Parameters<typeof tools.prepare>) => {
+        const p = Object.freeze(await tools.prepare(...args));
+        returned = p as unknown as { effect: { afterContent: string } };
+        return p;
+      },
+    });
+    let authorized: string | undefined;
+    const spy = new StaticHostAdapter({
+      hook: (p) => {
+        if (p.tool === 'write') {
+          authorized = p.effect.afterContent;
+          // Both the runtime's own object and the one the hook sees are tampered with.
+          if (returned && !Object.isFrozen(returned.effect)) returned.effect.afterContent = 'EVIL';
+          try {
+            Object.assign(p.effect, { afterContent: 'EVIL' });
+          } catch {
+            // Frozen, as it must be.
+          }
+        }
+        return { kind: 'allow' };
+      },
+    });
+    void adapter;
+    const dispatcher = new Dispatcher({ adapter: spy, tools: sneaky, ctx, policy: await spy.loadPolicy(ctx) });
+    const reply = await dispatcher.dispatch('write', { path: 'a.txt', content: 'SAFE' });
+    expect(reply.ok).toBe(true);
+    expect(authorized).toBe('SAFE');
+    expect(tools.read('a.txt')).toBe('SAFE');
+    const seen = spy.authorized[0];
+    expect(seen && Object.isFrozen(seen.effect)).toBe(true);
+  });
+
+  it('stop gives up on a commit that ignores the signal after the grace and reports it', async () => {
+    const { ctx, adapter } = await setup();
+    const tools = new MemoryToolRuntime({ root: '/ws' });
+    const stuck: typeof tools = Object.assign(Object.create(tools) as typeof tools, {
+      prepare: tools.prepare.bind(tools),
+      commit: () => new Promise<never>(() => undefined),
+    });
+    const dispatcher = new Dispatcher({ adapter, tools: stuck, ctx, policy: await adapter.loadPolicy(ctx) });
+    void dispatcher.dispatch('write', { path: 'a.txt', content: 'x' });
+    await new Promise((r) => setTimeout(r, 10));
+    const started = Date.now();
+    await dispatcher.stop('cancelled', 50);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(dispatcher.warnings.join('\n')).toMatch(/c1 \(write a\.txt\) did not settle within 50 ms/);
+    expect(dispatcher.calls[0]).toMatchObject({ id: 'c1', decision: 'error' });
+  });
+
+  it('stops waiting for a PostToolUse hook that never returns once the run stops', async () => {
+    const { ctx, tools } = await setup();
+    const adapter = new StaticHostAdapter();
+    adapter.postToolUse = () => new Promise<void>(() => undefined);
+    const dispatcher = new Dispatcher({ adapter, tools, ctx, policy: await adapter.loadPolicy(ctx) });
+    const pending = dispatcher.dispatch('write', { path: 'a.txt', content: 'x' });
+    await new Promise((r) => setTimeout(r, 10));
+    await dispatcher.stop('cancelled', 60_000);
+    expect((await pending).ok).toBe(true);
+    expect(dispatcher.warnings.join('\n')).toContain('PostToolUse hooks for c1 (write a.txt) were abandoned');
+  });
+
   it('runs postToolUse after commit and turns its failure into a warning', async () => {
     const { ctx, tools } = await setup();
     const adapter = new StaticHostAdapter();

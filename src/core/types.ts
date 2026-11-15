@@ -473,12 +473,17 @@ export interface HostAdapter<P = unknown> {
     policy: PolicySnapshot<P>,
     signal: AbortSignal,
   ): Promise<Decision>;
-  /** Optional PostToolUse hooks. Errors are reported as warnings, never change the result. */
+  /**
+   * Optional PostToolUse hooks. Errors are reported as warnings, never change
+   * the result. Must honor `signal` (kill running hooks); the dispatcher stops
+   * waiting when it aborts.
+   */
   postToolUse?(
     prepared: PreparedCall,
     result: ToolResult,
     ctx: SessionContext,
     policy: PolicySnapshot<P>,
+    signal: AbortSignal,
   ): Promise<void>;
 }
 

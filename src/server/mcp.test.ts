@@ -150,6 +150,21 @@ describe('MCP server', () => {
     expect(seen[0]).toMatchObject({ host: 'codex', sessionId: 's1', turnId: 't1', model: 'm', sandboxMode: 'read-only' });
   });
 
+  it('caps protocol and validation errors like any other result', async () => {
+    const { client } = await connect();
+    const unknown = await client.callTool({ name: 'x'.repeat(100_000), arguments: {} });
+    expect(unknown.isError).toBe(true);
+    const text = textOf(unknown);
+    expect(text.length).toBeLessThanOrEqual(9_500);
+    const body = JSON.parse(text) as { overflowPath?: string; truncated?: boolean };
+    expect(body.truncated).toBe(true);
+    expect(typeof body.overflowPath).toBe('string');
+
+    const invalid = await client.callTool({ name: 'run', arguments: { code: 'x', transaction: 'y'.repeat(100_000) } });
+    expect(invalid.isError).toBe(true);
+    expect(textOf(invalid).length).toBeLessThanOrEqual(9_500);
+  });
+
   it('returns isError for invalid arguments and unknown tools', async () => {
     const { client } = await connect();
     const bad = await client.callTool({ name: 'run', arguments: { code: 42 } });
