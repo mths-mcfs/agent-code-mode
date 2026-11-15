@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
-import { deepFreeze } from './freeze.js';
+import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
 import { isMutating, parseToolCall } from './schemas.js';
 import type {
@@ -44,6 +44,9 @@ type Failure =
 const ABORTED: unique symbol = Symbol('aborted');
 
 const MAX_SUMMARY_CHARS = 160;
+
+/** How long `stop` waits for in-flight calls before giving up on them. */
+export const DEFAULT_SETTLE_GRACE_MS = 2_000;
 
 function isPolicyError<P>(policy: PolicySnapshot<P> | PolicyLoadError): policy is PolicyLoadError {
   return 'error' in policy;
@@ -126,7 +129,10 @@ export class Dispatcher<P = unknown> {
   #stopReason: StopReason | undefined;
   #nextId = 1;
   #mutationTail: Promise<unknown> = Promise.resolve();
-  readonly #inflight = new Set<Promise<CallReply>>();
+  readonly #inflight = new Map<Promise<CallReply>, number>();
+  /** id, tool and summary of each call by slot, for reporting calls that never settle. */
+  readonly #labels: { id: string; tool: string; summary: string }[] = [];
+  readonly #abandoned = new WeakSet<Promise<CallReply>>();
   readonly #calls: (CallLogEntry | undefined)[] = [];
   readonly #changed: string[] = [];
   readonly #diffs: string[] = [];
@@ -184,6 +190,7 @@ export class Dispatcher<P = unknown> {
     const id = `c${this.#nextId++}`;
     const slot = this.#calls.length;
     this.#calls.push(undefined);
+    this.#labels.push({ id, tool: typeof tool === 'string' ? clip(tool, 40) : 'unknown', summary: typeof tool === 'string' ? clip(tool, 40) : 'unknown' });
     const started = this.#now();
     const toolLabel = clip(typeof tool === 'string' ? tool : String(tool), 40);
 
@@ -200,7 +207,7 @@ export class Dispatcher<P = unknown> {
         error: new ToolError('tool-error', `internal error: ${errorMessage(err)}`),
       }),
     );
-    this.#inflight.add(reply);
+    this.#inflight.set(reply, slot);
     void reply.finally(() => this.#inflight.delete(reply));
     return reply;
   }
@@ -209,13 +216,35 @@ export class Dispatcher<P = unknown> {
    * Stops accepting calls, aborts in-flight ones and waits for them to
    * settle. Idempotent; the first reason wins.
    */
-  async stop(reason: StopReason): Promise<void> {
+  async stop(reason: StopReason, graceMs: number = DEFAULT_SETTLE_GRACE_MS): Promise<void> {
     if (this.#stopReason === undefined) {
       this.#stopReason = reason;
       this.#abort.abort(reason);
     }
+    const deadline = this.#now() + Math.max(0, graceMs);
     while (this.#inflight.size > 0) {
-      await Promise.allSettled([...this.#inflight]);
+      const left = deadline - this.#now();
+      let timer: NodeJS.Timeout | undefined;
+      const expired = left <= 0
+        ? Promise.resolve(true)
+        : new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(true), left);
+          });
+      const settled = Promise.allSettled([...this.#inflight.keys()]).then(() => false);
+      const timedOut = await Promise.race([settled, expired]);
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        for (const [pending, slot] of this.#inflight) {
+          const label = this.#labels[slot];
+          if (!label || this.#abandoned.has(pending)) continue;
+          this.#abandoned.add(pending);
+          this.#warnings.push(
+            `${label.id} (${label.summary}) did not settle within ${graceMs} ms after the run stopped (${this.#stopReason ?? reason}); its effect is unknown.`,
+          );
+          this.#calls[slot] ??= { id: label.id, tool: label.tool, summary: label.summary, decision: 'error', reason: 'did not settle after the run stopped', durationMs: 0 };
+        }
+        return;
+      }
     }
   }
 
@@ -230,6 +259,7 @@ export class Dispatcher<P = unknown> {
     }
     const call = parsed;
     const summary = summarize(call, this.#opts.ctx.cwd);
+    this.#labels[slot] = { id, tool: call.tool, summary };
     const policy = this.#opts.policy;
     if (isPolicyError(policy)) {
       return Promise.resolve(
@@ -294,7 +324,12 @@ export class Dispatcher<P = unknown> {
   async #prepareChecked(call: ToolCall, policy: PolicySnapshot<P>): Promise<{ prepared: PreparedCall } | Failure> {
     let prepared: PreparedCall;
     try {
-      prepared = deepFreeze(await this.#opts.tools.prepare(call, this.#opts.ctx, policy));
+      const pending = this.#opts.tools.prepare(call, this.#opts.ctx, policy);
+      const returned = await raceAbort(pending, this.#abort.signal);
+      if (returned === ABORTED) return this.#stoppedFailure();
+      // A dispatcher-owned deep-frozen copy: what is authorized and then
+      // committed cannot be changed by the runtime or anyone holding its object.
+      prepared = frozenCopy(returned);
     } catch (err) {
       return this.#toolFailure(err);
     }
@@ -385,7 +420,8 @@ export class Dispatcher<P = unknown> {
     const post = this.#opts.adapter.postToolUse;
     if (post) {
       try {
-        await post.call(this.#opts.adapter, prepared, result, this.#opts.ctx, policy);
+        const done = await raceAbort(Promise.resolve(post.call(this.#opts.adapter, prepared, result, this.#opts.ctx, policy, this.#abort.signal)), this.#abort.signal);
+        if (done === ABORTED) this.#warnings.push(`PostToolUse hooks for ${prepared.id} (${summary}) were abandoned when the run stopped.`);
       } catch (err) {
         this.#warnings.push(`PostToolUse hooks failed for ${prepared.id} (${summary}): ${errorMessage(err)}`);
       }

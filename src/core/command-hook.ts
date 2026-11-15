@@ -60,6 +60,21 @@ class Capture {
   }
 }
 
+/**
+ * POSIX: kills whatever is left of the hook's process group (the hook is the
+ * group leader). Called on every completion path, so a backgrounded
+ * descendant cannot keep running after the hook returned. ESRCH (nothing
+ * left) is ignored.
+ */
+function killGroup(child: ChildProcess): void {
+  if (process.platform === 'win32' || child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // The group is already empty.
+  }
+}
+
 function killTree(child: ChildProcess): void {
   if (child.pid === undefined) return;
   try {
@@ -102,6 +117,7 @@ export function runCommandHook(opts: CommandHookOptions): Promise<CommandHookRes
       if (timer) clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
       opts.signal?.removeEventListener('abort', onAbort);
+      killGroup(child);
       child.stdout?.destroy();
       child.stderr?.destroy();
       child.stdin?.destroy();
@@ -155,6 +171,8 @@ export function runCommandHook(opts: CommandHookOptions): Promise<CommandHookRes
     });
     child.on('exit', (code, signal) => {
       exit = { code, signal };
+      // The hook is done: nothing it started may outlive it.
+      killGroup(child);
       // Give the pipes a moment to flush; a grandchild that escaped the group may keep them open.
       graceTimer = setTimeout(() => finish(null), PIPE_GRACE_MS);
     });

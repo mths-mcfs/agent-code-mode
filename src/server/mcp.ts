@@ -6,7 +6,7 @@ import { formatRunResult, type McpToolResponse } from '../core/output.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
-import type { HostKind } from '../core/types.js';
+import type { HostKind, RunResult } from '../core/types.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 
@@ -45,8 +45,9 @@ export interface McpServerOptions {
   readonly rootsTimeoutMs?: number;
 }
 
-function errorResponse(message: string): McpToolResponse {
-  return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: { kind: 'internal', name: 'Error', message } }) }], isError: true };
+/** A failed `RunResult` for protocol and validation errors, so they go through the same capped formatter. */
+function errorResult(message: string): RunResult {
+  return { ok: false, error: { kind: 'internal', name: 'Error', message }, logs: [], calls: [], changedFiles: [], diff: '', warnings: [] };
 }
 
 function rootPaths(roots: readonly { uri: string }[]): string[] {
@@ -93,9 +94,10 @@ export function createMcpServer(opts: McpServerOptions): Server {
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [RUN_TOOL] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
-    if (request.params.name !== RUN_TOOL.name) return errorResponse(`unknown tool ${JSON.stringify(request.params.name)}`);
+    const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir });
+    if (request.params.name !== RUN_TOOL.name) return respond(errorResult(`unknown tool ${JSON.stringify(request.params.name)}`));
     const args = parseRunArgs(request.params.arguments);
-    if (!args.ok) return errorResponse(`invalid run arguments: ${args.message}`);
+    if (!args.ok) return respond(errorResult(`invalid run arguments: ${args.message}`));
     try {
       const meta: unknown = request.params._meta;
       const host = detectHost({ flag: opts.host, env, meta });
@@ -110,9 +112,9 @@ export function createMcpServer(opts: McpServerOptions): Server {
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
       });
-      return await formatRunResult(result, { stateDir });
+      return await respond(result);
     } catch (err) {
-      return errorResponse(`internal error: ${errorMessage(err)}`);
+      return respond(errorResult(`internal error: ${errorMessage(err)}`));
     }
   });
 

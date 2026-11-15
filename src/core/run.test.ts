@@ -158,6 +158,60 @@ describe('runScript', () => {
     expect(result.calls[0]?.reason).toContain('unsupported-config');
   });
 
+  it('rolls back within the grace after cancel even if a PostToolUse hook never returns', async () => {
+    const d = deps();
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => (entered = r));
+    d.adapter.postToolUse = () => {
+      entered();
+      return new Promise<void>(() => undefined);
+    };
+    const controller = new AbortController();
+    let settled = false;
+    const pending = runScript(
+      { code: script([{ tool: 'write', args: { path: 'a.txt', content: 'SAFE' } }]), transaction: true, timeoutMs: 5_000 },
+      { ...d, signal: controller.signal, stopGraceMs: 20 },
+    ).then((r) => ((settled = true), r));
+    await inside;
+    controller.abort();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(settled).toBe(true);
+    const result = await pending;
+    expect(result.error?.kind).toBe('cancelled');
+    expect(result.rolledBack?.restored).toEqual(['/ws/a.txt']);
+    expect(d.tools.read('a.txt')).toBeUndefined();
+  });
+
+  it('settles on cancel and on timeout while loadPolicy never returns', async () => {
+    const d = deps();
+    d.adapter.loadPolicy = () => new Promise(() => undefined);
+    const controller = new AbortController();
+    let settled = false;
+    const cancelled = runScript({ code: script([]), transaction: true, timeoutMs: 5_000 }, { ...d, signal: controller.signal, stopGraceMs: 5 }).then(
+      (r) => ((settled = true), r),
+    );
+    controller.abort();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(settled).toBe(true);
+    expect((await cancelled).error?.kind).toBe('cancelled');
+
+    const timedOut = await runScript({ code: script([]), transaction: false, timeoutMs: 20 }, { ...d, stopGraceMs: 5 });
+    expect(timedOut.error?.kind).toBe('timeout');
+  });
+
+  it('reports a rollback that does not finish within its bound', async () => {
+    const d = deps(denyForbidden);
+    const tx = d.tools.beginTransaction();
+    d.tools.beginTransaction = () => ({ rollback: () => new Promise(() => undefined), dispose: () => tx.dispose() });
+    const result = await runScript(
+      { code: script([{ tool: 'write', args: { path: 'forbidden.txt', content: 'x' } }]), transaction: true, timeoutMs: 5_000 },
+      { ...d, rollbackTimeoutMs: 30 },
+    );
+    expect(result.error?.kind).toBe('denied');
+    expect(result.rolledBack).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('rollback did not finish within 30 ms');
+  });
+
   it('never rejects when the sandbox throws', async () => {
     const sandbox: Sandbox = {
       run: () => {
