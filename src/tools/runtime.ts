@@ -66,6 +66,35 @@ interface CallMeta {
   readonly identity?: PathIdentity;
 }
 
+/** Most prepared calls whose metadata is kept while they wait for commit. */
+const MAX_PENDING_META = 4096;
+
+function metaKey(prepared: PreparedCall): string {
+  return sha256(JSON.stringify([prepared.id, prepared.tool, prepared.effect]));
+}
+
+class MetaStore {
+  readonly #map = new Map<string, CallMeta>();
+
+  put(prepared: PreparedCall, meta: CallMeta): void {
+    const key = metaKey(prepared);
+    this.#map.delete(key);
+    this.#map.set(key, meta);
+    while (this.#map.size > MAX_PENDING_META) {
+      const oldest = this.#map.keys().next();
+      if (oldest.done === true) break;
+      this.#map.delete(oldest.value);
+    }
+  }
+
+  take(prepared: PreparedCall): CallMeta | undefined {
+    const key = metaKey(prepared);
+    const meta = this.#map.get(key);
+    this.#map.delete(key);
+    return meta;
+  }
+}
+
 /**
  * Literal paths from protected patterns that the OS sandbox can enforce:
  * patterns without wildcards, and `dir/**` patterns as `dir`.
@@ -100,7 +129,13 @@ function assertContainmentShape(c: BashContainment): void {
  */
 export class NodeToolRuntime implements ToolRuntime {
   readonly #opts: NodeToolRuntimeOptions;
-  readonly #meta = new WeakMap<object, CallMeta>();
+  /**
+   * What prepare learned about each call, keyed by a digest of the prepared
+   * call's content: the dispatcher hands commit a frozen copy, not the object
+   * prepare returned. Taken out at commit; bounded so calls that never commit
+   * (denied ones) do not accumulate.
+   */
+  readonly #meta = new MetaStore();
 
   constructor(opts: NodeToolRuntimeOptions) {
     this.#opts = opts;
@@ -161,7 +196,7 @@ export class NodeToolRuntime implements ToolRuntime {
           args: { command, timeoutMs },
           effect: { command, cwd: jail.cwd, timeoutMs, containment },
         };
-        this.#meta.set(prepared, meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)));
+        this.#meta.put(prepared, meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)));
         return prepared;
       }
       case 'read': {
@@ -175,7 +210,7 @@ export class NodeToolRuntime implements ToolRuntime {
           args: { path: absPath, offset, limit },
           effect: { absPath, offset, limit },
         };
-        this.#meta.set(prepared, meta(absPath));
+        this.#meta.put(prepared, meta(absPath));
         return prepared;
       }
       case 'write': {
@@ -197,7 +232,7 @@ export class NodeToolRuntime implements ToolRuntime {
             diff,
           },
         };
-        this.#meta.set(prepared, m);
+        this.#meta.put(prepared, m);
         return prepared;
       }
       case 'edit': {
@@ -228,7 +263,7 @@ export class NodeToolRuntime implements ToolRuntime {
             replacements: outcome.count,
           },
         };
-        this.#meta.set(prepared, m);
+        this.#meta.put(prepared, m);
         return prepared;
       }
       case 'grep': {
@@ -244,7 +279,7 @@ export class NodeToolRuntime implements ToolRuntime {
           maxResults: call.args.maxResults ?? DEFAULT_GREP_MAX_RESULTS,
         };
         const prepared: PreparedCallOf<'grep'> = { id: call.id, tool: 'grep', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.set(prepared, meta(absRoot));
+        this.#meta.put(prepared, meta(absRoot));
         return prepared;
       }
       case 'glob': {
@@ -254,7 +289,7 @@ export class NodeToolRuntime implements ToolRuntime {
         normalizeGlob(call.args.pattern, absRoot);
         const effect = { absRoot, pattern: call.args.pattern, maxResults: call.args.maxResults ?? DEFAULT_GLOB_MAX_RESULTS };
         const prepared: PreparedCallOf<'glob'> = { id: call.id, tool: 'glob', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.set(prepared, meta(absRoot));
+        this.#meta.put(prepared, meta(absRoot));
         return prepared;
       }
     }
@@ -282,7 +317,7 @@ export class NodeToolRuntime implements ToolRuntime {
   }
 
   #metaOf(prepared: PreparedCall, fallbackPath: string): CallMeta {
-    return this.#meta.get(prepared) ?? { root: path.dirname(fallbackPath), display: fallbackPath, denyWrite: [] };
+    return this.#meta.take(prepared) ?? { root: path.dirname(fallbackPath), display: fallbackPath, denyWrite: [] };
   }
 
   async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
@@ -353,8 +388,10 @@ export class NodeToolRuntime implements ToolRuntime {
       throw new ToolError('tool-error', 'the transaction was not started by this tool runtime; refusing to write without a journal');
     }
     const { absPath, beforeHash, afterContent } = prepared.effect;
-    const m = this.#meta.get(prepared);
-    if (m?.identity === undefined) throw new ToolError('tool-error', 'this write was not prepared by this tool runtime');
+    const m = this.#meta.take(prepared);
+    if (m?.identity === undefined) {
+      throw new ToolError('tool-error', 'this write was not prepared by this tool runtime (or was already committed); prepare it again');
+    }
     const bytes = Buffer.from(afterContent, 'utf8');
     const nextHash = sha256(bytes);
     const outcome = await atomicWrite(absPath, bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {

@@ -263,3 +263,13 @@ describe.skipIf(IS_WINDOWS)('8. path oracle: accepted iff the real path is insid
     expect(checked).toBeGreaterThan(30);
   });
 });
+
+describe('commit works on the copy the dispatcher hands it', () => {
+  it('commits a structured clone of the prepared call once', async () => {
+    writeFileSync(path.join(ws, 'f'), 'old');
+    const copy = structuredClone(await prepWrite('f', 'new'));
+    await rt.commit(copy, new AbortController().signal);
+    expect(readFileSync(path.join(ws, 'f'), 'utf8')).toBe('new');
+    expect(await code(rt.commit(structuredClone(copy), new AbortController().signal))).toBe('tool-error');
+  });
+});
