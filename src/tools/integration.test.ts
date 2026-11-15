@@ -34,7 +34,7 @@ describe('NodeToolRuntime in the run pipeline', () => {
     ]);
     const result = await runScript({ code, transaction: false, timeoutMs: 10_000 }, deps());
     expect(result.ok).toBe(true);
-    expect(result.changedFiles).toEqual(['a.txt', path.join('b', 'c.txt')]);
+    expect(result.changedFiles).toEqual(['a.txt', 'b/c.txt']);
     expect(result.diff).toContain('-alpha\n+beta\n');
     expect(result.diff).toContain('--- /dev/null\n+++ b/b/c.txt\n');
     expect(readFileSync(path.join(ws, 'a.txt'), 'utf8')).toBe('beta\n');
