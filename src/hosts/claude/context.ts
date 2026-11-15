@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
-import { open, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { open, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { stateDirPath } from '../../core/state-dir.js';
@@ -52,11 +53,18 @@ export class FileHookContextStore implements HookContextStore {
   async lookup(toolUseId: string): Promise<HookContextRecord | undefined> {
     if (!SAFE_TOOL_USE_ID.test(toolUseId)) return undefined;
     const file = path.join(this.#dir, `${toolUseId}.json`);
+    // Claim the record atomically: only the reader whose rename succeeds gets it.
+    const claimed = path.join(this.#dir, `.${toolUseId}.${randomBytes(8).toString('hex')}.claimed`);
+    try {
+      await rename(file, claimed);
+    } catch {
+      return undefined;
+    }
     let text: string;
     try {
-      // O_NOFOLLOW: a symlink planted under the name is not followed.
+      // O_NOFOLLOW: a symlink planted under the name is not followed (rename moves the link itself).
       const flags = constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
-      const handle = await open(file, flags);
+      const handle = await open(claimed, flags);
       try {
         const st = await handle.stat();
         if (!st.isFile() || st.size > MAX_CONTEXT_FILE_BYTES) return undefined;
@@ -68,7 +76,7 @@ export class FileHookContextStore implements HookContextStore {
       return undefined;
     } finally {
       // Read once: the record is consumed whatever it held.
-      await rm(file, { force: true }).catch(() => undefined);
+      await rm(claimed, { force: true }).catch(() => undefined);
     }
     let json: unknown;
     try {

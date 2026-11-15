@@ -78,6 +78,19 @@ export interface ClaudePolicy {
   readonly postHooks: readonly CompiledHook[];
   /** Env added for every hook. */
   readonly hookEnv: Readonly<Record<string, string>>;
+  /**
+   * True when an allow rule approves this server's `run` tool. Claude Code
+   * resolves such a call from the rule, so in auto mode the classifier never
+   * reviewed the script (https://code.claude.com/docs/en/permission-modes,
+   * "How the classifier evaluates actions").
+   */
+  readonly runApprovedByAllowRule: boolean;
+  /**
+   * Whether a Read deny rule covers a real absolute path. The tool runtime
+   * must drop such files from grep and glob results: a recursive search
+   * otherwise returns what `read` would refuse.
+   */
+  readonly isReadDenied: (absPath: string) => boolean;
 }
 
 export interface ClaudeHostAdapterOptions {
@@ -90,6 +103,8 @@ export interface ClaudeHostAdapterOptions {
   /** Reads the parent Claude process argv. Defaults to the platform reader. */
   readonly readParent?: ParentArgsReader;
   readonly platform?: NodeJS.Platform;
+  /** MCP server name this server is registered under (`mcp__<name>__run`). Defaults to `agent-code-mode`. */
+  readonly serverName?: string;
 }
 
 const NO_FLAGS: ClaudeCliFlags = { settings: [], allowedTools: [], disallowedTools: [], addDirs: [] };
@@ -162,7 +177,7 @@ function restrictVerdict(rule: Rule, view: CallView): Verdict {
     let verdict: Verdict = fileVerdict;
     for (const cmd of view.analysis.commands) {
       if (cmd.denyForms.some((form) => matchesBashSpec(spec, form))) return 'match';
-      if (cmd.dynamic && bashSpecMayMatchDynamic(spec, cmd.staticPrefix)) verdict = 'maybe';
+      if (cmd.dynamic && cmd.staticPrefixes.some((prefix) => bashSpecMayMatchDynamic(spec, prefix))) verdict = 'maybe';
     }
     return verdict;
   }
@@ -219,7 +234,17 @@ function modeDecision(view: CallView, policy: ClaudePolicy): Decision {
   const isRead = prepared.tool === 'read' || prepared.tool === 'grep' || prepared.tool === 'glob';
   const isEdit = prepared.tool === 'write' || prepared.tool === 'edit';
   const inside = isRead || isEdit ? insideWorkingDirs(callPaths(prepared), policy.workingDirs) : false;
-  if (mode === 'auto' || mode === 'bypassPermissions') return { kind: 'allow' };
+  if (mode === 'bypassPermissions') return { kind: 'allow' };
+  if (mode === 'auto') {
+    // The classifier reviewed the whole script once, unless an allow rule approved `run` before it.
+    if (!policy.runApprovedByAllowRule) return { kind: 'allow' };
+    // Then only auto mode's own step 2 applies: reads and edits inside the working directories.
+    if ((isRead || isEdit) && inside) return { kind: 'allow' };
+    return {
+      kind: 'ask',
+      reason: `auto mode: an allow rule approves the run tool, so its script skipped the classifier; ${tool}${isRead || isEdit ? ' outside the working directories' : ''} needs approval`,
+    };
+  }
   if (isRead) {
     if (inside) return { kind: 'allow' };
     if (mode === 'dontAsk') return { kind: 'deny', source: 'rule', reason: `dontAsk mode: ${tool} outside the working directories is not pre-approved by an allow rule` };
@@ -229,6 +254,69 @@ function modeDecision(view: CallView, policy: ClaudePolicy): Decision {
   if (mode === 'dontAsk') return { kind: 'deny', source: 'rule', reason: `dontAsk mode: ${tool} is not pre-approved by an allow rule` };
   if (isEdit && mode === 'acceptEdits' && inside) return { kind: 'allow' };
   return { kind: 'ask', reason: `${tool} needs approval in ${mode} mode` };
+}
+
+const TOP_LEVEL = /^\/[^/]+$/;
+
+/**
+ * A recognized `rm`/`rmdir` removal of a critical path (filesystem root, a
+ * top-level directory, home, the working directory or a parent of it, a bare
+ * `*` glob under a working directory, a recursive removal of a target only
+ * known at run time). No allow rule, mode or hook approves one
+ * (https://code.claude.com/docs/en/permission-modes, "Critical paths").
+ */
+function criticalRemoval(view: CallView, policy: ClaudePolicy): string | undefined {
+  const analysis = view.analysis;
+  if (!analysis || view.prepared.tool !== 'bash') return undefined;
+  const cwd = view.prepared.effect.cwd;
+  const anchors = [cwd, policy.projectRoot];
+  const isCritical = (p: string, glob: boolean): boolean => {
+    const posix = toPosixPath(p);
+    if (posix === '/' || TOP_LEVEL.test(posix)) return true;
+    if (isInsidePath(toPosixPath(policy.home), posix) && isInsidePath(posix, toPosixPath(policy.home))) return true;
+    if (anchors.some((a) => isInsidePath(a, posix))) return true; // the working directory or one of its parents
+    return glob && policy.workingDirs.some((d) => isInsidePath(d, posix));
+  };
+  for (const removal of analysis.removals) {
+    for (const target of removal.targets) {
+      if (target.value === undefined) {
+        if (removal.recursive || target.glob) return `\`rm ${target.raw}\` removes a target only known at run time`;
+        continue;
+      }
+      let value = target.value;
+      let glob = false;
+      if (target.glob) {
+        const segments = value.split('/');
+        const stars = segments.filter((seg) => /[*?[]/.test(seg));
+        if (stars.length > 1) return `\`rm ${target.raw}\` reaches directories that cannot be known before it runs`;
+        const at = segments.findIndex((seg) => seg === '*');
+        if (at === -1) continue;
+        value = segments.slice(0, at).join('/') || (value.startsWith('/') ? '/' : '.');
+        glob = true;
+      }
+      const relative = !(value.startsWith('/') || value.startsWith('~') || path.isAbsolute(value));
+      if (relative && analysis.changesDirectory) {
+        if (glob || value === '.' || value === '..' || value.startsWith('../')) return `\`rm ${target.raw}\` after \`cd\` may remove a working directory`;
+        continue;
+      }
+      if (isCritical(resolveCommandPath(value, cwd, policy.home), glob)) return `\`rm ${target.raw}\` removes a critical path`;
+    }
+  }
+  return undefined;
+}
+
+/** Resolves symlinks of a command's file target; for a missing file, of its directory. */
+async function realTarget(p: string): Promise<string> {
+  if (process.platform === 'win32') return p;
+  try {
+    return toPosixPath(await realpath(p));
+  } catch {
+    try {
+      return path.posix.join(toPosixPath(await realpath(path.posix.dirname(p))), path.posix.basename(p));
+    } catch {
+      return p;
+    }
+  }
 }
 
 function describe(rule: Rule): string {
@@ -345,7 +433,9 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const managedDisable = firstSetting(managedDocs, (s) => s.disableAllHooks) === true;
     const otherDisable = firstSetting(docs.filter((d) => d.source !== 'managed'), (s) => s.disableAllHooks) === true;
     const managedOnlyHooks = firstSetting(managedDocs, (s) => s.allowManagedHooksOnly) === true;
-    const seen = new Set<string>();
+    // A handler defined in several sources runs once per event, never across events.
+    const seenPre = new Set<string>();
+    const seenPost = new Set<string>();
     const pre: CompiledHook[] = [];
     const post: CompiledHook[] = [];
     for (const doc of docs) {
@@ -353,14 +443,14 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       if (managedDisable) break;
       if (!isManaged && (otherDisable || managedOnlyHooks)) continue;
       const origin = `${doc.source} settings`;
-      pre.push(...compileHooks(doc.data.hooks?.PreToolUse, origin, {}, platform, seen));
-      post.push(...compileHooks(doc.data.hooks?.PostToolUse, origin, {}, platform, seen));
+      pre.push(...compileHooks(doc.data.hooks?.PreToolUse, origin, {}, platform, seenPre));
+      post.push(...compileHooks(doc.data.hooks?.PostToolUse, origin, {}, platform, seenPost));
     }
     if (!managedDisable && !otherDisable && !managedOnlyHooks) {
       for (const plugin of settings.plugins) {
         const env = { CLAUDE_PLUGIN_ROOT: plugin.root };
-        pre.push(...compileHooks(plugin.hooks.PreToolUse, `plugin ${plugin.plugin}`, env, platform, seen));
-        post.push(...compileHooks(plugin.hooks.PostToolUse, `plugin ${plugin.plugin}`, env, platform, seen));
+        pre.push(...compileHooks(plugin.hooks.PreToolUse, `plugin ${plugin.plugin}`, env, platform, seenPre));
+        post.push(...compileHooks(plugin.hooks.PostToolUse, `plugin ${plugin.plugin}`, env, platform, seenPost));
       }
     }
 
@@ -384,6 +474,10 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         network: false,
       };
     }
+
+    const serverName = this.#opts.serverName ?? 'agent-code-mode';
+    const serverRule = `mcp__${serverName}`;
+    const runTool = `mcp__${serverName}__run`;
 
     const protectedPaths = [
       ...new Set([
@@ -417,6 +511,9 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         preHooks: pre,
         postHooks: post,
         hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
+        runApprovedByAllowRule: rules.allow.some((r) => r.matcher.type !== 'never' && (r.tool === serverRule || r.tool === '*' || matchesToolName(r.tool, runTool))),
+        isReadDenied: (absPath: string): boolean =>
+          rules.deny.some((r) => governs(r, 'Read') && (r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)))),
       },
     };
   }
@@ -435,12 +532,10 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     return { prepared, native, analysis, bashFiles };
   }
 
-  checkStatic(prepared: PreparedCall, _ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
-    const policy = snapshot.payload;
-    const view = this.#view(prepared, policy);
+  /** Deny and ask rules. Undefined when none decides. */
+  #restrictions(view: CallView, policy: ClaudePolicy): Decision | undefined {
     const askOrDeny = (reason: string): Decision =>
       policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
-
     for (const rule of policy.rules.deny) {
       const v = restrictVerdict(rule, view);
       if (v === 'match') return { kind: 'deny', source: 'rule', reason: `denied by ${describe(rule)}` };
@@ -453,11 +548,35 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       const v = restrictVerdict(rule, view);
       if (v !== 'no') return askOrDeny(`${describe(rule)} matches`);
     }
+    return undefined;
+  }
+
+  checkStatic(prepared: PreparedCall, _ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
+    const policy = snapshot.payload;
+    const view = this.#view(prepared, policy);
+    const askOrDeny = (reason: string): Decision =>
+      policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
+    const restricted = this.#restrictions(view, policy);
+    if (restricted) return restricted;
     if (view.analysis && view.analysis.uncertain.length > 0) {
       return askOrDeny(`the command cannot be checked statically (${view.analysis.uncertain.join('; ')})`);
     }
+    const critical = criticalRemoval(view, policy);
+    if (critical !== undefined) return askOrDeny(`${critical}; no rule or mode approves it`);
     if (allowedByRule(view, policy.rules.allow, policy)) return { kind: 'allow' };
     return modeDecision(view, policy);
+  }
+
+  /**
+   * Re-checks a bash command's file targets after resolving symlinks (I/O,
+   * so not in `checkStatic`): `cat link` where `link -> .env` is denied.
+   */
+  async #realFiles(prepared: PreparedCall, policy: ClaudePolicy): Promise<Decision | undefined> {
+    if (prepared.tool !== 'bash') return undefined;
+    const view = this.#view(prepared, policy);
+    const real = await Promise.all(view.bashFiles.map(async (f) => ({ access: f.access, path: f.path === undefined ? undefined : await realTarget(f.path) })));
+    if (real.every((f, i) => f.path === view.bashFiles[i]?.path)) return undefined;
+    return this.#restrictions({ ...view, bashFiles: real }, policy);
   }
 
   #select(hooks: readonly CompiledHook[], view: CallView, policy: ClaudePolicy): CompiledHook[] {
@@ -479,7 +598,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       // Documented: a pattern naming more than the command (`Bash(git push *)`) runs the hook on any `$()`, backticks or `$VAR`.
       const specific = (m.spec.split('*')[0] ?? '').trim().split(/\s+/).length > 1;
       return a.commands.some(
-        (cmd) => cmd.denyForms.some((f) => matchesBashSpec(m.spec, f)) || (cmd.dynamic && (specific || bashSpecMayMatchDynamic(m.spec, cmd.staticPrefix))),
+        (cmd) => cmd.denyForms.some((f) => matchesBashSpec(m.spec, f)) || (cmd.dynamic && (specific || cmd.staticPrefixes.some((prefix) => bashSpecMayMatchDynamic(m.spec, prefix)))),
       );
     }
     if (m.type === 'path') return pathRuleVerdict(m.patterns, callPaths(view.prepared), 'deny') === 'match';
@@ -506,6 +625,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
 
   async authorize(prepared: PreparedCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<Decision> {
     const policy = snapshot.payload;
+    const realFiles = await this.#realFiles(prepared, policy);
+    if (realFiles) return realFiles;
     const view = this.#view(prepared, policy);
     const hooks = this.#select(policy.preHooks, view, policy);
     const unsupported = hooks.find((h) => h.unsupported !== undefined);
@@ -535,6 +656,13 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         if (combined.updatedInput === undefined) return { kind: 'allow', ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
         const mapped = mapUpdatedInput(prepared, combined.updatedInput);
         if ('error' in mapped) return { kind: 'deny', source: 'hook', reason: mapped.error };
+        if (prepared.tool === 'bash' && 'command' in mapped.args) {
+          // The dispatcher re-checks the rewrite statically; the symlink check needs I/O, so it runs here.
+          const command = mapped.args.command;
+          const rewritten: PreparedCall = { ...prepared, args: { ...prepared.args, command }, effect: { ...prepared.effect, command } };
+          const again = await this.#realFiles(rewritten, policy);
+          if (again) return again.kind === 'deny' ? again : { kind: 'ask', reason: `hook rewrite: ${again.reason}` };
+        }
         return { kind: 'allow', updatedArgs: mapped.args, ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
       }
     }

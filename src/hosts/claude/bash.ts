@@ -38,8 +38,11 @@ export interface SimpleCommand {
    * assignments, unknown command name).
    */
   readonly allowForm: string | undefined;
-  /** Words before the first word whose value is only known at run time. */
-  readonly staticPrefix: string;
+  /**
+   * For each form (as written, each stripped wrapper level, each basename
+   * variant): the words before the first word only known at run time.
+   */
+  readonly staticPrefixes: readonly string[];
   /** True when some word's value is only known at run time. */
   readonly dynamic: boolean;
 }
@@ -58,6 +61,22 @@ export interface BashAnalysis {
   readonly uncertain: readonly string[];
   /** True when a `cd` appears, so relative file targets may not resolve against the call's cwd. */
   readonly changesDirectory: boolean;
+  /** Every `rm`/`rmdir` invocation, for the critical-path check. */
+  readonly removals: readonly Removal[];
+}
+
+/** An operand of a command: its value when static, else undefined. */
+export interface Operand {
+  readonly value: string | undefined;
+  readonly raw: string;
+  /** Unquoted glob characters appear. */
+  readonly glob: boolean;
+}
+
+/** One `rm` or `rmdir` call. */
+export interface Removal {
+  readonly recursive: boolean;
+  readonly targets: readonly Operand[];
 }
 
 /** Commands longer than this are not analyzed (treated as uncertain). */
@@ -68,14 +87,37 @@ const MAX_SHELL_NESTING = 4;
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish', 'busybox']);
 
+/** Shell options followed by a separate operand (`bash -O extglob -c ...`). */
+const SHELL_OPTIONS_WITH_OPERAND = new Set(['-o', '+o', '-O', '+O', '--rcfile', '--init-file', '--debugger-file']);
+
 /** Builtins whose arguments become shell code: always uncertain. */
 const CODE_EVALUATORS = new Set(['eval', 'source', '.', 'trap', 'fc']);
 
-/** Commands whose operands are files they read, for Read rules. */
-const FILE_READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'nl', 'tac', 'strings', 'xxd', 'od', 'base64']);
+/**
+ * Commands whose operands may be files they read, for Read rules. Every
+ * non-option operand is treated as a possible file (a `sed` script or a `grep`
+ * pattern too): matching a pattern text against path rules is harmless, and
+ * missing a file is not.
+ */
+const FILE_READERS = new Set([
+  'cat', 'head', 'tail', 'less', 'more', 'most', 'nl', 'tac', 'rev', 'strings', 'xxd', 'od', 'hexdump', 'base64', 'base32',
+  'sed', 'awk', 'gawk', 'mawk', 'nawk', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'zcat', 'zgrep', 'zless', 'bzcat', 'xzcat',
+  'cut', 'sort', 'uniq', 'wc', 'diff', 'cmp', 'comm', 'join', 'paste', 'column', 'fold', 'fmt', 'pr', 'expand', 'unexpand',
+  'jq', 'yq', 'xmllint', 'file', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'cksum', 'b2sum', 'iconv', 'dos2unix',
+  'vi', 'vim', 'nano', 'view', 'emacs', 'openssl', 'gpg', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'bzip2', 'xz', 'curl', 'wget', 'scp',
+]);
 
-/** Options of those readers that take a separate value (`head -n 5 file`). */
-const READER_OPTIONS_WITH_VALUE = new Set(['-n', '-c', '--lines', '--bytes', '-s', '-w', '-b', '-t', '-j', '-N']);
+/** Commands that write (or delete) the files they name, for Edit rules. */
+const FILE_WRITERS = new Set(['tee', 'touch', 'truncate', 'rm', 'rmdir', 'unlink', 'shred', 'mkdir', 'chmod', 'chown', 'chgrp', 'ln']);
+
+/** Commands that read some operands and write others: every operand is both. */
+const FILE_COPIERS = new Set(['cp', 'mv', 'rsync', 'install', 'scp', 'dd']);
+
+/** Wrapper levels stripped before the command is reported as uncertain. */
+const MAX_WRAPPER_LEVELS = 64;
+
+/** Builtins that rebind a command name: the commands after them cannot be matched by name. */
+const NAME_REBINDERS = new Set(['alias', 'hash', 'enable']);
 
 // Redirect operators (sh-syntax RedirOperator values).
 const REDIR_OUT = new Set([63, 64, 69, 70, 74, 75, 76, 77]); // > >> >| >>| &> &>| &>> &>>|
@@ -84,14 +126,7 @@ const REDIR_INOUT = new Set([66]); // <>
 const REDIR_HDOC = new Set([71, 72]); // << <<-
 const REDIR_DUP = new Set([67, 68]); // <& >&
 
-interface WordValue {
-  /** Shell value when fully static, else undefined. */
-  readonly value: string | undefined;
-  /** Source text. */
-  readonly raw: string;
-  /** True when an unquoted glob character appears (the shell may expand it). */
-  readonly glob: boolean;
-}
+type WordValue = Operand;
 
 function decodeUnquoted(lit: string): string {
   let out = '';
@@ -181,6 +216,7 @@ export class BashAnalyzer {
   readonly #files: FileTarget[] = [];
   readonly #uncertain: string[] = [];
   #changesDirectory = false;
+  readonly #removals: Removal[] = [];
 
   static analyze(command: string): BashAnalysis {
     const analyzer = new BashAnalyzer();
@@ -190,6 +226,7 @@ export class BashAnalyzer {
       files: analyzer.#files,
       uncertain: [...new Set(analyzer.#uncertain)],
       changesDirectory: analyzer.#changesDirectory,
+      removals: analyzer.#removals,
     };
   }
 
@@ -247,7 +284,7 @@ export class BashAnalyzer {
     // words are assignments; nested substitutions are walked generically.
     const name = decl.variant?.value ?? 'declare';
     const raw = this.#text(decl, ctx);
-    this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefix: name, dynamic: true });
+    this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefixes: [name], dynamic: true });
   }
 
   #redirect(redir: Redirect, ctx: { source: string; depth: number }): void {
@@ -278,21 +315,70 @@ export class BashAnalyzer {
     this.#addCommand(raw, words, call.assigns.length > 0, ctx);
   }
 
+  #fileOperands(base: string, operands: readonly WordValue[]): void {
+    const reads = FILE_READERS.has(base) || FILE_COPIERS.has(base);
+    let writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base);
+    if (base === 'sed' && operands.some((o) => o.value !== undefined && (o.value === '-i' || o.value.startsWith('--in-place') || /^-[a-zA-Z]*i/.test(o.value)))) writes = true;
+    if (!reads && !writes) return;
+    for (let k = 0; k < operands.length; k++) {
+      const operand = operands[k];
+      if (!operand) continue;
+      if (operand.raw.startsWith('<(') || operand.raw.startsWith('>(')) continue;
+      let value = operand.value;
+      if (value !== undefined && value.startsWith('-')) {
+        // `-n 5`: skip a numeric option value; `--file=x`, `-fX`: the value may be a file.
+        const next = operands[k + 1]?.value;
+        if (next !== undefined && /^\d+$/.test(next)) k++;
+        const eq = value.indexOf('=');
+        if (eq === -1) continue;
+        value = value.slice(eq + 1);
+      }
+      if (base === 'dd' && value !== undefined) {
+        const m = /^(if|of)=(.*)$/s.exec(value);
+        if (!m) continue;
+        value = m[2];
+      }
+      const path = value !== undefined && !operand.glob ? value : undefined;
+      if (reads) this.#files.push({ access: 'read', path });
+      if (writes) this.#files.push({ access: 'write', path });
+    }
+  }
+
   #addCommand(raw: string, words: readonly WordValue[], hasAssigns: boolean, ctx: { source: string; depth: number }): void {
     const denyForms = new Set<string>([raw]);
+    const staticPrefixes = new Set<string>();
     const dynamic = words.some((w) => w.value === undefined);
-    const firstDynamic = words.findIndex((w) => w.value === undefined);
-    const staticWords = (firstDynamic === -1 ? words : words.slice(0, firstDynamic)).map((w) => w.value ?? '');
-    const staticPrefix = staticWords.join(' ');
     const text = (ws: readonly WordValue[]): string => ws.map((w) => w.value ?? w.raw).join(' ');
-
-    denyForms.add(text(words));
+    const prefix = (ws: readonly WordValue[]): string => {
+      const i = ws.findIndex((w) => w.value === undefined);
+      return (i === -1 ? ws : ws.slice(0, i)).map((w) => w.value ?? '').join(' ');
+    };
+    const addForm = (ws: readonly WordValue[]): void => {
+      denyForms.add(text(ws));
+      staticPrefixes.add(prefix(ws));
+      const head = ws[0];
+      if (head?.value !== undefined) {
+        const base = basename(head.value);
+        if (base !== head.value) {
+          // `/usr/bin/git push` is matched as `git push` too.
+          const renamed = [{ ...head, value: base, raw: base }, ...ws.slice(1)];
+          denyForms.add(text(renamed));
+          staticPrefixes.add(prefix(renamed));
+        }
+      }
+    };
+    addForm(words);
 
     // Strip wrappers one level at a time; every level is a deny/ask candidate.
     let current = words;
     let allowStripped: readonly WordValue[] | undefined = hasAssigns ? undefined : words;
     let allowChainIntact = !hasAssigns;
-    for (let guard = 0; guard < 16; guard++) {
+    for (let level = 0; ; level++) {
+      if (level >= MAX_WRAPPER_LEVELS) {
+        this.#uncertain.push(`more than ${MAX_WRAPPER_LEVELS} nested command wrappers`);
+        allowStripped = undefined;
+        break;
+      }
       const head = current[0];
       if (!head) break;
       if (head.value === undefined || head.glob) {
@@ -300,47 +386,83 @@ export class BashAnalyzer {
         allowStripped = undefined;
         break;
       }
-      const name = head.value;
-      const base = basename(name);
-      if (base !== name) {
-        // `/bin/rm x` is matched as `rm x` too.
-        denyForms.add(text([{ ...head, value: base, raw: base }, ...current.slice(1)]));
-      }
+      const base = basename(head.value);
+      const operands = current.slice(1);
       if (base === 'cd' || base === 'pushd' || base === 'popd') this.#changesDirectory = true;
       if (CODE_EVALUATORS.has(base)) this.#uncertain.push(`\`${base}\` runs code that is only known at run time`);
-      if (FILE_READERS.has(base)) {
-        const operands = current.slice(1);
-        for (let k = 0; k < operands.length; k++) {
-          const operand = operands[k];
-          if (!operand) continue;
-          if (operand.raw.startsWith('<(') || operand.raw.startsWith('>(')) continue;
-          if (operand.value !== undefined && operand.value.startsWith('-')) {
-            if (READER_OPTIONS_WITH_VALUE.has(operand.value)) k++;
-            continue;
-          }
-          this.#files.push({ access: 'read', path: operand.value !== undefined && !operand.glob ? operand.value : undefined });
-        }
-      }
-      if (base === 'tee') {
-        for (const operand of current.slice(1)) {
-          if (operand.value !== undefined && operand.value.startsWith('-')) continue;
-          this.#files.push({ access: 'write', path: operand.value !== undefined && !operand.glob ? operand.value : undefined });
-        }
+      if (NAME_REBINDERS.has(base) && operands.length > 0) this.#uncertain.push(`\`${base}\` rebinds command names, so later commands cannot be matched by name`);
+      this.#fileOperands(base, operands);
+      if (base === 'rm' || base === 'rmdir') {
+        // An unquoted run-time word may split into flags such as `-rf`.
+        const recursive = operands.some((o) => (o.value === undefined ? !/^["']/.test(o.raw) : /^-[a-zA-Z]*[rR]/.test(o.value) || o.value === '--recursive'));
+        this.#removals.push({ recursive, targets: operands.filter((o) => o.value === undefined || !o.value.startsWith('-')) });
       }
       if (SHELLS.has(base)) this.#shell(current, ctx);
       if (base === 'find') this.#findExec(current, ctx);
+      if (base === 'env' && this.#envSplitString(current, ctx)) {
+        allowStripped = undefined;
+        break;
+      }
 
       const unwrapped = unwrap(base, current);
       if (unwrapped === undefined) break;
       if (unwrapped.inner.length === 0) break;
       current = unwrapped.inner;
-      denyForms.add(text(current));
+      addForm(current);
       if (allowChainIntact && unwrapped.documented) allowStripped = current;
       else allowChainIntact = false;
+      // `timeout 1 A=1 rm x`: strip assignment-like words too (strict: the wrapper would run `A=1`).
+      let skip = 0;
+      while (skip < current.length - 1 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(current[skip]?.value ?? '')) skip++;
+      if (skip > 0) {
+        current = current.slice(skip);
+        addForm(current);
+        allowChainIntact = false;
+        allowStripped = undefined;
+      }
     }
 
     const allowForm = allowStripped !== undefined && !dynamic ? text(allowStripped) : undefined;
-    this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefix, dynamic });
+    this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefixes: [...staticPrefixes], dynamic });
+  }
+
+  /**
+   * `env -S 'cmd args'` / `env --split-string=...`: the string is split into a
+   * command line. Returns true when the invocation had one (it was analyzed).
+   */
+  #envSplitString(words: readonly WordValue[], ctx: { source: string; depth: number }): boolean {
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i];
+      if (!w) break;
+      const v = w.value;
+      if (v === undefined) return false;
+      let script: WordValue | undefined;
+      let restFrom = i + 1;
+      if (v === '-S' || v === '--split-string') {
+        script = words[i + 1];
+        restFrom = i + 2;
+      } else if (v.startsWith('--split-string=')) {
+        script = { value: v.slice('--split-string='.length), raw: v, glob: false };
+      } else if (/^-[a-zA-Z]*S./s.test(v) && !v.startsWith('--')) {
+        script = { value: v.slice(v.indexOf('S') + 1), raw: v, glob: false };
+      } else if (v.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(v)) {
+        continue;
+      } else {
+        return false;
+      }
+      if (!script || script.value === undefined) {
+        this.#uncertain.push('`env -S` string is only known at run time');
+        return true;
+      }
+      if (ctx.depth >= MAX_SHELL_NESTING) {
+        this.#uncertain.push('`env -S` nested too deeply');
+        return true;
+      }
+      const rest = words.slice(restFrom).map((r) => r.raw);
+      this.#analyzeSource([script.value, ...rest].join(' '), ctx.depth + 1);
+      return true;
+    }
+    return false;
   }
 
   #shell(words: readonly WordValue[], ctx: { source: string; depth: number }): void {
@@ -368,7 +490,8 @@ export class BashAnalyzer {
       }
       if (w.value === '-s' || w.value === '-i') break;
       if (w.value.startsWith('-') || w.value.startsWith('+')) {
-        if (w.value === '-o' || w.value === '+o') i++; // option name follows
+        // Options that take an operand: skip it so it is not taken for a script file.
+        if (SHELL_OPTIONS_WITH_OPERAND.has(w.value)) i++;
         continue;
       }
       sawScript = true; // `bash script.sh`: runs a file, like native Bash
