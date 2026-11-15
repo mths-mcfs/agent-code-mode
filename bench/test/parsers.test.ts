@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseClaudeTranscript } from '../lib/claude.ts';
-import { codexToolSurface, extractCodexRequests, parseCodexTranscript } from '../lib/codex.ts';
+import { classifyCodexTool, codexToolSurface, extractCodexRequests, parseCodexTranscript } from '../lib/codex.ts';
 import { costFromUsage, loadPricing } from '../lib/pricing.ts';
 import { checkArm, checkSurface } from '../lib/record.ts';
 
@@ -35,6 +35,14 @@ describe('Claude transcript parser', () => {
     expect(p.innerCalls).toEqual({ total: 3, byTool: { read: 2, grep: 1 } });
     expect(checkArm('claude', 'B', p.toolCalls)).toEqual({ fallback: false, reasons: [] });
     expect(checkSurface('claude', 'B', p.availableTools ?? [])).toEqual([]);
+  });
+
+  it('counts a replayed tool result once (same tool_use_id)', () => {
+    const raw = read('claude-B.jsonl');
+    const replay = raw.split('\n').filter((l) => l.includes('tool_result'));
+    expect(replay).toHaveLength(1);
+    const p = parseClaudeTranscript(`${raw}\n${replay.join('\n')}\n${replay.join('\n')}`);
+    expect(p.innerCalls).toEqual({ total: 3, byTool: { read: 2, grep: 1 } });
   });
 
   it('rejects a transcript without a result event', () => {
@@ -83,9 +91,44 @@ describe('Codex transcript parser', () => {
 
   it('flags fallback and missing run calls', () => {
     const calls = { native: 2, run: 1, codeMode: 0, other: 0, byName: {} };
-    expect(checkArm('codex', 'C', calls)).toEqual({ fallback: true, reasons: [] });
+    expect(checkArm('codex', 'C', calls).fallback).toBe(true);
     expect(checkArm('claude', 'B', { ...calls, run: 0 }).reasons).toContain('agent-code-mode arm made no run call');
     expect(checkArm('claude', 'A', calls).reasons).toContain('arm made agent-code-mode run calls');
+  });
+
+  it('strict arms reject any native file/shell call, even next to run calls', () => {
+    const withBash = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', id: 'native-escape' }] } });
+    const p = parseClaudeTranscript(`${withBash}\n${read('claude-B.jsonl')}`);
+    expect(p.toolCalls.native).toBe(1);
+    expect(p.toolCalls.run).toBe(1);
+    const check = checkArm('claude', 'B', p.toolCalls);
+    expect(check.fallback).toBe(true);
+    expect(check.reasons).toEqual(['strict agent-code-mode arm made 1 native file/shell tool call(s)']);
+    expect(checkArm('codex', 'C', { native: 2, run: 1, codeMode: 0, other: 0, byName: {} }).reasons).toHaveLength(1);
+  });
+
+  it('counts native command items from --json even when the rollout misses them (Codex C)', () => {
+    const json = [
+      { type: 'item.completed', item: { id: 'x', type: 'command_execution', command: 'cat config/app.json' } },
+      { type: 'item.completed', item: { id: 'm', type: 'mcp_tool_call', server: 'agent-code-mode', tool: 'run' } },
+      { type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 90, output_tokens: 2 } },
+    ].map((e) => JSON.stringify(e)).join('\n');
+    const req = [
+      { kind: 'request', usage: { input_tokens: 100, cached_input_tokens: 90, output_tokens: 2 } },
+      { kind: 'call', type: 'function_call', name: 'run', namespace: 'mcp__agent-code-mode' },
+    ].map((e) => JSON.stringify(e)).join('\n');
+    const p = parseCodexTranscript(json, req);
+    expect(p.toolCalls.run).toBe(1);
+    expect(p.toolCalls.native).toBe(1);
+    expect(checkArm('codex', 'C', p.toolCalls).reasons).toHaveLength(1);
+  });
+
+  it('classifies only the agent-code-mode run tool as run', () => {
+    expect(classifyCodexTool('mcp__agent-code-mode__run')).toBe('run');
+    expect(classifyCodexTool('mcp__agent_code_mode__run')).toBe('run');
+    expect(classifyCodexTool('run', 'mcp__agent-code-mode__')).toBe('run');
+    expect(classifyCodexTool('mcp__unrelated_agent_code_mode__overrun')).toBe('other');
+    expect(classifyCodexTool('mcp__agent-code-mode__rerun')).toBe('other');
   });
 
   it('keeps only usage and call names from a rollout', () => {

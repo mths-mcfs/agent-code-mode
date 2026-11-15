@@ -151,8 +151,10 @@ const RunResultText = z.object({ calls: z.array(z.object({ tool: z.string() }).p
 const McpResult = z.object({ content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()) }).passthrough();
 
 export function classifyCodexTool(name: string, namespace?: string): 'native' | 'run' | 'codeMode' | 'other' {
-  const full = namespace ? `${namespace}.${name}` : name;
-  if (/agent[-_]?code[-_]?mode/.test(full) && /run$/.test(full)) return 'run';
+  // Exactly the agent-code-mode server's `run` tool, as Codex names MCP tools (`mcp__<server>__<tool>`,
+  // or a `mcp__<server>__` namespace plus `run`); the server name may appear with `-` or `_`.
+  const full = namespace ? `${namespace.replace(/\.$/, '')}${namespace.endsWith('__') ? '' : '__'}${name}` : name;
+  if (/^mcp__agent[-_]code[-_]mode__run$/.test(full)) return 'run';
   if (CODEX_CODE_MODE_TOOLS.includes(name)) return 'codeMode';
   if (CODEX_NATIVE_TOOLS.includes(name)) return 'native';
   return 'other';
@@ -265,6 +267,16 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
         evidence['calls']?.push(i + 1);
       }
     });
+  }
+
+  // With code mode off, command/file items in the --json stream are calls the model made itself
+  // (run calls show up as mcp_tool_call items), so they are native even when the rollout misses them.
+  if (calls.codeMode === 0 && jsonCalls.native > calls.native) {
+    calls = { ...calls, native: jsonCalls.native, byName: { ...calls.byName } };
+    for (const kind of ['command_execution', 'file_change']) {
+      const n = jsonCalls.byName[kind];
+      if (n !== undefined) calls.byName[kind] = n;
+    }
   }
 
   const innerCalls = runInnerSeen

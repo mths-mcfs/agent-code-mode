@@ -104,6 +104,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   const lines = text.split('\n');
   const seenToolUse = new Set<string>();
   const runToolUses = new Set<string>();
+  const seenToolResult = new Set<string>();
   const calls: ToolCalls = { native: 0, run: 0, codeMode: 0, other: 0, byName: {} };
   const inner: Record<string, number> = {};
   let innerTotal = 0;
@@ -142,7 +143,9 @@ export function parseClaudeTranscript(text: string): ParsedRun {
         evidence['toolUse']?.push(i + 1);
       }
       const tr = ToolResult.safeParse(block);
-      if (tr.success && runToolUses.has(tr.data.tool_use_id)) {
+      // A result can be replayed in the stream (e.g. on resume); count each tool_use_id once.
+      if (tr.success && runToolUses.has(tr.data.tool_use_id) && !seenToolResult.has(tr.data.tool_use_id)) {
+        seenToolResult.add(tr.data.tool_use_id);
         const parsed = RunResultText.safeParse(parseJson(textOf(tr.data.content)));
         if (parsed.success) {
           innerSeen = true;

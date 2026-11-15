@@ -11,6 +11,8 @@ function record(over: Partial<RunRecord> & { turns?: number; cost?: number }): R
   return RunRecordSchema.parse({
     schema: 1,
     id: `claude-T1-A-r${rest.run ?? 1}`,
+    configHash: 'aaaaaaaaaaaa',
+    config: { model: 'claude-sonnet-5-5' },
     host: 'claude',
     arm: 'A',
     armLabel: 'native tools',
@@ -73,13 +75,19 @@ describe('report', () => {
     expect(g?.costUsd?.median).toBeCloseTo(0.02, 10);
     expect(g?.inputTokens).toEqual({ median: 40, min: 20, max: 60, n: 3 });
     expect(g?.passRate).toBeCloseTo(2 / 3, 10);
-    expect(g?.fallbackRate).toBeCloseTo(1 / 3, 10);
+    expect(g?.fallbackRate).toBeCloseTo(1 / 4, 10);
     expect(g?.invalidReasons).toEqual(['timed out after 15 min']);
   });
 
   it('groups by host, task and arm, in a stable order', () => {
     const groups = summarize([record({ task: 'T2', arm: 'B' }), record({ host: 'codex', arm: 'C' }), record({}), record({ arm: 'B' })]);
     expect(groups.map((g) => `${g.host} ${g.task} ${g.arm}`)).toEqual(['claude T1 A', 'claude T1 B', 'claude T2 B', 'codex T1 C']);
+  });
+
+  it('never pools runs made with different configs', () => {
+    const groups = summarize([record({ run: 1, turns: 2 }), record({ run: 2, turns: 50, configHash: 'bbbbbbbbbbbb', config: { model: 'claude-haiku-5-5' } })]);
+    expect(groups.map((g) => [g.configHash, g.turns?.median])).toEqual([['aaaaaaaaaaaa', 2], ['bbbbbbbbbbbb', 50]]);
+    expect(markdownTable({ generatedAt: '', dryRun: false, environment: null, groups })).toContain('different configs');
   });
 
   it('writes summary.json and a Markdown table', async () => {
@@ -93,7 +101,7 @@ describe('report', () => {
       await writeFile(path.join(dir, 'env.json'), JSON.stringify({ invocations: [{ seed: 1, node: 'v22' }] }));
       const { summary, markdown } = await writeReport(dir, new Date('2026-11-15T00:00:00Z'));
       expect(summary.groups[0]?.turns).toEqual({ median: 3, min: 2, max: 7, n: 3 });
-      expect(markdown).toContain('| claude | T1 | A native tools | 100% | 3 (2–7) |');
+      expect(markdown).toContain('| claude | T1 | A native tools | aaaaaaaaaaaa | 100% | 3 (2–7) |');
       expect(markdown).toContain('"seed": 1');
       expect(JSON.parse(await readFile(path.join(dir, 'summary.json'), 'utf8')).groups).toHaveLength(1);
       expect(markdownTable({ ...summary, dryRun: true })).toContain('DRY RUN');
