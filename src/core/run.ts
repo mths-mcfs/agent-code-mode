@@ -1,0 +1,251 @@
+import { Dispatcher, type StopReason } from './dispatcher.js';
+import { errorMessage } from './errors.js';
+import { DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS, type RunArgs } from './schemas.js';
+import type {
+  CallLogEntry,
+  HostAdapter,
+  LogLevel,
+  PolicyLoadError,
+  PolicySnapshot,
+  RollbackReport,
+  RunError,
+  RunRequest,
+  RunResult,
+  Sandbox,
+  SandboxOutcome,
+  SessionContext,
+  ToolRuntime,
+  Transaction,
+} from './types.js';
+
+/** Default heap limit of a script. */
+export const DEFAULT_MEMORY_BYTES = 256 * 1024 * 1024;
+/** How long to wait for the sandbox to return after it was told to stop. */
+export const DEFAULT_STOP_GRACE_MS = 2_000;
+const MAX_LOG_LINES = 5_000;
+const MAX_LOG_CHARS = 1_000_000;
+
+export interface RunDeps<P = unknown> {
+  readonly sandbox: Sandbox;
+  readonly adapter: HostAdapter<P>;
+  readonly tools: ToolRuntime<P>;
+  readonly ctx: SessionContext;
+  /** Aborted when the client cancels the `run` request. */
+  readonly signal?: AbortSignal;
+  /** Server cap of the timeout (lower for hosts with short tool timeouts). Never above `MAX_RUN_TIMEOUT_MS`. */
+  readonly maxTimeoutMs?: number;
+  readonly memoryBytes?: number;
+  /** Grace after a stop before the sandbox is considered killed. */
+  readonly stopGraceMs?: number;
+}
+
+/** Applies defaults and clamps the timeout to `[1, min(maxTimeoutMs, MAX_RUN_TIMEOUT_MS)]`. */
+export function resolveTimeoutMs(requested: number | undefined, maxTimeoutMs: number = MAX_RUN_TIMEOUT_MS): number {
+  const cap = Math.max(1, Math.min(MAX_RUN_TIMEOUT_MS, Math.floor(maxTimeoutMs)));
+  const wanted = requested === undefined || !Number.isFinite(requested) ? DEFAULT_RUN_TIMEOUT_MS : Math.floor(requested);
+  return Math.min(cap, Math.max(1, wanted));
+}
+
+/** Builds a `RunRequest` from validated `run` arguments. */
+export function toRunRequest(args: RunArgs, maxTimeoutMs?: number): RunRequest {
+  return { code: args.code, transaction: args.transaction ?? false, timeoutMs: resolveTimeoutMs(args.timeoutMs, maxTimeoutMs) };
+}
+
+class LogCollector {
+  readonly lines: string[] = [];
+  #chars = 0;
+  #dropped = 0;
+
+  add(level: LogLevel, text: string): void {
+    const line = level === 'log' ? text : `${level}: ${text}`;
+    if (this.lines.length >= MAX_LOG_LINES || this.#chars + line.length > MAX_LOG_CHARS) {
+      this.#dropped++;
+      return;
+    }
+    this.#chars += line.length;
+    this.lines.push(line);
+  }
+
+  finish(): string[] {
+    if (this.#dropped > 0) this.lines.push(`[${this.#dropped} more log lines dropped]`);
+    return this.lines;
+  }
+}
+
+function waitOrGrace(promise: Promise<SandboxOutcome>, signal: AbortSignal, graceMs: number): Promise<SandboxOutcome> {
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = (): void => {
+      timer = setTimeout(
+        () =>
+          resolve({
+            ok: false,
+            kind: 'killed',
+            error: { name: 'Killed', message: 'the sandbox did not stop in time after the run was stopped' },
+          }),
+        graceMs,
+      );
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (outcome) => {
+        if (timer) clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        resolve(outcome);
+      },
+      (err: unknown) => {
+        if (timer) clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        resolve({ ok: false, kind: 'error', error: { name: 'SandboxError', message: errorMessage(err) } });
+      },
+    );
+  });
+}
+
+function runError(stopReason: StopReason | undefined, outcome: SandboxOutcome, denied: CallLogEntry | undefined, timeoutMs: number): RunError | undefined {
+  if (stopReason === 'denied') {
+    const what = denied ? `${denied.id} (${denied.summary}) was denied: ${denied.reason ?? ''}` : 'a call was denied';
+    return { kind: 'denied', name: 'PermissionDenied', message: `transaction aborted: ${what}` };
+  }
+  if (stopReason === 'cancelled') return { kind: 'cancelled', name: 'Cancelled', message: 'the run was cancelled by the client' };
+  if (stopReason === 'timeout' || (!outcome.ok && outcome.kind === 'timeout')) {
+    return { kind: 'timeout', name: 'Timeout', message: `the script did not finish within ${timeoutMs} ms` };
+  }
+  if (!outcome.ok) {
+    const { name, message, stack } = outcome.error;
+    return stack === undefined ? { kind: outcome.kind, name, message } : { kind: outcome.kind, name, message, stack };
+  }
+  return undefined;
+}
+
+/**
+ * Runs one script end to end: loads the policy, starts the transaction,
+ * runs the sandbox with the dispatcher behind its bindings, enforces the
+ * timeout and cancellation, rolls back on failure and builds the `RunResult`.
+ * Never rejects.
+ */
+export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<RunResult> {
+  const timeoutMs = resolveTimeoutMs(req.timeoutMs, deps.maxTimeoutMs);
+  const graceMs = deps.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const logs = new LogCollector();
+  const controller = new AbortController();
+  let stopReason: StopReason | undefined;
+  let dispatcher: Dispatcher<P> | undefined;
+  let denied: CallLogEntry | undefined;
+  let tx: Transaction | undefined;
+
+  const stop = (reason: StopReason): void => {
+    if (stopReason !== undefined) return;
+    stopReason = reason;
+    controller.abort(reason);
+    void dispatcher?.stop(reason);
+  };
+  const onExternalAbort = (): void => stop('cancelled');
+  deps.signal?.addEventListener('abort', onExternalAbort, { once: true });
+  if (deps.signal?.aborted) stop('cancelled');
+
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    let policy: PolicySnapshot<P> | PolicyLoadError;
+    try {
+      policy = await deps.adapter.loadPolicy(deps.ctx);
+    } catch (err) {
+      policy = { error: errorMessage(err) };
+    }
+
+    if (req.transaction) tx = deps.tools.beginTransaction();
+    dispatcher = new Dispatcher<P>({
+      adapter: deps.adapter,
+      tools: deps.tools,
+      ctx: deps.ctx,
+      policy,
+      ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
+    });
+    const active = dispatcher;
+    if (stopReason !== undefined) void active.stop(stopReason);
+
+    // Backup timer: the sandbox enforces `timeoutMs` itself; this fires only if it does not.
+    timer = setTimeout(() => stop('timeout'), timeoutMs + graceMs);
+
+    let outcome: SandboxOutcome;
+    if (stopReason !== undefined) {
+      outcome = { ok: false, kind: 'killed', error: { name: 'Killed', message: 'the run was stopped before the script started' } };
+    } else {
+      let started: Promise<SandboxOutcome>;
+      try {
+        started = deps.sandbox.run(req.code, {
+          timeoutMs,
+          memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
+          signal: controller.signal,
+          onCall: (tool, args) => active.dispatch(tool, args),
+          onLog: (level, text) => logs.add(level, text),
+        });
+      } catch (err) {
+        started = Promise.reject(err);
+      }
+      outcome = await waitOrGrace(started, controller.signal, graceMs);
+    }
+    clearTimeout(timer);
+    timer = undefined;
+
+    // No call may start after the script ended; wait for in-flight ones.
+    await active.stop(stopReason ?? 'finished');
+
+    const error = runError(stopReason, outcome, denied, timeoutMs);
+    const warnings = [...active.warnings];
+    let rolledBack: RollbackReport | undefined;
+    if (tx && error) {
+      try {
+        rolledBack = await tx.rollback();
+      } catch (err) {
+        warnings.push(`rollback failed: ${errorMessage(err)}`);
+      }
+      if (active.bashCommits > 0) {
+        warnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
+      }
+    }
+
+    const base = {
+      logs: logs.finish(),
+      calls: active.calls,
+      changedFiles: active.changedFiles,
+      diff: active.diff,
+      warnings,
+      ...(rolledBack ? { rolledBack } : {}),
+    };
+    if (error) return { ok: false, error, ...base };
+    return { ok: true, result: outcome.ok ? (outcome.value ?? null) : null, ...base };
+  } catch (err) {
+    if (dispatcher) await dispatcher.stop(stopReason ?? 'finished');
+    const warnings = dispatcher ? [...dispatcher.warnings] : [];
+    let rolledBack: RollbackReport | undefined;
+    if (tx) {
+      try {
+        rolledBack = await tx.rollback();
+      } catch (rollbackErr) {
+        warnings.push(`rollback failed: ${errorMessage(rollbackErr)}`);
+      }
+    }
+    return {
+      ok: false,
+      error: { kind: 'internal', name: 'InternalError', message: errorMessage(err) },
+      logs: logs.finish(),
+      calls: dispatcher?.calls ?? [],
+      changedFiles: dispatcher?.changedFiles ?? [],
+      diff: dispatcher?.diff ?? '',
+      warnings,
+      ...(rolledBack ? { rolledBack } : {}),
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    deps.signal?.removeEventListener('abort', onExternalAbort);
+    if (tx) {
+      try {
+        await tx.dispose();
+      } catch {
+        // Disposing only releases the journal.
+      }
+    }
+  }
+}
