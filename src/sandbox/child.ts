@@ -557,6 +557,10 @@ class VmRun {
   /** A host-side exception (e.g. a WASM trap when an allocation inside the bindings layer fails). */
   #hostFailure(err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
+    // Deep recursion that outruns the Node stack before QuickJS's own check: the run ends, as a script error.
+    if (err instanceof RangeError && /call stack/i.test(message)) {
+      return this.#finish({ ok: false, kind: 'error', error: { name: 'RangeError', message: 'Maximum call stack size exceeded' } });
+    }
     const oom = this.#memoryFull() || /out of memory/i.test(message);
     this.#finish({ ok: false, kind: oom ? 'oom' : 'error', error: { name: oom ? 'InternalError' : 'SandboxError', message: oom ? 'out of memory' : message.slice(0, MAX_ERROR_CHARS) } });
   }

@@ -23,7 +23,7 @@ export interface QuickJsSandboxOptions {
   readonly maxResultChars?: number;
   /** Maximum characters of the JSON arguments of one call. Default 4 MiB. */
   readonly maxArgsChars?: number;
-  /** QuickJS stack limit. Default 256 KiB (deeper values overflow the host stack of the WASM build). */
+  /** QuickJS stack limit. Default 128 KiB: the WASM build runs on the Node stack, and 256 KiB already overflows it on macOS with Node 22. */
   readonly stackBytes?: number;
   /** `--max-old-space-size` of the child process, in MiB. Default 256. */
   readonly childHeapMb?: number;
@@ -37,7 +37,7 @@ const DEFAULTS = {
   maxLogLineChars: 10_000,
   maxResultChars: 1024 * 1024,
   maxArgsChars: 4 * 1024 * 1024,
-  stackBytes: 256 * 1024,
+  stackBytes: 128 * 1024,
   childHeapMb: 256,
 } as const;
 

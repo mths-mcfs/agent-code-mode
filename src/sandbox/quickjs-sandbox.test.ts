@@ -202,6 +202,19 @@ describe('QuickJsSandbox: script semantics', () => {
   });
 });
 
+/**
+ * Variables the OS layer adds to every child env even when the parent passes
+ * an empty one: libuv on Windows copies these required ones, macOS adds its
+ * text-encoding hint. None of them is a server secret.
+ */
+const PLATFORM_ENV = new Set(
+  process.platform === 'win32'
+    ? ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'PATH', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR']
+    : process.platform === 'darwin'
+      ? ['__CF_USER_TEXT_ENCODING']
+      : [],
+);
+
 describe('QuickJsSandbox: no ambient authority', () => {
   it('exposes no host objects, module loading or timers', async () => {
     const { outcome, calls } = await run(`
@@ -257,10 +270,10 @@ describe('QuickJsSandbox: no ambient authority', () => {
       try { fs.writeFileSync(${JSON.stringify(target)}, 'x'); r.write = 'allowed'; } catch (e) { r.write = e.code; }
       try { require('child_process').execFileSync(process.execPath, ['-e', '0']); r.spawn = 'allowed'; } catch (e) { r.spawn = e.code; }
       try { new Function('return 1')(); r.codegen = 'allowed'; } catch (e) { r.codegen = e.name; }
-      r.env = Object.keys(process.env).filter((k) => !/^systemroot$/i.test(k));
+      r.env = Object.keys(process.env).filter((k) => !PLATFORM_ENV.has(k.toUpperCase()));
       console.log(JSON.stringify(r));`;
     const flags = childExecArgv(childEntryPath(), 256).filter((flag) => flag !== '--experimental-strip-types');
-    const out = spawnSync(process.execPath, [...flags, '-e', probe], { env: childEnv(), encoding: 'utf8' });
+    const out = spawnSync(process.execPath, [...flags, '-e', probe.replace('PLATFORM_ENV', `new Set(${JSON.stringify([...PLATFORM_ENV])})`)], { env: childEnv(), encoding: 'utf8' });
     expect(JSON.parse(out.stdout)).toEqual({ write: 'ERR_ACCESS_DENIED', spawn: 'ERR_ACCESS_DENIED', codegen: 'EvalError', env: [] });
     expect(existsSync(target)).toBe(false);
   });
