@@ -64,7 +64,7 @@ function link(target: string, at: string): void {
 }
 
 beforeEach(() => {
-  base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'acm-tools-')));
+  base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-tools-')));
   ws = path.join(base, 'ws');
   outside = path.join(base, 'outside');
   mkdirSync(ws);
@@ -106,8 +106,12 @@ describe('path traversal', () => {
     expect(await code(prep('write', { path: 'a\0b', content: 'x' }))).toBe('invalid-args');
     const long = `${'a'.repeat(250)}/`.repeat(40) + 'f.txt';
     const result = await code(run('write', { path: long, content: 'x' }));
-    expect(['invalid-args', 'tool-error']).toContain(result);
-    expect(readdirSync(ws)).toEqual([]);
+    // Windows with long-path support accepts it; it must then be inside the workspace.
+    if (result === 'resolved') expect(readFileSync(path.join(ws, long), 'utf8')).toBe('x');
+    else {
+      expect(['invalid-args', 'tool-error']).toContain(result);
+      expect(readdirSync(ws)).toEqual([]);
+    }
   });
 
   it('keeps unicode lookalikes of .. inside the workspace', async () => {
@@ -217,6 +221,16 @@ describe('protected paths', () => {
     const read = await run('read', { path: '.git/config' });
     expect('content' in read && read.content).toBe('[core]');
     expect(readFileSync(path.join(ws, '.git', 'config'), 'utf8')).toBe('[core]\n');
+  });
+
+  it.skipIf(IS_WINDOWS)('matches patterns written through an alias of the workspace', async () => {
+    const alias = path.join(base, 'alias');
+    link(ws, alias);
+    const aliasCtx = makeContext(alias);
+    const p = { ...policy, protectedPaths: [`${alias}/.claude/settings*.json`, `${alias}/.codex/**`] };
+    expect(await code(rt.prepare(call('write', { path: '.claude/settings.json', content: '{}' }), aliasCtx, p))).toBe('protected-path');
+    expect(await code(rt.prepare(call('write', { path: '.codex/config.toml', content: '' }), aliasCtx, p))).toBe('protected-path');
+    expect(await code(rt.prepare(call('write', { path: 'ok.txt', content: '' }), aliasCtx, p))).toBe('resolved');
   });
 
   it('expands ~ in protected patterns', async () => {

@@ -13,7 +13,7 @@ function gitApply(before: string | null, diff: string): string {
   try {
     if (before !== null) writeFileSync(path.join(dir, 'f.txt'), before);
     writeFileSync(path.join(dir, 'p.diff'), diff);
-    const r = spawnSync('git', ['apply', '--unsafe-paths', '--whitespace=nowarn', 'p.diff'], { cwd: dir, encoding: 'utf8' });
+    const r = spawnSync('git', ['-c', 'core.autocrlf=false', 'apply', '--unsafe-paths', '--whitespace=nowarn', 'p.diff'], { cwd: dir, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`git apply failed: ${r.stderr}\n${diff}`);
     return readFileSync(path.join(dir, 'f.txt'), 'utf8');
   } finally {
