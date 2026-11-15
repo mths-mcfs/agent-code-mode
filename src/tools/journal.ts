@@ -14,7 +14,18 @@ import path from 'node:path';
 import { z } from 'zod';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type { RollbackReport, Transaction } from '../core/types.js';
-import { assertDirUnchanged, atomicWrite, errnoCode, readRegularFile, removeRegularFile, sha256, syncDir, writeDurable } from './fs-ops.js';
+import {
+  type RegularFile,
+  assertDirUnchanged,
+  atomicWrite,
+  errnoCode,
+  readRegularFile,
+  removeEmptyDirInside,
+  removeRegularFile,
+  sha256,
+  syncDir,
+  writeDurable,
+} from './fs-ops.js';
 import { isInsideDir, isInsideGitDir } from './jail.js';
 
 /** Above this many bytes of originals a transaction refuses further writes. */
@@ -192,9 +203,7 @@ export class FileTransaction implements Transaction {
       for (const live of [...this.#entries.values()].reverse()) {
         const { entry } = live;
         try {
-          const current = await readRegularFile(entry.path).catch((err: unknown) => {
-            throw new ToolError('stale', `cannot read: ${errorMessage(err)}`);
-          });
+          const current = await currentContent(entry.path);
           const currentHash = current ? sha256(current.bytes) : null;
           const originalHash = entry.existed ? entry.original : null;
           if (currentHash === originalHash) continue;
@@ -208,7 +217,7 @@ export class FileTransaction implements Transaction {
           skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
         }
       }
-      await removeCreatedDirs(this.#dirs);
+      await removeCreatedDirs(this.#dirs, this.#roots);
       await this.#removeRecord();
       return { restored, skipped };
     });
@@ -229,27 +238,32 @@ export class FileTransaction implements Transaction {
   }
 }
 
+/**
+ * Content at `abs`, read only through real directories: null when the file
+ * (or its directory) is gone; `stale` when its directory now resolves
+ * elsewhere (a link was swapped in), so nothing outside is read or touched.
+ */
+async function currentContent(abs: string): Promise<RegularFile | null> {
+  const parent = await fs.lstat(path.dirname(abs)).catch(() => null);
+  if (!parent) return null;
+  await assertDirUnchanged(path.dirname(abs));
+  return readRegularFile(abs);
+}
+
 async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: string | null): Promise<void> {
   if (isInsideGitDir(entry.path)) throw new ToolError('protected-path', 'inside a .git directory');
   if (!entry.existed) {
-    await assertDirUnchanged(path.dirname(entry.path));
-    await removeRegularFile(entry.path);
+    if (currentHash !== null) await removeRegularFile(entry.path, currentHash);
     return;
   }
   if (bytes === null || sha256(bytes) !== entry.original) throw new ToolError('tool-error', 'the saved original is damaged');
   const expect = currentHash === null ? ({ kind: 'absent' } as const) : ({ kind: 'hash', sha256: currentHash } as const);
-  await atomicWrite(entry.path, bytes, expect);
-  if (entry.mode !== null && process.platform !== 'win32') await fs.chmod(entry.path, entry.mode).catch(() => undefined);
+  await atomicWrite(entry.path, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {});
 }
 
-async function removeCreatedDirs(dirs: readonly string[]): Promise<void> {
-  for (const d of [...dirs].sort((a, b) => b.length - a.length)) {
-    try {
-      await fs.rmdir(d);
-    } catch {
-      // Not empty, or already gone.
-    }
-  }
+/** Removes created directories that are empty, real and strictly inside `roots`, deepest first. */
+async function removeCreatedDirs(dirs: readonly string[], roots: readonly string[]): Promise<void> {
+  for (const d of [...dirs].sort((a, b) => b.length - a.length)) await removeEmptyDirInside(d, roots);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,11 +322,7 @@ async function undoRecord(manifest: Manifest, dir: string, roots: readonly strin
         skipped.push({ path: entry.path, reason: 'error', detail: 'outside the roots the journal was written for; not touched' });
         continue;
       }
-      await assertDirUnchanged(path.dirname(entry.path)).catch((err: unknown) => {
-        // A parent that no longer exists is fine for a created file that is gone too.
-        if (entry.existed) throw err;
-      });
-      const current = await readRegularFile(entry.path);
+      const current = await currentContent(entry.path);
       const currentHash = current ? sha256(current.bytes) : null;
       const originalHash = entry.existed ? entry.original : null;
       if (currentHash === originalHash) continue;
@@ -327,8 +337,9 @@ async function undoRecord(manifest: Manifest, dir: string, roots: readonly strin
       skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
     }
   }
-  const dirs = manifest.dirs.filter((d) => path.isAbsolute(d) && roots.some((root) => isInsideDir(root, d) && root !== d));
-  await removeCreatedDirs(dirs);
+  // Only directories inside both the given roots and the roots the journal was written for.
+  const dirs = manifest.dirs.filter((d) => manifest.roots.some((root) => isInsideDir(root, d)));
+  await removeCreatedDirs(dirs, roots);
   return { restored, skipped };
 }
 

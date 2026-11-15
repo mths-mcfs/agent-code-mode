@@ -17,7 +17,7 @@ import type {
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace, type MatchHow } from './edit-match.js';
-import { assertDirUnchanged, atomicWrite, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
+import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { containmentUnavailableReason } from './sandbox.js';
@@ -50,6 +50,8 @@ export interface NodeToolRuntimeOptions {
   readonly additionalRoots?: readonly string[];
   /** Bytes kept of each of bash stdout and stderr. */
   readonly bashOutputCapBytes?: number;
+  /** Time the grep regular expression may run on one file before grep fails. */
+  readonly grepFileBudgetMs?: number;
 }
 
 /** What `commit` needs to know about a call besides its frozen effect. */
@@ -60,6 +62,8 @@ interface CallMeta {
   readonly display: string;
   /** Paths a sandboxed bash may never write. */
   readonly denyWrite: readonly string[];
+  /** For write and edit: identity of the file and its directories at prepare. */
+  readonly identity?: PathIdentity;
 }
 
 /**
@@ -175,9 +179,8 @@ export class NodeToolRuntime implements ToolRuntime {
         return prepared;
       }
       case 'write': {
-        const absPath = await jail.resolve(call.args.path);
-        jail.assertWritable(absPath);
-        const m = meta(absPath);
+        const absPath = await jail.resolveForWrite(call.args.path);
+        const m = { ...meta(absPath), identity: await captureIdentity(absPath, jail.rootOf(absPath) ?? jail.cwd) };
         const current = await this.#readExisting(absPath);
         const diff =
           current !== null && isBinary(current.bytes)
@@ -198,9 +201,8 @@ export class NodeToolRuntime implements ToolRuntime {
         return prepared;
       }
       case 'edit': {
-        const absPath = await jail.resolve(call.args.path);
-        jail.assertWritable(absPath);
-        const m = meta(absPath);
+        const absPath = await jail.resolveForWrite(call.args.path);
+        const m = { ...meta(absPath), identity: await captureIdentity(absPath, jail.rootOf(absPath) ?? jail.cwd) };
         const current = await this.#readExisting(absPath);
         if (current === null) throw new ToolError('not-found', `${m.display} does not exist`);
         const text = decodeText(m.display, current.bytes);
@@ -305,10 +307,10 @@ export class NodeToolRuntime implements ToolRuntime {
         return this.#commitRead(prepared);
       case 'write':
       case 'edit':
-        return this.#commitWrite(prepared, tx);
+        return this.#commitWrite(prepared, signal, tx);
       case 'grep': {
         await assertDirUnchanged(prepared.effect.absRoot);
-        return runGrep(prepared.effect, this.#metaOf(prepared, prepared.effect.absRoot).root, signal);
+        return runGrep(prepared.effect, this.#metaOf(prepared, prepared.effect.absRoot).root, signal, this.#opts.grepFileBudgetMs);
       }
       case 'glob': {
         await assertDirUnchanged(prepared.effect.absRoot);
@@ -342,20 +344,24 @@ export class NodeToolRuntime implements ToolRuntime {
     return { path: absPath, content: window.join('\n'), startLine: offset, totalLines: lines.length, truncated };
   }
 
-  async #commitWrite(prepared: PreparedCallOf<'write'> | PreparedCallOf<'edit'>, tx: Transaction | undefined): Promise<ToolResult> {
+  async #commitWrite(
+    prepared: PreparedCallOf<'write'> | PreparedCallOf<'edit'>,
+    signal: AbortSignal,
+    tx: Transaction | undefined,
+  ): Promise<ToolResult> {
     if (tx !== undefined && !(tx instanceof FileTransaction)) {
       throw new ToolError('tool-error', 'the transaction was not started by this tool runtime; refusing to write without a journal');
     }
     const { absPath, beforeHash, afterContent } = prepared.effect;
-    const m = this.#metaOf(prepared, absPath);
+    const m = this.#meta.get(prepared);
+    if (m?.identity === undefined) throw new ToolError('tool-error', 'this write was not prepared by this tool runtime');
     const bytes = Buffer.from(afterContent, 'utf8');
     const nextHash = sha256(bytes);
-    const outcome = await atomicWrite(
-      absPath,
-      bytes,
-      beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash },
-      tx ? (before, createdDirs) => tx.record(absPath, m.root, before, nextHash, createdDirs) : undefined,
-    );
+    const outcome = await atomicWrite(absPath, bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {
+      signal,
+      identity: m.identity,
+      ...(tx ? { beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs) } : {}),
+    });
     tx?.written(absPath, nextHash);
     if (prepared.tool === 'write') return { path: absPath, created: outcome.before === null, diff: prepared.effect.diff };
     return {

@@ -1,8 +1,11 @@
 import { constants as FS } from 'node:fs';
+import { Worker } from 'node:worker_threads';
+import { z } from 'zod';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
 import { DEFAULT_CASE_INSENSITIVE, matchesPathPattern } from '../core/paths.js';
+import { readFileInside } from './fs-ops.js';
 import type { GlobEffect, GlobResult, GrepEffect, GrepMatch, GrepResult } from '../core/types.js';
 
 /** Default `grep` result count. */
@@ -167,6 +170,13 @@ async function ancestorLayers(top: string, dir: string): Promise<IgnoreLayer[]> 
 // Walking
 // ---------------------------------------------------------------------------
 
+async function isRealDir(dir: string): Promise<boolean> {
+  const st = await fs.lstat(dir).catch(() => null);
+  if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
+  const real = await fs.realpath(dir).catch(() => null);
+  return real !== null && (process.platform === 'win32' ? real.toLowerCase() === dir.toLowerCase() : real === dir);
+}
+
 /**
  * Lists regular files below `absRoot` (real path, inside the jail), sorted,
  * skipping `.git`, `node_modules` and gitignored entries. Symbolic links are
@@ -192,6 +202,9 @@ async function* walkFiles(absRoot: string, jailRoot: string, signal: AbortSignal
     } catch {
       continue;
     }
+    // A directory swapped for a link while it was listed is skipped whole:
+    // its names may come from outside the workspace.
+    if (!(await isRealDir(dir))) continue;
     const own = dir === absRoot ? null : await loadIgnore(dir);
     const here = own ? [...layers, own] : layers;
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -287,41 +300,123 @@ function matchesFileGlob(rel: string, globs: readonly string[]): boolean {
   return globs.some((g) => (g.includes('/') ? matchesPathPattern(rel, g) : matchesPathPattern(base, g)));
 }
 
-export async function runGrep(effect: GrepEffect, jailRoot: string, signal: AbortSignal): Promise<GrepResult> {
-  const re = compileGrep(effect.pattern, effect.ignoreCase);
+/**
+ * Matches lines in a worker thread, so a pathological pattern (catastrophic
+ * backtracking) can be stopped: each file gets a time budget, and an abort
+ * terminates the worker at once.
+ */
+const MATCH_WORKER_SOURCE = `
+const { parentPort, workerData } = require('node:worker_threads');
+const re = new RegExp(workerData.pattern, workerData.flags);
+parentPort.on('message', (m) => {
+  const lines = m.text.split('\\n');
+  const hits = [];
+  let more = false;
+  for (let i = 0; i < lines.length; i++) {
+    let t = lines[i];
+    if (t.endsWith('\\r')) t = t.slice(0, -1);
+    if (i === lines.length - 1 && t === '') break;
+    if (!re.test(t)) continue;
+    if (hits.length >= m.room) { more = true; break; }
+    hits.push([i + 1, t.length > m.lineMax ? t.slice(0, m.lineMax) + '\\u2026' : t]);
+  }
+  parentPort.postMessage({ hits, more });
+});
+`;
+
+const HitsSchema = z.object({ hits: z.array(z.tuple([z.number().int(), z.string()])), more: z.boolean() });
+type Hits = z.infer<typeof HitsSchema>;
+
+class MatchWorker {
+  readonly #worker: Worker;
+  #dead = false;
+
+  constructor(pattern: string, flags: string) {
+    this.#worker = new Worker(MATCH_WORKER_SOURCE, {
+      eval: true,
+      workerData: { pattern, flags },
+      resourceLimits: { maxOldGenerationSizeMb: 256 },
+    });
+    this.#worker.once('exit', () => (this.#dead = true));
+  }
+
+  match(file: string, text: string, room: number, budgetMs: number, signal: AbortSignal): Promise<Hits> {
+    return new Promise((resolve, reject) => {
+      if (this.#dead) return reject(new ToolError('tool-error', 'grep worker stopped'));
+      const done = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        this.#worker.off('message', onMessage);
+        this.#worker.off('error', onError);
+      };
+      const onMessage = (msg: unknown): void => {
+        done();
+        const parsed = HitsSchema.safeParse(msg);
+        if (parsed.success) resolve(parsed.data);
+        else reject(new ToolError('tool-error', 'grep worker returned an invalid reply'));
+      };
+      const onError = (err: Error): void => {
+        done();
+        reject(new ToolError('tool-error', `grep failed on ${file}: ${err.message}`));
+      };
+      const onAbort = (): void => {
+        done();
+        this.close();
+        reject(new ToolError('cancelled', 'grep was stopped because the run stopped'));
+      };
+      const timer = setTimeout(() => {
+        done();
+        this.close();
+        reject(
+          new ToolError(
+            'tool-error',
+            `grep pattern ran for more than ${budgetMs} ms on ${file} and was stopped; the regular expression is too expensive (catastrophic backtracking?)`,
+          ),
+        );
+      }, budgetMs);
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.#worker.on('message', onMessage);
+      this.#worker.once('error', onError);
+      this.#worker.postMessage({ text, room, lineMax: MAX_LINE_CHARS });
+    });
+  }
+
+  close(): void {
+    this.#dead = true;
+    void this.#worker.terminate();
+  }
+}
+
+/** Default time budget of the regex on one file. */
+export const DEFAULT_GREP_FILE_BUDGET_MS = 10_000;
+
+export async function runGrep(
+  effect: GrepEffect,
+  jailRoot: string,
+  signal: AbortSignal,
+  fileBudgetMs: number = DEFAULT_GREP_FILE_BUDGET_MS,
+): Promise<GrepResult> {
+  compileGrep(effect.pattern, effect.ignoreCase);
   const globs = effect.glob === null ? null : expandBraces(effect.glob.replace(/\\/g, '/'));
   const matches: GrepMatch[] = [];
-  let truncated = false;
-  for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
-    if (globs && file !== effect.absRoot && !matchesFileGlob(toRel(effect.absRoot, file), globs)) continue;
-    let bytes: Buffer;
-    try {
-      const handle = await fs.open(file, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0));
-      try {
-        const st = await handle.stat();
-        if (!st.isFile() || st.size > MAX_GREP_FILE_BYTES) continue;
-        bytes = await handle.readFile();
-      } finally {
-        await handle.close();
-      }
-    } catch {
-      continue;
+  const worker = new MatchWorker(effect.pattern, effect.ignoreCase ? 'i' : '');
+  try {
+    for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
+      if (globs && file !== effect.absRoot && !matchesFileGlob(toRel(effect.absRoot, file), globs)) continue;
+      // Opened without following links and checked to be the file at this path,
+      // so a directory swapped for a link mid-walk cannot lead outside.
+      const bytes = await readFileInside(file, MAX_GREP_FILE_BYTES);
+      if (bytes === null || bytes.subarray(0, 8192).includes(0)) continue;
+      const room = effect.maxResults - matches.length;
+      const found = await worker.match(file, bytes.toString('utf8'), room, fileBudgetMs, signal);
+      for (const [line, text] of found.hits) matches.push({ file, line, text });
+      if (found.more) return { matches, truncated: true };
     }
-    if (bytes.subarray(0, 8192).includes(0)) continue;
-    const lines = bytes.toString('utf8').split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      let text = lines[i] ?? '';
-      if (text.endsWith('\r')) text = text.slice(0, -1);
-      if (i === lines.length - 1 && text === '') break;
-      if (!re.test(text)) continue;
-      if (matches.length >= effect.maxResults) {
-        truncated = true;
-        return { matches, truncated };
-      }
-      matches.push({ file, line: i + 1, text: text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS)}…` : text });
-    }
+  } finally {
+    worker.close();
   }
-  return { matches, truncated };
+  return { matches, truncated: false };
 }
 
 export async function runGlob(effect: GlobEffect, jailRoot: string, signal: AbortSignal): Promise<GlobResult> {
