@@ -580,7 +580,7 @@ describe('policy snapshot', () => {
     expect(s.policy.bashContainment).toEqual({
       mode: 'sandbox',
       readOnly: false,
-      writableRoots: [s.project, path.resolve('/opt/extra'), path.join(s.home, '.cache', 'tool'), path.resolve('/opt/build')],
+      writableRoots: [s.project, path.resolve(s.project, '/opt/extra'), path.join(s.home, '.cache', 'tool'), path.resolve(s.project, '/opt/build')],
       network: false,
     });
   });
