@@ -131,9 +131,24 @@ describe.runIf(posix)('Codex hooks', () => {
       const a = adapter(managed([{ hooks: [{ type: 'command', command: cmd }] }]));
       expect(await authorize(a, bash('ls')), cmd).toMatchObject({ kind: 'deny', source: 'hook-error' });
     }
-    // Plain text output is ignored by Codex, and here too.
+  });
+
+  it('denies when a hook prints output that is not JSON (Codex ignores it)', async () => {
     const a = adapter(managed([{ hooks: [{ type: 'command', command: hooks.text }] }]));
-    expect(await authorize(a, bash('ls'))).toEqual({ kind: 'allow' });
+    expect(await authorize(a, bash('ls'))).toMatchObject({ kind: 'deny', source: 'hook-error', reason: expect.stringContaining('not JSON') });
+  });
+
+  it('matches hook matchers with Rust regex semantics', async () => {
+    for (const matcher of ['\\ABash\\z', '(?i)^bash$', '^(?P<t>Ba)sh$', '[[:upper:]]ash', 'B\\x{61}sh']) {
+      const a = adapter(managed([{ matcher, hooks: [{ type: 'command', command: hooks.denyJson }] }]));
+      expect(await authorize(a, bash('ls')), matcher).toMatchObject({ kind: 'deny', source: 'hook' });
+    }
+    // A matcher that cannot be translated exactly matches every call.
+    const odd = adapter(managed([{ matcher: '(?x) ^ Write $', hooks: [{ type: 'command', command: hooks.denyJson }] }]));
+    expect(await authorize(odd, bash('ls'))).toMatchObject({ kind: 'deny', source: 'hook' });
+    // A translated matcher still does not match other tools.
+    const other = adapter(managed([{ matcher: '\\Aapply_patch\\z', hooks: [{ type: 'command', command: hooks.denyJson }] }]));
+    expect(await authorize(other, bash('ls'))).toEqual({ kind: 'allow' });
   });
 
   it('matches apply_patch with the Write|Edit alias, and Bash hooks do not', async () => {
@@ -236,6 +251,17 @@ describe.runIf(posix)('exactness: what the hook sees is what will be applied', (
     expect(recorded()['tool_input']).toEqual({ command: `sed -n '3,12p' -- '${WS}/it'\\''s.txt'` });
   });
 
+  it('denies a change the Codex patch format cannot show exactly when a hook would see it', async () => {
+    const withHook = adapter(managed([{ matcher: 'Write', hooks: [{ type: 'command', command: hooks.record }] }]), { current: { [`${WS}/a.txt`]: 'a\n' } });
+    for (const call of [write(`${WS}/crlf.txt`, null, 'hello\r\n'), write(`${WS}/nonl.txt`, null, 'hello'), write(`${WS}/a.txt`, 'a\n', 'a\nb')]) {
+      expect(await authorize(withHook, call)).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+    }
+    expect(await authorize(withHook, write(`${WS}/ok.txt`, null, 'hello\n'))).toEqual({ kind: 'allow' });
+    // No hook sees apply_patch: nothing inexact is shown, nothing to deny.
+    const bashOnly = adapter(managed([{ matcher: 'Bash', hooks: [{ type: 'command', command: hooks.record }] }]));
+    expect(await authorize(bashOnly, write(`${WS}/crlf.txt`, null, 'hello\r\n'))).toEqual({ kind: 'allow' });
+  });
+
   it('maps a rewritten apply_patch back to a write', async () => {
     const file = `${WS}/hello.txt`;
     const a = adapter(managed([{ hooks: [{ type: 'command', command: hooks.patchRewrite }] }]), { current: { [file]: 'hello\n' } });
@@ -300,6 +326,46 @@ describe.runIf(posix)('sandbox mode × tool', () => {
     expect((await decide('read-only', bash('rm -rf build'))).decision.kind).toBe('ask');
     expect((await decide('read-only', bash('ls'), {}, ['codex', '-a', 'untrusted'])).decision.kind).toBe('ask');
     expect((await decide('read-only', bash("echo 'x"))).decision).toMatchObject({ kind: 'deny', source: 'rule' });
+  });
+
+  it('falls back to bash -lc for scripts that are not plain, like Codex', async () => {
+    const bashRule = { '/home/u/.codex/rules/default.rules': 'prefix_rule(pattern=["bash"], decision="forbidden")\n' };
+    for (const cmd of ['echo ok # comment', 'echo {1..3}', 'echo a\\ b', 'echo ok &&', '"echo" ok', 'echo "$HOME"']) {
+      expect((await decide('danger-full-access', bash(cmd), bashRule)).decision, cmd).toMatchObject({ kind: 'deny', source: 'rule' });
+    }
+    for (const cmd of ['echo ok', "echo 'a b' | wc -l", 'a && b\nc']) {
+      expect((await decide('danger-full-access', bash(cmd), bashRule)).decision, cmd).toEqual({ kind: 'allow' });
+    }
+  });
+
+  it('evaluates commands behind wrappers and trap actions', async () => {
+    const blocked = { '/home/u/.codex/rules/default.rules': 'prefix_rule(pattern=["blocked"], decision="forbidden")\n' };
+    const wrapped = [
+      'command blocked',
+      "trap 'blocked' EXIT",
+      'trap -- "blocked x" INT',
+      'env X=1 blocked',
+      'env -i -u HOME blocked',
+      'env -S "blocked now"',
+      'sudo -u root blocked',
+      'exec blocked',
+      'builtin blocked',
+      'nohup blocked',
+      'nice -n 5 blocked',
+      'timeout -s KILL 5 blocked',
+      'time -p blocked',
+      'stdbuf -oL blocked',
+      'xargs -n 1 blocked',
+      'find . -name x -exec blocked {} ;',
+      "eval 'blocked x'",
+      'sudo env A=1 command blocked',
+    ];
+    for (const cmd of wrapped) expect((await decide('danger-full-access', bash(cmd), blocked)).decision, cmd).toMatchObject({ kind: 'deny', source: 'rule' });
+    // A forced rm in a trap action needs approval, like Codex's dangerous-command check.
+    expect((await decide('danger-full-access', bash("trap 'rm -rf /tmp/example' EXIT"))).decision.kind).toBe('ask');
+    // Unknown wrapper options: cannot tell what runs, so ask.
+    expect((await decide('danger-full-access', bash('env --mystery blocked'), blocked)).decision.kind).toBe('ask');
+    expect((await decide('danger-full-access', bash('timeout 5 echo blocked'), blocked)).decision).toEqual({ kind: 'allow' });
   });
 
   it('fails the load on bad rules and unknown sandbox modes', async () => {

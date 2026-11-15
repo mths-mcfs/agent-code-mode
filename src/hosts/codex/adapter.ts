@@ -27,7 +27,7 @@ import { stateDirPath } from '../../core/state-dir.js';
 import type { BashContainment, Decision, HostAdapter, PolicyLoadError, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
 import { ConfigError, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
 import { isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
-import { discoverHooks, runHooks, type HookHandler } from './hooks.js';
+import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
 import { mapUpdatedInput, nativeCall, NativeShapeError, shellCommandFor, type NativeCall } from './native.js';
 import { ShellParseError, splitShellCommands } from './shell.js';
 
@@ -192,6 +192,17 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       const reason = err instanceof NativeShapeError ? err.message : `cannot build the Codex tool input: ${err instanceof Error ? err.message : String(err)}`;
       return { kind: 'deny', source: 'hook-error', reason };
     }
+    if (!p.hooks.some((h) => matcherMatches(h.matcher, native.names))) return { kind: 'allow' };
+    // The patch grammar cannot express every byte sequence (a missing final
+    // newline, line endings other than the file's first). A hook must not
+    // approve a change different from the one that would be applied.
+    if (native.exact === false) {
+      return {
+        kind: 'deny',
+        source: 'unsupported-config',
+        reason: 'this change cannot be shown to Codex apply_patch hooks exactly (missing final newline or mixed/CRLF line endings the patch format cannot express); write the content with a trailing newline and the file\'s line endings',
+      };
+    }
     const result = await runHooks({
       hooks: p.hooks,
       names: native.names,
@@ -241,6 +252,8 @@ export function checkShellCommand(command: string, p: CodexPolicy): Decision {
     if (isDangerousCommand(argv)) unmatchedAsk ??= `${argv.join(' ')} is a forced rm (Codex asks before running it)`;
     else if (p.approvalPolicy === 'untrusted') unmatchedAsk ??= `${argv.join(' ')} is not allowed by an exec policy rule and the approval policy is untrusted`;
   }
+  // A wrapper whose options this server does not know may run anything: ask.
+  if (split.unsure.length > 0) unmatchedAsk ??= `cannot tell which command runs behind a wrapper (${split.unsure[0] ?? ''})`;
   const top = strictest(matched);
   const why = (r: PrefixRule): string => `${r.decision} by Codex rule ${r.source} (${[r.program, ...r.rest.map((a) => a.join('|'))].join(' ')})${r.justification ? `: ${r.justification}` : ''}`;
   if (top?.decision === 'forbidden') return { kind: 'deny', source: 'rule', reason: why(top) };

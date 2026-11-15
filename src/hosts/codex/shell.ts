@@ -27,13 +27,15 @@ export interface SplitResult {
    * (literal words and quotes joined by `&&`, `||`, `;`, `|` or newlines).
    */
   readonly plain: boolean;
+  /** Wrapped commands this splitter could not resolve (unknown wrapper options). */
+  readonly unsure: readonly string[];
 }
 
 export class ShellParseError extends Error {
   override readonly name = 'ShellParseError';
 }
 
-const RESERVED_PREFIX = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'time', 'fi', 'done', 'esac']);
+const RESERVED_PREFIX = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'fi', 'done', 'esac']);
 /** Commands whose following words are not a command (dropped whole). */
 const NON_COMMAND = new Set(['for', 'case', 'select', 'function']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash']);
@@ -77,6 +79,7 @@ class Tokenizer {
         continue;
       }
       if (ch === '\\' && s[this.#i + 1] === '\n') {
+        this.plain = false;
         this.#i += 2;
         continue;
       }
@@ -87,6 +90,8 @@ class Tokenizer {
         continue;
       }
       if (ch === '#') {
+        // Codex rejects comment nodes for plain splitting.
+        this.plain = false;
         while (this.#i < s.length && s[this.#i] !== '\n') this.#i++;
         continue;
       }
@@ -220,6 +225,7 @@ class Tokenizer {
       if (ch === '\\') {
         const next = s[this.#i + 1];
         if (next === undefined) throw new ShellParseError('trailing backslash');
+        this.plain = false;
         if (next !== '\n') word.text += next;
         word.quoted = true;
         this.#i += 2;
@@ -251,8 +257,9 @@ class Tokenizer {
         this.#readExpansion(word);
         continue;
       }
-      if (word.text === '' && ch === '~') this.plain = false;
-      if (ch === '*' || ch === '?' || ch === '[') this.plain = false;
+      // Codex `is_literal_word_or_number`: these characters (or a leading `=`)
+      // mean the word may expand, so the script is not plain.
+      if ('{}*?[]~^#'.includes(ch) || (word.text === '' && !word.quoted && ch === '=')) this.plain = false;
       word.text += ch;
       this.#i++;
     }
@@ -274,6 +281,7 @@ class Tokenizer {
       if (ch === '\\') {
         const next = s[this.#i + 1];
         if (next === undefined) throw new ShellParseError('unterminated double quote');
+        this.plain = false;
         if ('$`"\\'.includes(next)) word.text += next;
         else if (next !== '\n') word.text += `\\${next}`;
         this.#i += 2;
@@ -446,37 +454,222 @@ function buildCommands(tokens: readonly Token[], plainSoFar: boolean): { command
     current = [];
     skipRest = false;
   };
+  let sawCommand = false;
+  let pendingOp = false;
   for (const tok of tokens) {
     if (tok.kind === 'word') {
       if (current.length === 0 && !tok.word.quoted && NON_COMMAND.has(tok.word.text)) {
         plain = false;
         skipRest = true;
       }
+      // Codex needs the command name to be a bare word.
+      if (current.length === 0 && tok.word.quoted) plain = false;
       current.push(tok.word);
+      sawCommand = true;
+      pendingOp = false;
     } else {
+      // An operator with no command before it is a syntax error for Codex's parser.
+      if (tok.kind === 'op' && current.length === 0) plain = false;
+      if (tok.kind === 'op' && tok.op !== ';') pendingOp = true;
+      else if (current.length > 0) pendingOp = false;
       flush();
     }
   }
+  if (pendingOp || !sawCommand) plain = false;
   flush();
   return { commands, plain };
 }
 
-function splitInto(script: string, depth: number, out: string[][]): boolean {
+/** What a wrapper command runs: another argv, a script, or something this splitter cannot tell. */
+type Unwrapped = { readonly kind: 'argv'; readonly argv: readonly string[] } | { readonly kind: 'script'; readonly script: string } | { readonly kind: 'unsure'; readonly reason: string };
+
+/**
+ * Skips the options of a wrapper starting at `i`. `withValue` lists options
+ * that take the next word as their value (or `--opt=value`, `-oVALUE`);
+ * `flags` lists options without a value. Returns the index of the wrapped
+ * command, or a reason when an option is unknown.
+ */
+function skipOptions(argv: readonly string[], i: number, withValue: readonly string[], flags: readonly string[]): number | { reason: string } {
+  while (i < argv.length) {
+    const a = argv[i] ?? '';
+    if (a === '--') return i + 1;
+    if (!a.startsWith('-') || a === '-') return i;
+    const name = a.startsWith('--') ? a.split('=')[0] ?? a : a;
+    if (a.startsWith('--') && a.includes('=') && (withValue.includes(name) || flags.includes(name))) {
+      i++;
+      continue;
+    }
+    if (withValue.includes(name)) {
+      i += 2;
+      continue;
+    }
+    if (flags.includes(name)) {
+      i++;
+      continue;
+    }
+    // Short options: `-uroot` (value attached) or grouped flags like `-ix`.
+    if (!a.startsWith('--')) {
+      const short = `-${a[1] ?? ''}`;
+      if (withValue.includes(short)) {
+        i += 1;
+        continue;
+      }
+      if ([...a.slice(1)].every((c) => flags.includes(`-${c}`))) {
+        i++;
+        continue;
+      }
+    }
+    return { reason: `unknown option ${a} of ${argv[0] ?? ''}` };
+  }
+  return i;
+}
+
+function rest(argv: readonly string[], skipped: number | { reason: string }): Unwrapped | undefined {
+  if (typeof skipped !== 'number') return { kind: 'unsure', reason: skipped.reason };
+  const inner = argv.slice(skipped);
+  return inner.length > 0 ? { kind: 'argv', argv: inner } : undefined;
+}
+
+/**
+ * The commands a wrapper runs: `command`, `builtin`, `exec`, `nohup`, `time`,
+ * `nice`, `timeout`, `sudo`, `doas`, `env`, `stdbuf`, `xargs`, `find -exec`,
+ * `eval`, `trap` actions and `sh -c` scripts. Codex itself does not unwrap
+ * them for rules (its dangerous-command check unwraps `sudo`, `env` and
+ * `trap`); doing it for every rule only adds matches.
+ */
+function unwrap(argv: readonly string[]): Unwrapped[] {
+  const program = basename(argv[0] ?? '');
+  const one = (u: Unwrapped | undefined): Unwrapped[] => (u === undefined ? [] : [u]);
+  const script = shellScriptArg(argv);
+  if (script !== undefined) return [{ kind: 'script', script }];
+  switch (program) {
+    case 'command':
+    case 'builtin':
+      return one(rest(argv, skipOptions(argv, 1, [], ['-p', '-v', '-V'])));
+    case 'exec':
+      return one(rest(argv, skipOptions(argv, 1, ['-a'], ['-c', '-l'])));
+    case 'nohup':
+      return one(rest(argv, skipOptions(argv, 1, [], [])));
+    case 'time':
+      return one(rest(argv, skipOptions(argv, 1, [], ['-p'])));
+    case 'nice': {
+      let i = 1;
+      const a = argv[1] ?? '';
+      if (a === '-n' || a === '--adjustment') i = 3;
+      else if (/^-n?-?\d+$/.test(a) || a.startsWith('--adjustment=')) i = 2;
+      return one(rest(argv, skipOptions(argv, i, [], [])));
+    }
+    case 'timeout': {
+      const skipped = skipOptions(argv, 1, ['-s', '--signal', '-k', '--kill-after'], ['--foreground', '--preserve-status', '-v', '--verbose']);
+      if (typeof skipped !== 'number') return [{ kind: 'unsure', reason: skipped.reason }];
+      return one(rest(argv, skipped + 1)); // the duration
+    }
+    case 'sudo':
+    case 'doas':
+      return one(
+        rest(
+          argv,
+          skipOptions(
+            argv,
+            1,
+            ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-R', '--chroot', '-T', '--command-timeout', '-U', '--other-user', '-r', '--role', '-t', '--type'],
+            ['-A', '-b', '-E', '-e', '-H', '-i', '-k', '-K', '-l', '-n', '-P', '-S', '-s', '-V', '-v', '--preserve-env', '--login', '--shell', '--non-interactive', '--stdin', '--askpass', '--background', '--set-home', '--reset-timestamp', '--remove-timestamp'],
+          ),
+        ),
+      );
+    case 'env': {
+      let i = 1;
+      const out: Unwrapped[] = [];
+      while (i < argv.length) {
+        const a = argv[i] ?? '';
+        if (a === '--') {
+          i++;
+          break;
+        }
+        if (a === '-i' || a === '--ignore-environment' || a === '-0' || a === '--null') i++;
+        else if (a === '-u' || a === '--unset' || a === '-C' || a === '--chdir') i += 2;
+        else if (a.startsWith('--unset=') || a.startsWith('--chdir=') || /^-[uC]./.test(a)) i++;
+        else if (a === '-S' || a === '--split-string') {
+          out.push({ kind: 'script', script: argv.slice(i + 1).join(' ') });
+          return out;
+        } else if (a.startsWith('--split-string=') || /^-S./.test(a)) {
+          out.push({ kind: 'script', script: [a.replace(/^--split-string=|^-S/, ''), ...argv.slice(i + 1)].join(' ') });
+          return out;
+        } else if (a.startsWith('-')) return [{ kind: 'unsure', reason: `unknown option ${a} of env` }];
+        else if (/^[^=]+=/.test(a)) i++;
+        else break;
+      }
+      return one(rest(argv, i));
+    }
+    case 'stdbuf':
+      return one(rest(argv, skipOptions(argv, 1, ['-i', '-o', '-e', '--input', '--output', '--error'], [])));
+    case 'xargs':
+      return one(
+        rest(
+          argv,
+          skipOptions(
+            argv,
+            1,
+            ['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars', '--process-slot-var'],
+            ['-0', '--null', '-e', '-i', '-l', '-o', '--open-tty', '-p', '--interactive', '-r', '--no-run-if-empty', '-t', '--verbose', '-x', '--exit'],
+          ),
+        ),
+      );
+    case 'find': {
+      const out: Unwrapped[] = [];
+      for (let i = 1; i < argv.length; i++) {
+        if (!['-exec', '-execdir', '-ok', '-okdir'].includes(argv[i] ?? '')) continue;
+        let end = i + 1;
+        while (end < argv.length && argv[end] !== ';' && argv[end] !== '+') end++;
+        if (end > i + 1) out.push({ kind: 'argv', argv: argv.slice(i + 1, end) });
+        i = end;
+      }
+      return out;
+    }
+    case 'eval':
+      return argv.length > 1 ? [{ kind: 'script', script: argv.slice(1).join(' ') }] : [];
+    case 'trap': {
+      // Codex `dangerous_command_match_for_trap`: the action is shell source.
+      let i = 1;
+      if (argv[i] === '--') i++;
+      const action = argv[i];
+      if (action === undefined || action.startsWith('-')) return [];
+      return [{ kind: 'script', script: action }];
+    }
+    default:
+      return [];
+  }
+}
+
+interface SplitState {
+  readonly out: string[][];
+  readonly unsure: string[];
+}
+
+function addCommand(argv: readonly string[], depth: number, st: SplitState): boolean {
+  if (depth > MAX_DEPTH) throw new ShellParseError('commands nested too deeply');
+  st.out.push([...argv]);
+  let plain = true;
+  for (const u of unwrap(argv)) {
+    plain = false;
+    if (u.kind === 'argv') addCommand(u.argv, depth + 1, st);
+    else if (u.kind === 'script') splitInto(u.script, depth + 1, st);
+    else st.unsure.push(u.reason);
+  }
+  return plain;
+}
+
+function splitInto(script: string, depth: number, st: SplitState): boolean {
   if (depth > MAX_DEPTH) throw new ShellParseError('commands nested too deeply');
   const t = new Tokenizer(script);
   t.run();
   const built = buildCommands(t.tokens, t.plain);
   let plain = built.plain && t.nested.length === 0;
   for (const argv of built.commands) {
-    out.push(argv);
-    const inner = shellScriptArg(argv);
-    if (inner !== undefined) {
-      splitInto(inner, depth + 1, out);
-      plain = false;
-    }
+    if (!addCommand(argv, depth, st)) plain = false;
   }
   for (const nested of t.nested) {
-    splitInto(nested, depth + 1, out);
+    splitInto(nested, depth + 1, st);
     plain = false;
   }
   return plain;
@@ -488,9 +681,9 @@ function splitInto(script: string, depth: number, out: string[][]): boolean {
  * heredoc).
  */
 export function splitShellCommands(script: string): SplitResult {
-  const out: string[][] = [];
-  const plain = splitInto(script, 0, out);
-  return { commands: out, plain };
+  const st: SplitState = { out: [], unsure: [] };
+  const plain = splitInto(script, 0, st);
+  return { commands: st.out, plain, unsure: st.unsure };
 }
 
 /**
