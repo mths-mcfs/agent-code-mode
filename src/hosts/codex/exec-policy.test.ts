@@ -81,6 +81,8 @@ describe('rule evaluation', () => {
     expect(decide('echo $(rm -rf x)')).toBe('forbidden');
     expect(decide('echo `rm x`')).toBe('forbidden');
     expect(decide('sh -c "rm -rf /tmp/x"')).toBe('forbidden');
+    expect(decide("bash -O extglob -c 'rm -f x'")).toBe('forbidden');
+    expect(decide("sh -o pipefail -c 'rm -f x'")).toBe('forbidden');
     expect(decide('(cd /tmp && rm x)')).toBe('forbidden');
     expect(decide('FOO=1 rm x')).toBe('forbidden');
     expect(decide('/bin/rm x')).toBe('forbidden');

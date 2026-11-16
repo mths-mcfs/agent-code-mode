@@ -414,12 +414,19 @@ function basename(program: string): string {
   return i >= 0 ? program.slice(i + 1) : program;
 }
 
+/** Shell options that take the next argument as their operand (`bash -O extglob -c ...`, `sh -o pipefail -c ...`). */
+const SHELL_OPTIONS_WITH_OPERAND = new Set(['-O', '+O', '-o', '+o', '--rcfile', '--init-file']);
+
 /** For `sh -c script` (any flags containing `c`), the script argument. */
 function shellScriptArg(argv: readonly string[]): string | undefined {
   if (!SHELLS.has(basename(argv[0] ?? ''))) return undefined;
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i] ?? '';
     if (a === '--') return undefined;
+    if (SHELL_OPTIONS_WITH_OPERAND.has(a)) {
+      i++;
+      continue;
+    }
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(a)) return argv[i + 1];
     if (!a.startsWith('-') && !a.startsWith('+')) return undefined;
   }
