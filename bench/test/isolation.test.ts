@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { createCodexHome, HOME_MARKER, removeCodexHome, sweepStaleHomes, syncBack } from '../lib/codex-home.ts';
 
 const BENCH = path.join(import.meta.dirname, '..');
@@ -12,6 +14,8 @@ const posix = process.platform !== 'win32';
 const ORIGINAL = JSON.stringify({ token: 'FAKE_AUTH_ONLY', refresh: 'r1' });
 const REFRESHED = JSON.stringify({ token: 'REFRESHED', refresh: 'r2' });
 const OTHER = JSON.stringify({ token: 'OTHER_LOGIN', refresh: 'r9' });
+/** The real arm A surface (functions.* names), so the fake passes the arm-integrity check. */
+const ARM_A_TOOLS = z.object({ A: z.array(z.string()) }).parse(JSON.parse(readFileSync(path.join(BENCH, 'parser-fixtures', 'codex-surfaces.json'), 'utf8'))).A.map((t) => ({ type: 'function', name: t.replace(/^functions\./, '') }));
 
 type ExecMode = 'hang' | 'exit' | 'refresh-hang' | 'refresh-exit' | 'refresh-conflict-exit';
 
@@ -28,7 +32,7 @@ const a = process.argv.slice(2);
 const mode = ${JSON.stringify(mode)};
 if (a[0] === '--version') { console.log('codex-cli 0.169.0'); process.exit(0); }
 if (a[0] === 'debug' && a[1] === 'models') { process.stdout.write(fs.readFileSync(${JSON.stringify(CATALOG)}, 'utf8')); process.exit(0); }
-if (a[0] === 'debug' && a[1] === 'prompt-input') { console.log(JSON.stringify([{ type: 'additional_tools', tools: [{ type: 'function', name: 'exec_command' }] }])); process.exit(0); }
+if (a[0] === 'debug' && a[1] === 'prompt-input') { console.log(JSON.stringify([{ type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: ${JSON.stringify(ARM_A_TOOLS)} }] }])); process.exit(0); }
 if (a[0] !== 'exec') process.exit(2);
 if (mode.startsWith('refresh')) {
   const auth = path.join(process.env.CODEX_HOME, 'auth.json');
@@ -211,7 +215,7 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
       const record = JSON.parse(await findFile(path.join(h.root, 'results'), 'record.json'));
       expect(record.invalidReasons).toEqual([]);
       expect(record.valid).toBe(true);
-      expect(record.parsed.availableTools).toContain('exec_command');
+      expect(record.parsed.availableTools).toContain('functions.exec_command');
     } finally {
       await cleanup(h);
     }

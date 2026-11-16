@@ -47,3 +47,24 @@ describe('protect-file hook', () => {
     expect(bad.status).toBe(2);
   });
 });
+
+describe('empty MCP server', () => {
+  it('answers initialize and lists no tools or resources', () => {
+    const server = path.join(import.meta.dirname, '..', 'lib', 'empty-mcp-server.mjs');
+    const input = [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 3, method: 'resources/list' },
+      { jsonrpc: '2.0', id: 4, method: 'nope' },
+    ].map((m) => JSON.stringify(m)).join('\n');
+    const r = spawnSync(process.execPath, [server], { input: `${input}\n`, encoding: 'utf8' });
+    const out = r.stdout.trim().split('\n').map((l) => JSON.parse(l));
+    expect(out.map((m) => m.id)).toEqual([1, 2, 3, 4]);
+    expect(out[0].result.protocolVersion).toBe('2025-06-18');
+    expect(out[0].result.instructions).toBeUndefined();
+    expect(out[1].result).toEqual({ tools: [] });
+    expect(out[2].result).toEqual({ resources: [] });
+    expect(out[3].error.code).toBe(-32601);
+  });
+});
