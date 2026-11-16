@@ -36,6 +36,23 @@ function rng(seed: number): () => number {
   };
 }
 
+/** Pieces for tilde words: quotes (empty too), backslashes, assignment heads, `+=`, `:` and `~` in every position. */
+const TILDE_PIECES = [
+  "''", '""', "'a'", '"a"', '\\a', '\\~', '\\=', '\\:', '\\+', '\\/', 'a', 'A_1', '_', '1', '=', '+=', '+', ':', '~', '/', 'x', '[1]', '[', ']',
+  "'~'", '"~"', "'='", '"="', "':'", '"/"', '~+', '-', 'a=', 'a+=', 'a=~', 'a+=~', ':~', '=~',
+];
+
+/** Random words built from `TILDE_PIECES`, plus every piece alone. */
+function tildeWords(count: number): string[] {
+  const r = rng(SEED + 1);
+  const words: string[] = [...TILDE_PIECES];
+  for (let i = 0; i < count; i++) {
+    const n = 1 + Math.floor(r() * 5);
+    words.push(Array.from({ length: n }, () => TILDE_PIECES[Math.floor(r() * TILDE_PIECES.length)] ?? '').join(''));
+  }
+  return words;
+}
+
 /** The words bash passes to `X` for each line of `lines`, run in `cwd`. */
 function bashWords(lines: readonly string[], cwd: string): (string[] | undefined)[] {
   const script = ['X() { printf "\\2"; for a in "$@"; do printf "%s\\0" "$a"; done; printf "\\1"; }', ...lines.map((l) => `${l}\nprintf "\\3"`)].join('\n');
@@ -86,5 +103,39 @@ describe.runIf(posix)('Codex splitter words against bash', () => {
     }
     expect(exact).toBeGreaterThan(150);
     expect(inexact).toBeGreaterThan(150);
+  });
+  it('marks every word bash tilde-expands as inexact: quotes, empty quotes, backslashes, `=`, `+=` and `:`', () => {
+    const words = tildeWords(3000);
+    const lines = words.map((w) => `X ${w}`);
+    const fromBash = bashWords(lines, dir);
+    let exact = 0;
+    let inexact = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? '';
+      let argv: readonly string[] | undefined;
+      try {
+        argv = splitShellCommands(line).commands.find((c) => c[0] === 'X');
+      } catch {
+        continue; // unparsable: the adapter denies it
+      }
+      if (!argv) continue;
+      const args = argv.slice(1);
+      if (args.some((a) => a.startsWith(INEXACT))) {
+        inexact++;
+        continue;
+      }
+      expect(fromBash[i], line).toEqual(args);
+      exact++;
+    }
+    expect(exact).toBeGreaterThan(1000);
+    expect(inexact).toBeGreaterThan(300);
+  });
+
+  it('marks `+=`, subscripted and `declare`/`export` assignment tildes inexact, and keeps `~` after empty quotes exact', () => {
+    const argv = (line: string): readonly string[] | undefined => splitShellCommands(line).commands[0];
+    expect(argv('printf %s a+=~')).toEqual(['printf', '%s', `${INEXACT}a+=~`]);
+    expect(argv('export a+=x:~/y')?.[1]?.startsWith(INEXACT)).toBe(true);
+    expect(argv('declare a[1]=~')?.[1]?.startsWith(INEXACT)).toBe(true);
+    expect(argv("cat ''a=~/s a=''~/s \"\"~/s")).toEqual(['cat', 'a=~/s', 'a=~/s', '~/s']);
   });
 });

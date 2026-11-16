@@ -6,9 +6,11 @@ import {
   DIFF_STAT_FILES,
   ERROR_CAP_CHARS,
   RESULT_IN_NEXT_BLOCK,
+  GROUP_TEXT_CHARS,
   SUCCESS_CAP_CHARS,
   diffStat,
   formatRunResult,
+  groupFailed,
   runResultView,
   summarizeCalls,
   type McpToolResponse,
@@ -45,9 +47,13 @@ const total = (r: McpToolResponse): number => r.content.reduce((n, c) => n + c.t
 function kept(store: OverflowStore, r: McpToolResponse): unknown {
   const overflow = json(r)['overflow'];
   if (overflow === null || typeof overflow !== 'object' || !('id' in overflow)) throw new Error('no overflow id');
-  const reply = store.read({ id: overflow.id, limit: 1_000_000 });
-  if (!reply.ok || !('totalChars' in reply.value)) throw new Error('overflow not readable');
-  return JSON.parse(reply.value.text);
+  let text = '';
+  for (;;) {
+    const reply = store.read({ id: overflow.id, offset: text.length, limit: 1_000_000 });
+    if (!reply.ok || !('totalChars' in reply.value)) throw new Error('overflow not readable');
+    text += reply.value.text;
+    if (!reply.value.truncated) return JSON.parse(text);
+  }
 }
 
 const failingSink: OverflowSink = { put: () => undefined };
@@ -206,17 +212,113 @@ describe('formatRunResult: response cap', () => {
     expect(out.content[1]?.text.startsWith('{"list":[{"i":0},')).toBe(true);
   });
 
-  it('D1: above the cap, denied calls stay whole entries and the rest is in the overflow', () => {
-    const calls = Array.from({ length: 2_000 }, (_, i) => deniedCall(i, `hook: ${'policy text '.repeat(10)}`));
+  it('D1: above the cap, denied calls are grouped by tool and reason with exact counts, and the overflow has them all', () => {
+    const reason = `hook: ${'policy text '.repeat(10)}`;
+    const calls = Array.from({ length: 2_000 }, (_, i) => deniedCall(i, reason));
     const store = new OverflowStore();
     const out = formatRunResult({ ...base, result: 'r', calls }, { overflow: store });
     expect(total(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
-    const denied = (json(out)['calls'] as { denied: unknown[] }).denied;
-    const entries = denied.slice(0, -1);
-    expect(entries.length).toBeGreaterThan(50);
-    entries.forEach((e, i) => expect(e).toEqual({ id: `c${i}`, tool: 'read', summary: `read secret-${i}.txt`, reason: calls[i]?.reason }));
-    expect(denied.at(-1)).toBe(`…[${2_000 - entries.length} more in overflow]`);
-    expect((kept(store, out) as RunResult).calls).toHaveLength(2_000);
+    expect((json(out)['calls'] as { denied: unknown[] }).denied).toEqual([{ tool: 'read', reason, count: 2_000, first: 'read secret-0.txt' }]);
+    expect((kept(store, out) as RunResult).calls).toEqual(calls);
+  });
+
+  it('keeps every distinct reason of denied and failed calls, even in verbose and error results', () => {
+    const calls: CallLogEntry[] = [];
+    for (let i = 0; i < 3_000; i++) {
+      calls.push({ id: `d${i}`, tool: i % 2 ? 'bash' : 'write', summary: `${i % 2 ? 'bash' : 'write'} ${'s'.repeat(80)}${i}`, decision: 'denied', reason: `rule ${i % 7}`, durationMs: 0 });
+      calls.push({ id: `e${i}`, tool: 'read', summary: `read m${i}`, decision: 'error', reason: `${'p'.repeat(100)} code ${i % 5}`, durationMs: 0 });
+    }
+    for (const ok of [true, false]) {
+      for (const verbose of [false, true]) {
+        const result: RunResult = { ...base, ok, ...(ok ? {} : { error: { kind: 'error' as const, name: 'Error', message: 'boom' } }), calls };
+        const out = formatRunResult(result, { overflow: new OverflowStore(), verbose });
+        expect(total(out)).toBeLessThanOrEqual(ok ? SUCCESS_CAP_CHARS : ERROR_CAP_CHARS);
+        const shown = json(out)[verbose ? 'callSummary' : 'calls'] as { denied: { tool: string; reason: string; count: number }[]; errors: { reason: string; count: number }[] };
+        expect(shown.denied).toHaveLength(14);
+        expect(shown.errors).toHaveLength(5);
+        expect(shown.denied.reduce((n, g) => n + g.count, 0)).toBe(3_000);
+        expect(shown.errors.reduce((n, g) => n + g.count, 0)).toBe(3_000);
+        expect(shown.denied[0]).toMatchObject({ tool: 'write', reason: 'rule 0', first: `write ${'s'.repeat(80)}0` });
+      }
+    }
+  });
+
+  it('cuts reasons to GROUP_TEXT_CHARS before leaving a group out, and counts the groups left out', () => {
+    const errors = Array.from({ length: 1_000 }, (_, i): CallLogEntry => ({ id: `c${i}`, tool: 'read', summary: `read missing-${i}`, decision: 'error', reason: `missing-${i} ${'x'.repeat(1_000)}`, durationMs: 0 }));
+    const store = new OverflowStore();
+    const out = formatRunResult({ ...base, result: 'done', calls: errors }, { overflow: store });
+    expect(total(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+    const list = (json(out)['calls'] as { errors: unknown[] }).errors;
+    const groups = list.slice(0, -1) as { reason: string; count: number }[];
+    expect(groups.length).toBeGreaterThan(50);
+    groups.forEach((g, i) => expect(g.reason).toBe(`missing-${i} ${'x'.repeat(GROUP_TEXT_CHARS - `missing-${i} `.length)}…[${`missing-${i} `.length + 1_000 - GROUP_TEXT_CHARS} chars cut]`));
+    expect(list.at(-1)).toBe(`…[${1_000 - groups.length} more reasons (${1_000 - groups.length} calls) in overflow]`);
+    expect((kept(store, out) as RunResult).calls).toEqual(errors);
+  });
+
+  it('property: every reason shows until the groups fit no more, counts add up, and the overflow has every call', () => {
+    let seed = 11;
+    const rand = (n: number): number => ((seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648), seed % n);
+    const marker = /^…\[(\d+) more reasons? \((\d+) calls?\) in overflow\]$/;
+    for (let round = 0; round < 60; round++) {
+      const distinct = 1 + rand(round % 3 === 0 ? 3_000 : 40);
+      const reasons = Array.from({ length: distinct }, (_, r) => `reason ${r} ${'r'.repeat(rand(round % 4 === 0 ? 600 : 120))}`);
+      const n = 1 + rand(4_000);
+      const calls = Array.from({ length: n }, (_, i): CallLogEntry => {
+        const roll = rand(3);
+        const tool = ['read', 'bash', 'edit'][rand(3)] ?? 'read';
+        return { id: `c${i}`, tool, summary: `${tool} ${'f'.repeat(rand(60))}${i}`, decision: roll === 0 ? 'allowed' : roll === 1 ? 'denied' : 'error', reason: reasons[rand(distinct)], durationMs: 0 };
+      });
+      const ok = rand(2) === 0;
+      const result: RunResult = {
+        ...base,
+        ok,
+        ...(ok ? { result: 'x\n'.repeat(rand(30_000)) } : { error: { kind: 'error' as const, name: 'Error', message: 'e'.repeat(rand(20_000)) } }),
+        logs: Array.from({ length: rand(500) }, (_, i) => `log ${i}`),
+        changedFiles: Array.from({ length: rand(300) }, (_, i) => `src/f${i}.ts`),
+        calls,
+      };
+      const store = new OverflowStore();
+      const verbose = rand(2) === 0;
+      const out = formatRunResult(result, { overflow: store, verbose });
+      expect(total(out)).toBeLessThanOrEqual(ok ? SUCCESS_CAP_CHARS : ERROR_CAP_CHARS);
+      const expected = summarizeCalls(calls, result.error?.message);
+      if (json(out)['truncated'] !== true) {
+        expect(json(out)['calls']).toEqual(verbose ? calls : expected);
+        continue;
+      }
+      // Above the cap a verbose log stays a (cut) list and the compact calls go beside it.
+      const shownCalls = json(out)[verbose ? 'callSummary' : 'calls'];
+      if (verbose) expect(Array.isArray(json(out)['calls'])).toBe(true);
+      expect((kept(store, out) as RunResult).calls).toEqual(calls);
+      for (const key of ['denied', 'errors'] as const) {
+        const want = expected[key];
+        const list = (shownCalls as Record<string, unknown[] | undefined>)[key];
+        if (want === undefined) {
+          expect(list).toBeUndefined();
+          continue;
+        }
+        if (list === undefined) throw new Error(`${key} missing`);
+        if (list.every((e) => typeof e === 'object' && e !== null && 'id' in e)) {
+          expect(list).toEqual(want);
+          continue;
+        }
+        const groups = groupFailed(want);
+        const last = list.at(-1);
+        const m = typeof last === 'string' ? marker.exec(last) : null;
+        const shown = (m ? list.slice(0, -1) : list) as { tool: string; reason?: string; count: number }[];
+        if (distinct <= 15) expect(m).toBeNull();
+        expect(shown.length + Number(m?.[1] ?? 0)).toBe(groups.length);
+        expect(shown.reduce((a, g) => a + g.count, 0) + Number(m?.[2] ?? 0)).toBe(want.length);
+        shown.forEach((g, i) => {
+          const w = groups[i];
+          expect(g.tool).toBe(w?.tool);
+          expect(g.count).toBe(w?.count);
+          const r = w?.reason ?? '';
+          expect(g.reason === r || (g.reason ?? '').startsWith(`${r.slice(0, GROUP_TEXT_CHARS)}…[`)).toBe(true);
+        });
+      }
+    }
   });
 
   it('caps error results lower', () => {

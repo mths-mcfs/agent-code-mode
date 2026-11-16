@@ -61,15 +61,43 @@ export function safeStringify(value: unknown): string {
 
 type FailedCall = Pick<CallLogEntry, 'id' | 'tool' | 'summary'> & { readonly reason?: string };
 
+/** Compact call log: counts plus every denied and failed call. */
+export interface CompactCalls {
+  readonly total: number;
+  readonly byTool: Record<string, number>;
+  readonly denied?: FailedCall[];
+  readonly errors?: FailedCall[];
+}
+
+/** Denied or failed calls that share a tool and a reason: how many, and the summary of the first. */
+export interface FailedGroup {
+  readonly tool: string;
+  readonly reason?: string;
+  readonly count: number;
+  readonly first: string;
+}
+
+/** Reason and first-call summary length in groups when even the groups do not fit. */
+export const GROUP_TEXT_CHARS = 200;
+
+/** `calls` grouped by (tool, reason) in order of first appearance, with exact counts. */
+export function groupFailed(calls: readonly FailedCall[]): FailedGroup[] {
+  const groups = new Map<string, { tool: string; reason?: string; count: number; first: string }>();
+  for (const c of calls) {
+    const key = JSON.stringify([c.tool, c.reason ?? null]);
+    const g = groups.get(key);
+    if (g) g.count++;
+    else groups.set(key, { tool: c.tool, ...(c.reason === undefined ? {} : { reason: c.reason }), count: 1, first: c.summary });
+  }
+  return [...groups.values()];
+}
+
 /**
  * The call log as counts plus every denied and failed call (without the
  * duration). A reason that repeats `errorMessage` (the run's error, already in
  * the result) is cut to what it adds: its source prefix, or nothing.
  */
-export function summarizeCalls(
-  calls: readonly CallLogEntry[],
-  errorMessage?: string,
-): { total: number; byTool: Record<string, number>; denied?: FailedCall[]; errors?: FailedCall[] } {
+export function summarizeCalls(calls: readonly CallLogEntry[], errorMessage?: string): CompactCalls {
   const byTool: Record<string, number> = {};
   for (const c of calls) byTool[c.tool] = (byTool[c.tool] ?? 0) + 1;
   const shown = (reason: string | undefined): string | undefined => {
@@ -198,7 +226,7 @@ export function headTail(text: string, budget: number, marker: (cut: number) => 
 }
 
 /** Lists in the view that are cut by entry count when the rest does not fit. */
-const LISTS: readonly (readonly string[])[] = [['calls', 'denied'], ['calls', 'errors'], ['calls'], ['changedFiles'], ['warnings'], ['rolledBack', 'restored'], ['rolledBack', 'skipped']];
+const LISTS: readonly (readonly string[])[] = [['calls'], ['changedFiles'], ['warnings'], ['rolledBack', 'restored'], ['rolledBack', 'skipped']];
 
 function getList(view: Record<string, unknown>, at: readonly string[]): unknown[] | undefined {
   let node: unknown = view;
@@ -251,8 +279,10 @@ function clipStrings(value: unknown, max: number): unknown {
  * the whole result is kept in `opts.overflow` and the response carries
  * `overflow: {id, chars}` for `readOverflow`. Above the cap, the result, the
  * logs and a verbose diff keep their start and end, and long lists their
- * first entries, each cut marked; `truncated: true` is set. A response never
- * names an overflow that could not be kept.
+ * first entries, each cut marked; `truncated: true` is set. Denied and failed
+ * calls that do not fit whole are grouped by tool and reason with exact
+ * counts (see `capped`). A response never names an overflow that could not
+ * be kept.
  */
 export function formatRunResult(result: RunResult, opts: FormatOptions = {}): McpToolResponse {
   const isError = !result.ok;
@@ -268,15 +298,91 @@ export function formatRunResult(result: RunResult, opts: FormatOptions = {}): Mc
   const overflow = id === undefined ? undefined : { id, chars: full.length };
   const noted = response(overflow ? { ...whole, overflow } : whole, text, isError);
   if (size(noted) <= cap) return noted;
-  return capped(view, overflow, full.length, cap, isError);
+  return capped(view, summarizeCalls(result.calls, result.error?.message), overflow, full.length, cap, isError);
 }
 
-/** The response cut to `cap` characters: lists, then the result, logs and diff by start and end. */
-function capped(view: Record<string, unknown>, overflow: { id: string; chars: number } | undefined, fullChars: number, cap: number, isError: boolean): McpToolResponse {
+/** `calls` with its denied and failed lists replaced. */
+function withFailed(calls: CompactCalls, denied: unknown[] | undefined, errors: unknown[] | undefined, byTool = true): Record<string, unknown> {
+  return { total: calls.total, ...(byTool ? { byTool: calls.byTool } : {}), ...(denied ? { denied } : {}), ...(errors ? { errors } : {}) };
+}
+
+function clipGroup(g: FailedGroup, max: number): FailedGroup {
+  const clip = (t: string): string => (t.length <= max ? t : `${t.slice(0, max)}…[${t.length - max} chars cut]`);
+  return { tool: clip(g.tool), ...(g.reason === undefined ? {} : { reason: clip(g.reason) }), count: g.count, first: clip(g.first) };
+}
+
+/**
+ * The ways to show denied and failed calls, from most to least detailed:
+ * every call; groups by (tool, reason) with counts; the same groups with the
+ * reason and first summary cut to `GROUP_TEXT_CHARS`. `dropped(k)` keeps the
+ * first `k` clipped groups of each list and a marker with how many reasons
+ * and calls are left out.
+ */
+function failedViews(calls: CompactCalls, more: string): { readonly forms: Record<string, unknown>[]; readonly dropped: (k: number, byTool: boolean) => Record<string, unknown>; readonly groups: number } {
+  const denied = calls.denied ? groupFailed(calls.denied) : undefined;
+  const errors = calls.errors ? groupFailed(calls.errors) : undefined;
+  const clipped = (gs: FailedGroup[] | undefined): FailedGroup[] | undefined => gs?.map((g) => clipGroup(g, GROUP_TEXT_CHARS));
+  const deniedClipped = clipped(denied);
+  const errorsClipped = clipped(errors);
+  const keepFirst = (gs: FailedGroup[] | undefined, k: number): unknown[] | undefined => {
+    if (gs === undefined || gs.length <= k) return gs;
+    const left = gs.slice(k);
+    const n = left.reduce((a, g) => a + g.count, 0);
+    return [...gs.slice(0, k), `…[${left.length} more reason${left.length === 1 ? '' : 's'} (${n} call${n === 1 ? '' : 's'})${more}]`];
+  };
+  return {
+    forms: [withFailed(calls, calls.denied, calls.errors), withFailed(calls, denied, errors), withFailed(calls, deniedClipped, errorsClipped)],
+    dropped: (k, byTool) => withFailed(calls, keepFirst(deniedClipped, k), keepFirst(errorsClipped, k), byTool),
+    groups: Math.max(denied?.length ?? 0, errors?.length ?? 0),
+  };
+}
+
+/**
+ * Clipped groups (see `failedViews`) of as many reasons per list as fit `max`
+ * characters with `rest`; `byTool` is left out only when not even the markers
+ * fit with it (thousands of distinct tool names).
+ */
+function fitGroups(views: ReturnType<typeof failedViews>, rest: Record<string, unknown>, key: string, max: number): Record<string, unknown> {
+  const byTool = safeStringify({ ...rest, [key]: views.dropped(0, true) }).length <= max;
+  const fits = (k: number): boolean => safeStringify({ ...rest, [key]: views.dropped(k, byTool) }).length <= max;
+  let lo = 0;
+  let hi = views.groups;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (fits(mid)) lo = mid;
+    else hi = mid - 1;
+  }
+  return { ...rest, [key]: views.dropped(lo, byTool) };
+}
+
+/**
+ * The response cut to `cap` characters: lists, then the result, logs and diff
+ * by start and end. Denied and failed calls are never cut by entry: when they
+ * do not fit whole they are grouped by (tool, reason) with exact counts, then
+ * each group's reason and first summary is cut to `GROUP_TEXT_CHARS`, and
+ * only then are groups left out, with a marker counting the reasons and calls
+ * left out. The other lists lose entries only when even the clipped groups do
+ * not fit. A verbose call log is a list like the others, so the compact calls
+ * go to `callSummary` next to it.
+ */
+function capped(
+  view: Record<string, unknown>,
+  calls: CompactCalls,
+  overflow: { id: string; chars: number } | undefined,
+  fullChars: number,
+  cap: number,
+  isError: boolean,
+): McpToolResponse {
   const where = overflow ? `; readOverflow(${JSON.stringify(overflow.id)}) has the whole result` : '';
   const marker = (n: number): string => `\n…[${n} chars cut${where}]\n`;
-  const more = (n: number): string => `…[${n} more${overflow ? ' in overflow' : ''}]`;
-  const { result, logs, diff, ...envelope } = view;
+  const inOverflow = overflow ? ' in overflow' : '';
+  const more = (n: number): string => `…[${n} more${inOverflow}]`;
+  const { result, logs, diff, ...rest } = view;
+  // The compact calls replace the view's unless the view has the verbose log (a list), which stays beside them.
+  const { calls: viewCalls, ...compactEnvelope } = rest;
+  const envelope = Array.isArray(viewCalls) ? rest : compactEnvelope;
+  const key = Array.isArray(viewCalls) ? 'callSummary' : 'calls';
+  const failed = failedViews(calls, inOverflow);
   const resultText = result === undefined ? undefined : typeof result === 'string' ? result : safeStringify(result);
   const logText = Array.isArray(logs) ? logs.join('\n') : undefined;
   const diffText = typeof diff === 'string' ? diff : undefined;
@@ -285,12 +391,16 @@ function capped(view: Record<string, unknown>, overflow: { id: string; chars: nu
   for (let scale = 1; scale > 0.05; scale *= 0.8) {
     const budget = Math.floor(cap * scale);
     // The envelope (status, error, calls, files, warnings) comes first: it keeps all it needs but a quarter of
-    // the budget, which the result, logs and diff share. Lists lose entries before any string is clipped.
+    // the budget, which the result, logs and diff share. Denied and failed calls are grouped before other lists
+    // lose entries, and other lists lose entries before any string is clipped.
     const bulk = [resultText, logText, diffText].map((t) => (t === undefined ? 0 : t.length));
     const envMax = budget - Math.min(bulk.reduce((a, b) => a + b, 0), Math.floor(budget / 4)) - 200;
-    let env: Record<string, unknown> = { ...envelope, ...top };
-    for (let keep = 1_000; safeStringify(env).length > envMax && keep >= 1; keep = Math.floor(keep / 2)) env = { ...cutLists(envelope, keep, more), ...top };
-    if (safeStringify(env).length > envMax) env = { ...clipObject(cutLists(envelope, 0, more), 300), ...top };
+    let env: Record<string, unknown> | undefined;
+    for (let keep = 1_000; env === undefined && keep >= 1; keep = Math.floor(keep / 2)) {
+      const cut = { ...cutLists(envelope, keep, more), ...top };
+      env = failed.forms.map((c) => ({ ...cut, [key]: c })).find((e) => safeStringify(e).length <= envMax);
+    }
+    env ??= fitGroups(failed, { ...clipObject(cutLists(envelope, 0, more), 300), ...top }, key, envMax);
     const shares = share(bulk, Math.max(0, budget - safeStringify(env).length - 200));
     const json: Record<string, unknown> = { ...env };
     let second: string | undefined;
@@ -305,7 +415,7 @@ function capped(view: Record<string, unknown>, overflow: { id: string; chars: nu
     const out = response(order(json, view), second, isError);
     if (size(out) <= cap) return out;
   }
-  return response({ ok: view['ok'], ...top }, undefined, isError);
+  return response(fitGroups(failed, { ok: view['ok'], ...top }, key, cap), undefined, isError);
 }
 
 /** Splits `total` among parts of the given sizes: small parts whole, the rest evenly. */
