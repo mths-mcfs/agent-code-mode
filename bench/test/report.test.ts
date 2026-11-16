@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { RunRecordSchema, type RunRecord } from '../lib/record.ts';
 import { spread } from '../lib/stats.ts';
-import { markdownTable, summarize, writeReport } from '../report.ts';
+import { latestResultsDir, markdownTable, summarize, writeReport } from '../report.ts';
 
 function record(over: Partial<RunRecord> & { turns?: number; cost?: number }): RunRecord {
   const { turns = 2, cost = 0.01, ...rest } = over;
@@ -88,6 +88,19 @@ describe('report', () => {
     const groups = summarize([record({ run: 1, turns: 2 }), record({ run: 2, turns: 50, configHash: 'bbbbbbbbbbbb', config: { model: 'claude-haiku-5-5' } })]);
     expect(groups.map((g) => [g.configHash, g.turns?.median])).toEqual([['aaaaaaaaaaaa', 2], ['bbbbbbbbbbbb', 50]]);
     expect(markdownTable({ generatedAt: '', dryRun: false, environment: null, groups })).toContain('different configs');
+  });
+
+  it('bench:report defaults to the newest date directory', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-latest-'));
+    try {
+      expect(await latestResultsDir(dir)).toBeUndefined();
+      for (const d of ['2026-11-15', '2026-11-16', 'notes']) await mkdir(path.join(dir, d));
+      expect(await latestResultsDir(dir)).toBe(path.join(dir, '2026-11-16'));
+      const pkg = JSON.parse(await readFile(path.join(import.meta.dirname, '..', '..', 'package.json'), 'utf8'));
+      expect(pkg.scripts['bench:report']).toBe('node bench/report.ts');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('writes summary.json and a Markdown table', async () => {
