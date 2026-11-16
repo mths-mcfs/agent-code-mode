@@ -3,11 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { RunRecordSchema, type RunRecord } from '../lib/record.ts';
-import { spread } from '../lib/stats.ts';
-import { latestResultsDir, markdownTable, summarize, writeReport } from '../report.ts';
+import { pairedBootstrap, passHatK, spread } from '../lib/stats.ts';
+import { compareArms, latestResultsDir, markdownTable, summarize, summarizeArms, writeReport, type Summary } from '../report.ts';
+import { Rng } from '../lib/rng.ts';
 
-function record(over: Partial<RunRecord> & { turns?: number; cost?: number }): RunRecord {
-  const { turns = 2, cost = 0.01, ...rest } = over;
+function record(over: Partial<RunRecord> & { turns?: number; cost?: number; pass?: boolean }): RunRecord {
+  const { turns = 2, cost = 0.01, pass, ...rest } = over;
   return RunRecordSchema.parse({
     schema: 1,
     id: `claude-T1-A-r${rest.run ?? 1}`,
@@ -29,6 +30,7 @@ function record(over: Partial<RunRecord> & { turns?: number; cost?: number }): R
     wallMs: 1000 * turns,
     parsed: {
       turns,
+      requests: turns,
       hostDurationMs: 100,
       usage: { input: 10 * turns, output: turns, cacheCreation: 0, cacheRead: 100, reasoning: null },
       hostCostUsd: cost,
@@ -43,13 +45,17 @@ function record(over: Partial<RunRecord> & { turns?: number; cost?: number }): R
     parseError: null,
     costUsd: cost,
     costSource: 'host',
-    verify: { pass: true, details: ['ok'] },
+    verify: pass === false ? { pass: false, details: ['FAIL x'] } : { pass: true, details: ['ok'] },
     fallback: false,
     valid: true,
     invalidReasons: [],
     files: {},
     ...rest,
   });
+}
+
+function emptySummary(over: Partial<Summary>): Summary {
+  return { generatedAt: '', dryRun: false, environment: null, groups: [], arms: [], comparisons: [], bootstrap: { seed: 1, iterations: 1, method: '' }, warmup: { runs: 0, costUsd: 0, runIds: [] }, ...over };
 }
 
 describe('stats', () => {
@@ -87,7 +93,7 @@ describe('report', () => {
   it('never pools runs made with different configs', () => {
     const groups = summarize([record({ run: 1, turns: 2 }), record({ run: 2, turns: 50, configHash: 'bbbbbbbbbbbb', config: { model: 'claude-haiku-5-5' } })]);
     expect(groups.map((g) => [g.configHash, g.turns?.median])).toEqual([['aaaaaaaaaaaa', 2], ['bbbbbbbbbbbb', 50]]);
-    expect(markdownTable({ generatedAt: '', dryRun: false, environment: null, groups })).toContain('different configs');
+    expect(markdownTable(emptySummary({ groups }))).toContain('different configs');
   });
 
   it('bench:report defaults to the newest date directory', async () => {
@@ -114,12 +120,106 @@ describe('report', () => {
       await writeFile(path.join(dir, 'env.json'), JSON.stringify({ invocations: [{ seed: 1, node: 'v22' }] }));
       const { summary, markdown } = await writeReport(dir, new Date('2026-11-15T00:00:00Z'));
       expect(summary.groups[0]?.turns).toEqual({ median: 3, min: 2, max: 7, n: 3 });
-      expect(markdown).toContain('| claude | T1 | A native tools | aaaaaaaaaaaa | 100% | 3 (2–7) |');
+      expect(markdown).toContain('| claude | T1 | A native tools | aaaaaaaaaaaa | 100% | 100% | 3 (2–7) | 3 (2–7) |');
       expect(markdown).toContain('"seed": 1');
       expect(JSON.parse(await readFile(path.join(dir, 'summary.json'), 'utf8')).groups).toHaveLength(1);
       expect(markdownTable({ ...summary, dryRun: true })).toContain('DRY RUN');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('pass^k and bootstrap', () => {
+  it('pass^k is C(c,k)/C(n,k) and refuses k above the runs', () => {
+    expect(passHatK(3, 3, 3)).toBe(1);
+    expect(passHatK(2, 3, 3)).toBe(0);
+    expect(passHatK(2, 3, 1)).toBeCloseTo(2 / 3, 12);
+    expect(passHatK(3, 4, 2)).toBeCloseTo(3 / 6, 12);
+    expect(passHatK(0, 5, 1)).toBe(0);
+    expect(() => passHatK(3, 3, 4)).toThrow(RangeError);
+  });
+
+  it('a constant per-task difference gives a zero-width interval at that value', () => {
+    const tasks = [0.01, 0.02, 0.05].map((base) => ({ a: [base, base + 0.002], b: [base + 0.003, base + 0.005] }));
+    const ci = pairedBootstrap(tasks, { seed: 1, iterations: 2000 });
+    expect(ci?.estimate).toBeCloseTo(0.003, 12);
+    expect(ci?.lo).toBeCloseTo(0.003, 12);
+    expect(ci?.hi).toBeCloseTo(0.003, 12);
+    expect(ci?.crossesZero).toBe(false);
+  });
+
+  it('two tasks with differences 0 and 1: the bootstrap distribution is {0, .5, 1} with 1/4, 1/2, 1/4', () => {
+    const ci = pairedBootstrap([{ a: [0], b: [0] }, { a: [0], b: [1] }], { seed: 3, iterations: 20_000 });
+    expect(ci?.estimate).toBe(0.5);
+    expect(ci?.lo).toBe(0);
+    expect(ci?.hi).toBe(1);
+    expect(ci?.crossesZero).toBe(true);
+  });
+
+  it('matches the normal-theory interval of a mean on many tasks', () => {
+    const rng = new Rng(11);
+    // Per-task differences uniform on [0, 1): mean 0.5, sd 1/sqrt(12); 400 tasks -> half-width 1.96 * 0.2887 / 20.
+    const diffs = Array.from({ length: 400 }, () => rng.next());
+    const tasks = diffs.map((d) => ({ a: [1], b: [1 + d] }));
+    const ci = pairedBootstrap(tasks, { seed: 5, iterations: 4000 });
+    const m = diffs.reduce((s, d) => s + d, 0) / diffs.length;
+    const sd = Math.sqrt(diffs.reduce((s, d) => s + (d - m) ** 2, 0) / (diffs.length - 1));
+    const half = (1.96 * sd) / Math.sqrt(diffs.length);
+    expect(ci?.estimate).toBeCloseTo(m, 12);
+    expect(Math.abs((ci?.lo ?? 0) - (m - half))).toBeLessThan(0.004);
+    expect(Math.abs((ci?.hi ?? 0) - (m + half))).toBeLessThan(0.004);
+  });
+
+  it('is deterministic for a seed, weighs tasks equally and needs two tasks', () => {
+    const tasks = [{ a: [1, 2, 3], b: [2] }, { a: [5], b: [4, 4, 4, 4] }, { a: [0], b: [3] }];
+    expect(pairedBootstrap(tasks, { seed: 9 })).toEqual(pairedBootstrap(tasks, { seed: 9 }));
+    expect(pairedBootstrap(tasks, { seed: 9 })?.estimate).toBeCloseTo((0 + -1 + 3) / 3, 12);
+    expect(pairedBootstrap([{ a: [1], b: [2] }], { seed: 1 })).toBeNull();
+  });
+});
+
+describe('quality metrics', () => {
+  const cell = (task: string, arm: 'A' | 'B', passes: boolean[], cost: number) =>
+    passes.map((pass, i) => record({ id: `claude-${task}-${arm}-r${i + 1}`, task, arm, run: i + 1, pass, cost, configHash: arm === 'A' ? 'aaaaaaaaaaaa' : 'bbbbbbbbbbbb', config: { model: 'm', task, arm } }));
+
+  it('cost per solved task charges the failed runs too', () => {
+    const [g] = summarize(cell('T9', 'A', [true, false, true, false], 0.05));
+    expect(g?.passRate).toBe(0.5);
+    expect(g?.passAll).toBe(0);
+    expect(g?.costPerSolvedUsd).toBeCloseTo(0.2 / 2, 12);
+    expect(summarize(cell('T9', 'A', [false, false], 0.05))[0]?.costPerSolvedUsd).toBeNull();
+  });
+
+  it('aggregates arms per cohort with one k, and compares arms paired by task', () => {
+    const records = [
+      ...cell('T9', 'A', [true, true, false], 0.04),
+      ...cell('T9', 'B', [true, true, true], 0.03),
+      ...cell('T10', 'A', [false, false, false], 0.06),
+      ...cell('T10', 'B', [true, false, true], 0.05),
+      ...cell('T11', 'A', [true, true, true], 0.02),
+      ...cell('T11', 'B', [true, true, true], 0.01),
+      record({ id: 'warmup-claude-T1-A-r1', warmup: true, cost: 5 }),
+    ];
+    const arms = summarizeArms(records);
+    expect(arms.map((a) => a.arm)).toEqual(['A', 'B']);
+    const [a, b] = arms;
+    expect(new Set(arms.map((x) => x.cohort)).size).toBe(1);
+    expect(a?.tasks).toBe(3);
+    expect(a?.pass1).toBeCloseTo((2 / 3 + 0 + 1) / 3, 12);
+    expect(a?.passHatK).toEqual({ k: 3, value: (0 + 0 + 1) / 3 });
+    expect(b?.passHatK).toEqual({ k: 3, value: (1 + 0 + 1) / 3 });
+    expect(a?.costPerSolvedUsd).toBeCloseTo((0.12 + 0.18 + 0.06) / 5, 12);
+    expect(b?.costPerRunUsd).toBeCloseTo(0.03, 12);
+    const [cmp] = compareArms(records, 1, 2000);
+    expect(cmp).toMatchObject({ arm: 'B', reference: 'A', tasks: ['T10', 'T11', 'T9'] });
+    expect(cmp?.costUsd).toMatchObject({ lo: expect.closeTo(-0.01, 12), hi: expect.closeTo(-0.01, 12), crossesZero: false });
+    expect(cmp?.pass?.estimate).toBeCloseTo((1 / 3 + 2 / 3 + 0) / 3, 12);
+    const md = markdownTable(emptySummary({ groups: summarize(records), arms, comparisons: compareArms(records, 1, 2000), warmup: { runs: 1, costUsd: 5, runIds: [] } }));
+    expect(md).toContain('| claude | ' + (a?.cohort ?? '') + ' | B vs A | 3 | +33.3 pp [');
+    expect(md).toMatch(/B vs A \| 3 \| [^|]*CI crosses 0[^|]*\| -\$0\.0100 \[-\$0\.0100, -\$0\.0100\] \|/);
+    expect(md).toContain('Warmup: 1 run(s), $5.0000');
+    // The warmup record never enters a group.
+    expect(summarize(records).some((g) => g.task === 'T1')).toBe(false);
   });
 });

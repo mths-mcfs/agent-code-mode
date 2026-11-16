@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { Tree } from '../fixture/generate.ts';
-import { injectBugs, T2_BUG, T2_FILE, T2_FIX, T7_BUGS } from './setup.ts';
+import { addFiles, injectBugs, T2_BUG, T2_FILE, T2_FIX, T7_BUGS } from './setup.ts';
 import type { TaskDef, TaskId } from './types.ts';
 import { verify as verifyT1 } from './T1/verify.ts';
 import { verify as verifyT2 } from './T2/verify.ts';
@@ -10,6 +10,11 @@ import { verify as verifyT5 } from './T5/verify.ts';
 import { verify as verifyT6 } from './T6/verify.ts';
 import { verify as verifyT7 } from './T7/verify.ts';
 import { verify as verifyT8 } from './T8/verify.ts';
+import { T9_FILES, verify as verifyT9 } from './T9/verify.ts';
+import { T10_FILES, verify as verifyT10 } from './T10/verify.ts';
+import { T11_FILES, verify as verifyT11 } from './T11/verify.ts';
+import { verify as verifyT12 } from './T12/verify.ts';
+import { addLogs, T12_DAY } from './T12/logs.ts';
 import { applySolution as solveT1 } from './T1/solution/apply.ts';
 import { applySolution as solveT2 } from './T2/solution/apply.ts';
 import { applySolution as solveT3 } from './T3/solution/apply.ts';
@@ -18,6 +23,10 @@ import { applySolution as solveT5 } from './T5/solution/apply.ts';
 import { applySolution as solveT6 } from './T6/solution/apply.ts';
 import { applySolution as solveT7 } from './T7/solution/apply.ts';
 import { applySolution as solveT8 } from './T8/solution/apply.ts';
+import { applySolution as solveT9 } from './T9/solution/apply.ts';
+import { applySolution as solveT10 } from './T10/solution/apply.ts';
+import { applySolution as solveT11 } from './T11/solution/apply.ts';
+import { applySolution as solveT12 } from './T12/solution/apply.ts';
 
 const same = (tree: Tree): Tree => tree;
 
@@ -105,6 +114,64 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
     protectedHook: true,
     verify: verifyT8,
     solution: solveT8,
+  },
+  // T9-T12 add their own files in setup (the shared fixture stays as it is) and T9-T11 grade with hidden
+  // tests that are never in the workspace: they are meant not to saturate.
+  T9: {
+    id: 'T9',
+    title: 'bug whose cause is two modules away from the symptom',
+    size: 'debug',
+    hiddenTests: true,
+    prompt: () =>
+      'Support reports that billing totals drift. `buildStatement` (src/billing/statement.js) lists lower invoice totals than `buildInvoice` gives for the same order, but only for orders with bulk lines (qty >= 5); and after a statement has been built, invoices for those orders come out lower too. The discount and tax rules themselves are correct. Find the root cause and fix it there. Keep `node --test` passing and do not edit the tests.',
+    setup: addFiles(T9_FILES),
+    protectedHook: false,
+    verify: verifyT9,
+    solution: solveT9,
+  },
+  T10: {
+    id: 'T10',
+    title: 'multi-file signature refactor with a public contract to keep',
+    size: 'refactor',
+    hiddenTests: true,
+    prompt: () =>
+      "Change `formatPrice` in src/lib/price.js from positional parameters, `formatPrice(cents, currency = 'USD', withSymbol = true)`, to an options object: `formatPrice(cents, { currency = 'USD', symbol = true } = {})`. Update every caller in src/ to the new form so that every output stays exactly the same. src/index.js is the public API and code outside this repository still calls `formatPrice(cents, currency, withSymbol)` through it, so the `formatPrice` exported from src/index.js must keep accepting the old positional form, with the same results, as well as the new options form. Keep `node --test` passing and do not edit the tests.",
+    setup: addFiles(T10_FILES),
+    protectedHook: false,
+    verify: verifyT10,
+    solution: solveT10,
+  },
+  T11: {
+    id: 'T11',
+    title: 'small feature with edge cases',
+    size: 'feature',
+    hiddenTests: true,
+    prompt: () =>
+      [
+        'Implement `splitCents(totalCents, weights)` in src/lib/split.js. Rules:',
+        '1. It returns an array of integers, one per weight, that sums exactly to totalCents.',
+        '2. Each share starts at floor(|totalCents| * weight / sum of weights); the cents left over go one each to the shares with the largest fractional remainders, ties going to the lower index.',
+        '3. A negative totalCents is split as its absolute value and every share negated; a share is never -0.',
+        '4. totalCents must be a safe integer and weights a non-empty array of non-negative safe integers; anything else throws a RangeError. If every weight is 0, it returns all zeros when totalCents is 0 and throws a RangeError otherwise.',
+        '5. The result is exact for every safe-integer total, up to Number.MAX_SAFE_INTEGER, with no floating-point error.',
+        '6. weights may also be a plain object of name to weight. The result is then an object with the same keys, in Object.keys order, and that order is the index order of rule 2. The rules of 4 apply to its values; an object with no keys throws a RangeError.',
+        'test/split.test.js covers the basic case. Keep `node --test` passing and do not edit the tests.',
+      ].join('\n'),
+    setup: addFiles(T11_FILES),
+    protectedHook: false,
+    verify: verifyT11,
+    solution: solveT11,
+  },
+  T12: {
+    id: 'T12',
+    title: 'one fact in 80 log files (reading everything is expensive)',
+    size: 'long-read',
+    prompt: () =>
+      `The logs/ directory has one log file per service and day. On ${T12_DAY} the payments service logged exactly one ERROR with code PAYMENT_TIMEOUT. Which request id was it, and which service sent that request to payments? Do not change any file. End your reply with a line \`ANSWER: <request id>, <service>\`.`,
+    setup: (tree, facts) => addLogs(tree, facts.seed),
+    protectedHook: false,
+    verify: verifyT12,
+    solution: solveT12,
   },
 };
 

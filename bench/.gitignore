@@ -1,1 +1,3 @@
+# Old default work dir (now <os tmpdir>/acm-bench, outside the checkout). The runner refuses a
+# --work-dir inside the repo; this line only keeps leftovers of older runs out of git.
 .work/

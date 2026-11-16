@@ -79,6 +79,8 @@ const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.str
 /** Error text of a blocked call (hook deny, permission rule), as opposed to an ordinary tool failure. */
 export const DENIAL_TEXT = /denied|blocked|hook|protected|not allowed|permission/i;
 const MessageEvent = z.object({ type: z.enum(['assistant', 'user']), message: z.object({ content: z.union([z.string(), z.array(ContentBlock)]) }).passthrough() }).passthrough();
+/** An assistant event with the request's usage. Claude streams one event per content block, all with the same message id. */
+const AssistantUsage = z.object({ type: z.literal('assistant'), message: z.object({ id: z.string().min(1), usage: z.object({ output_tokens: z.number() }).passthrough() }).passthrough() }).passthrough();
 const InitEvent = z.object({
   type: z.literal('system'),
   subtype: z.literal('init'),
@@ -142,7 +144,8 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   let availableTools: string[] | null = null;
   let hostContext: { agents: string[]; plugins: string[]; memory: boolean } | null = null;
   let result: z.infer<typeof ResultEvent> | undefined;
-  const evidence: Record<string, number[]> = { result: [], toolUse: [], innerCalls: [] };
+  const evidence: Record<string, number[]> = { result: [], toolUse: [], innerCalls: [], requests: [] };
+  const requestIds = new Set<string>();
 
   lines.forEach((line, i) => {
     if (line.trim() === '') return;
@@ -164,6 +167,11 @@ export function parseClaudeTranscript(text: string): ParsedRun {
       result = res.data;
       evidence['result'] = [i + 1];
       return;
+    }
+    const req = AssistantUsage.safeParse(event);
+    if (req.success && !requestIds.has(req.data.message.id)) {
+      requestIds.add(req.data.message.id);
+      evidence['requests']?.push(i + 1);
     }
     const msg = MessageEvent.safeParse(event);
     if (!msg.success || typeof msg.data.message.content === 'string') return;
@@ -202,6 +210,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   const r: z.infer<typeof ResultEvent> = result;
   return {
     turns: r.num_turns,
+    requests: requestIds.size === 0 ? null : requestIds.size,
     hostDurationMs: r.duration_ms,
     usage: {
       input: r.usage.input_tokens,

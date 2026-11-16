@@ -337,6 +337,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
 
   return {
     turns,
+    requests: turns,
     hostDurationMs: null,
     usage: { input: Math.max(0, input - cached - cacheWrite), output, cacheCreation: cacheWrite, cacheRead: cached, reasoning },
     hostCostUsd: null,
