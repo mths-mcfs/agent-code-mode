@@ -13,19 +13,23 @@ describe('Claude transcript parser', () => {
   it('reads the metrics of a real native run (claude-A.jsonl, Claude Code 2.1.325)', () => {
     const p = parseClaudeTranscript(read('claude-A.jsonl'));
     expect(p.turns).toBe(2);
-    expect(p.hostDurationMs).toBe(3833);
-    expect(p.usage).toEqual({ input: 4, output: 180, cacheCreation: 17117, cacheRead: 42661, reasoning: 0 });
-    expect(p.hostCostUsd).toBeCloseTo(0.00394041, 10);
-    expect(p.model).toBe('claude-haiku-5-5');
+    expect(p.hostDurationMs).toBe(2414);
+    expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0 });
+    expect(p.hostCostUsd).toBeCloseTo(0.0116847, 10);
+    expect(p.model).toBe('claude-sonnet-5-5');
     expect(p.finalAnswer).toMatch(/ANSWER: 7$/);
     expect(p.toolCalls).toEqual({ native: 1, run: 0, codeMode: 0, other: 0, byName: { Read: 1 } });
     expect(p.innerCalls).toBeNull();
-    expect(p.availableTools).toContain('Bash');
+    // Arm A sees exactly the native file/shell tools (`--tools Bash,Read,Write,Edit,Glob,Grep`).
+    expect([...(p.availableTools ?? [])].sort()).toEqual(['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write']);
     expect(p.availableTools).not.toContain('mcp__agent-code-mode__run');
     expect(p.evidence['result']).toEqual([6]);
     expect(checkArm('claude', 'A', p.toolCalls).reasons).toEqual([]);
     expect(checkSurface('claude', 'A', p.availableTools ?? [])).toEqual([]);
     expect(checkSurface('claude', 'B', p.availableTools ?? []).length).toBeGreaterThan(0);
+    // A surface with any other built-in (Task, ToolSearch, web...) is not the arm A surface.
+    expect(checkSurface('claude', 'A', [...(p.availableTools ?? []), 'Task']).join()).toMatch(/expected exactly/);
+    expect(checkSurface('claude', 'B', ['mcp__agent-code-mode__run', 'ToolSearch']).join()).toMatch(/expected exactly/);
   });
 
   it('counts run calls and the inner call log (claude-B.jsonl, synthetic)', () => {
@@ -83,13 +87,13 @@ describe('Codex transcript parser', () => {
   it('reads the metrics of a real native run (codex-A, Codex CLI 0.169.0)', () => {
     const p = parseCodexTranscript(read('codex-A.jsonl'), read('codex-A.requests.jsonl'));
     expect(p.turns).toBe(2);
-    // turn.completed: input 33269, cached 16384 -> uncached 16885.
-    expect(p.usage).toEqual({ input: 16885, output: 53, cacheCreation: 0, cacheRead: 16384, reasoning: 0 });
+    // turn.completed: input 21008, cached 10240 -> uncached 10768.
+    expect(p.usage).toEqual({ input: 10768, output: 57, cacheCreation: 0, cacheRead: 10240, reasoning: 0 });
     expect(p.toolCalls).toEqual({ native: 1, run: 0, codeMode: 0, other: 0, byName: { exec_command: 1 } });
     expect(p.finalAnswer).toMatch(/ANSWER: 7$/);
     expect(checkArm('codex', 'A', p.toolCalls).reasons).toEqual([]);
     const cost = costFromUsage(loadPricing(), 'gpt-6-luna', p.usage ?? { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, reasoning: null });
-    expect(cost).toBeCloseTo((16885 * 0.1 + 16384 * 0.01 + 53 * 0.5) / 1e6, 12);
+    expect(cost).toBeCloseTo((10768 * 0.1 + 10240 * 0.01 + 57 * 0.5) / 1e6, 12);
   });
 
   it('tells Codex code mode from direct tools (codex-B, real code_mode_only run)', () => {
@@ -200,6 +204,18 @@ describe('Codex transcript parser', () => {
     expect(surfaces.C).toContain('mcp__agent_code_mode.run');
     expect(checkSurface('codex', 'C', surfaces.C.filter((t: string) => !t.includes('agent_code_mode')))).toContain('agent-code-mode arm does not see the run tool directly (deferred behind tool_search, or server not configured)');
     expect(checkSurface('codex', 'A', [...surfaces.A, 'mcp__codex_apps__mail._send']).join()).toMatch(/account apps/);
+    // Same non-file tools in every arm: any extra one (view_image, clock, multi-agent...) fails the check.
+    for (const [arm, extra] of [['A', 'functions.view_image'], ['B', 'clock.sleep'], ['C', 'collaboration.spawn_agent'], ['B', 'exec.view_image']] as const) {
+      expect(checkSurface('codex', arm, [...surfaces[arm], extra]).join(), extra).toMatch(/non-file tools/);
+    }
+    // B reaches the file/shell tools only through exec.
+    expect(surfaces.B).toEqual(expect.arrayContaining(['exec.exec_command', 'exec.apply_patch', 'functions.exec']));
+  });
+
+  it('lists the tools nested in code-mode exec', () => {
+    const description = 'Run JavaScript\n```ts\ndeclare const tools: { exec_command(args: {\n cmd: string }): Promise<unknown>; };\n```\ndeclare const tools: { apply_patch(input: string): Promise<unknown>; };';
+    const input = JSON.stringify([{ type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description }, { type: 'function', name: 'wait' }] }] }]);
+    expect(codexToolSurface(input)).toEqual(['functions.exec', 'functions.wait', 'exec.exec_command', 'exec.apply_patch']);
   });
 
   it('reads the tool names out of prompt-input output', () => {

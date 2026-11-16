@@ -40,23 +40,34 @@ describe('host commands', () => {
     // Native tools removed with --tools "" (not denied: a CLI deny would also deny them inside run).
     expect(b).not.toContain('--disallowedTools');
     expect(b.slice(b.indexOf('--tools'))).toEqual(['--tools', '', '--allowedTools', 'mcp__agent-code-mode__run,Bash,Read,Write,Edit,Glob,Grep']);
-    expect(a.slice(a.indexOf('--allowedTools'))).toEqual(['--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep']);
+    // Arm A: exactly the native file/shell tools, nothing else built in.
+    expect(a.slice(a.indexOf('--tools'))).toEqual(['--tools', 'Bash,Read,Write,Edit,Glob,Grep', '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep']);
     expect(claudeMcpConfig('A', 'x')).toEqual({ mcpServers: {} });
   });
 
   it('writes the Codex config each arm needs', () => {
-    const base = { model: 'gpt-6.1-terra', effort: 'medium', codexHome: '/h', catalogFile: '/h/c.json', serverEntry: '/r/dist/cli.js', nodePath: '/usr/bin/node' };
+    const base = { model: 'gpt-6.1-terra', effort: 'medium', codexHome: '/h', catalogFile: '/h/c.json', serverEntry: '/r/dist/cli.js', nodePath: '/usr/bin/node', emptyServerEntry: '/r/bench/lib/empty-mcp-server.mjs' };
     const c = codexConfigToml({ ...base, arm: 'C' });
     expect(c).toContain('shell_tool = false');
-    for (const arm of ['A', 'B', 'C'] as const) expect(codexConfigToml({ ...base, arm })).toContain('apps = false');
+    for (const arm of ['A', 'B', 'C'] as const) {
+      const toml = codexConfigToml({ ...base, arm });
+      for (const f of ['apps', 'view_image', 'image_generation', 'goals', 'multi_agent', 'sleep_tool']) expect(toml).toContain(`\n${f} = false`);
+      expect(toml).toContain('[agents]\nenabled = false');
+      expect(toml).toContain('web_search = "disabled"');
+      // Feature keys sit in [features], not in a later table.
+      const features = toml.slice(toml.indexOf('[features]'), toml.indexOf('\n[', toml.indexOf('[features]') + 1));
+      if (arm === 'C') expect(features).toContain('shell_tool = false');
+      if (arm === 'B') expect(features).toContain('code_mode = true');
+      expect(toml.includes('[mcp_servers.bench-empty]')).toBe(arm !== 'C');
+    }
     expect(c).toContain('[mcp_servers.agent-code-mode]');
     expect(c).toContain('default_tools_approval_mode = "approve"');
     expect(codexConfigToml({ ...base, arm: 'B', catalogFile: null })).not.toContain('model_catalog_json');
     const raw = JSON.stringify({ models: [{ slug: 'gpt-6.1-terra', tool_mode: 'code_mode_only', apply_patch_tool_type: 'freeform' }] });
-    expect(catalogForArm('B', raw)).toBeNull();
+    expect(JSON.parse(catalogForArm('B', raw)).models[0]).toMatchObject({ tool_mode: 'code_mode_only', experimental_supported_tools: [], supports_search_tool: false });
     expect(JSON.parse(catalogForArm('A', raw) ?? '').models[0]).toMatchObject({ tool_mode: 'direct', apply_patch_tool_type: 'freeform' });
     expect(JSON.parse(catalogForArm('C', raw) ?? '').models[0]).toMatchObject({ tool_mode: 'direct', apply_patch_tool_type: null, supports_search_tool: false });
-    expect(JSON.parse(catalogForArm('A', raw) ?? '').models[0].supports_search_tool).toBeUndefined();
+    expect(JSON.parse(catalogForArm('A', raw)).models[0]).toMatchObject({ supports_search_tool: false, experimental_supported_tools: [] });
   });
 });
 

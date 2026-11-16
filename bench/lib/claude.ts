@@ -39,7 +39,9 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   // Arm A: the native tools, allowed by rule. Arm B: no built-in tools at all (`--tools ""` removes them
   // without denying them: a CLI deny rule would also deny the same tool inside agent-code-mode, by
   // parity), and the same native names allowed by rule so the inner calls are allowed exactly as in A.
-  if (o.arm === 'A') args.push('--allowedTools', CLAUDE_INNER_ALLOWED.join(','));
+  // Both arms see no other built-in tool (no Task, ToolSearch, web...), so they differ only in native
+  // file/shell tools vs `run`.
+  if (o.arm === 'A') args.push('--tools', CLAUDE_INNER_ALLOWED.join(','), '--allowedTools', CLAUDE_INNER_ALLOWED.join(','));
   else args.push('--tools', '', '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
   return args;
 }

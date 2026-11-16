@@ -8,11 +8,11 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
 import { claudeArgs, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
-import { catalogForArm, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
+import { catalogForArm, CODEX_FEATURES_OFF, EMPTY_MCP_SERVER, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
-import { ARM_LABELS, checkArm, checkSurface, HOST_ARMS, RunRecordSchema, type ArmId, type ParsedRun, type RunRecord } from './lib/record.ts';
+import { ARM_LABELS, checkArm, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, HOST_ARMS, RunRecordSchema, type ArmId, type ParsedRun, type RunRecord } from './lib/record.ts';
 import { Rng } from './lib/rng.ts';
 import { defaultSanitizeContext, sanitize, type SanitizeContext } from './lib/sanitize.ts';
 import { claudeProjectSettings, CODEX_HOOK_MATCHER, createWorkspace, hookCommand, workspaceDiff, type HostId } from './lib/workspace.ts';
@@ -250,7 +250,7 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
     const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
     def = {
       args: codexArgs('<ws>', task.protectedHook),
-      config: codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome: '<home>', catalogFile: catalog === null ? null : '<catalog>', serverEntry: '<server>', nodePath: 'node' }),
+      config: codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome: '<home>', catalogFile: catalog === null ? null : '<catalog>', serverEntry: '<server>', nodePath: 'node', emptyServerEntry: '<empty-server>' }),
       hooks: task.protectedHook ? codexHooksJson(CODEX_HOOK_MATCHER, hookCommand(fixture.facts.protectedFile)) : null,
       catalogSha256: catalog === null ? null : sha256(catalog),
     };
@@ -346,7 +346,7 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
     const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
     const catalogFile = catalog === null ? null : path.join(codexHome, 'catalog.json');
     if (catalogFile !== null && catalog !== null) await writeFile(catalogFile, catalog);
-    const config = codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome, catalogFile, serverEntry: ctx.serverEntry, nodePath: process.execPath });
+    const config = codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome, catalogFile, serverEntry: ctx.serverEntry, nodePath: process.execPath, emptyServerEntry: EMPTY_MCP_SERVER });
     await writeFile(path.join(codexHome, 'config.toml'), config);
     const hooks = task.protectedHook ? codexHooksJson(CODEX_HOOK_MATCHER, hookCommand(fixture.facts.protectedFile)) : null;
     if (hooks !== null) await writeFile(path.join(codexHome, 'hooks.json'), hooks);
@@ -510,6 +510,23 @@ async function lastSeed(resultsDir: string): Promise<number | undefined> {
   }
 }
 
+/**
+ * Adds to this invocation's environment block the tool surface each host/arm was observed with (Claude
+ * init event, Codex prompt-input) next to the surface the arm-integrity check requires.
+ */
+async function recordSurfaces(resultsDir: string, observed: Record<string, string[]>): Promise<void> {
+  const file = path.join(resultsDir, 'env.json');
+  const parsed = z.object({ invocations: z.array(z.record(z.string(), z.unknown())).min(1) }).passthrough().safeParse(JSON.parse(await readFile(file, 'utf8')));
+  if (!parsed.success) return;
+  const invocations = [...parsed.data.invocations];
+  const last = invocations.length - 1;
+  invocations[last] = {
+    ...invocations[last],
+    surfaces: { observed, required: { claude: CLAUDE_ARM_SURFACE, codexNonFileTools: CODEX_COMMON_NON_FILE, codexFeaturesOff: CODEX_FEATURES_OFF } },
+  };
+  await writeFile(file, `${JSON.stringify({ ...parsed.data, invocations }, null, 2)}\n`);
+}
+
 async function appendEnvironment(resultsDir: string, invocation: Record<string, unknown>): Promise<void> {
   const file = path.join(resultsDir, 'env.json');
   let invocations: unknown[] = [];
@@ -623,6 +640,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog, seed, versions, git };
   process.stdout.write(`${opts.dryRun ? 'DRY RUN ' : ''}${plan.length} runs, seed ${seed}, results in ${path.relative(process.cwd(), resultsDir) || resultsDir}\n`);
   let failures = 0;
+  const surfaces = new Map<string, string[]>();
   for (const p of plan) {
     const hash = configHash(runConfig(ctx, p));
     const recordFile = path.join(runResultDir(resultsDir, p, hash), 'record.json');
@@ -631,12 +649,16 @@ export async function main(argv: readonly string[]): Promise<number> {
       continue;
     }
     try {
-      process.stdout.write(`${line(await executeRun(ctx, p))}\n`);
+      const record = await executeRun(ctx, p);
+      const tools = record.parsed?.availableTools;
+      if (tools && !surfaces.has(`${p.host}/${p.arm}`)) surfaces.set(`${p.host}/${p.arm}`, [...tools].sort());
+      process.stdout.write(`${line(record)}\n`);
     } catch (err) {
       failures += 1;
       process.stderr.write(`${runId(p)}: harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
     }
   }
+  if (surfaces.size > 0) await recordSurfaces(resultsDir, Object.fromEntries(surfaces));
   const { markdown } = await writeReport(resultsDir);
   process.stdout.write(`\n${markdown}`);
   return failures === 0 ? 0 : 1;
