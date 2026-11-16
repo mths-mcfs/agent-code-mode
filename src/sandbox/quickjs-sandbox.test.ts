@@ -484,16 +484,23 @@ describe('QuickJsSandbox: reply buffering', () => {
 
   it('ends a run whose script stops reading binding results instead of buffering them', async () => {
     const before = process.memoryUsage();
-    const { outcome, calls, elapsedMs } = await run('for (let i = 0; i < 200; i++) read({ path: "x" }); while (true) {}', {
+    const cap = 16 * 1024 * 1024;
+    const { outcome, calls } = await run('for (let i = 0; i < 200; i++) read({ path: "x" }); while (true) {}', {
       timeoutMs: 10_000,
       onCall: bigRead,
-      sandbox: { maxPendingReplyBytes: 16 * 1024 * 1024 },
+      sandbox: { maxPendingReplyBytes: cap },
     });
+    // The event that ends the run is the pending-reply cap overflowing, not the timeout or the call count.
     const f = failure(outcome);
     expect(f.kind).toBe('oom');
     expect(f.error.name).toBe('ReplyBufferFull');
-    expect(calls.length).toBeGreaterThan(16);
-    expect(elapsedMs).toBeLessThan(5_000);
+    expect(f.error.message).toContain(`not read yet exceeded ${cap} bytes`);
+    // How many replies fit before the cap depends on how much the OS pipe absorbs (about 64 KiB on Linux,
+    // less on macOS and Windows), so only the bound that holds everywhere is checked: every reply line is
+    // a little over 1 MiB, so at least floor(cap / (1 MiB + 1 KiB)) replies were sent, and the script was
+    // stopped long before its 200 calls were all answered.
+    expect(calls.length).toBeGreaterThanOrEqual(Math.floor(cap / (1024 * 1024 + 1024)));
+    expect(calls.length).toBeLessThan(200);
     const after = process.memoryUsage();
     expect(after.external + after.arrayBuffers - (before.external + before.arrayBuffers)).toBeLessThan(64 * 1024 * 1024);
   });
