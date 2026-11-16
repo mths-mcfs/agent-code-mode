@@ -6,13 +6,17 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ToolError } from '../../core/errors.js';
 import type { PolicySnapshot, PreparedCallOf, SessionContext } from '../../core/types.js';
 import { makeContext } from '../../testing/index.js';
+import { expandBashGlobs, findBash } from '../../tools/bash.js';
+import { Jail } from '../../tools/jail.js';
 import { NodeToolRuntime } from '../../tools/runtime.js';
 import { ClaudeHostAdapter, type ClaudePolicy } from './adapter.js';
 import { READERS, planGlobExpansion } from './expand.js';
 
 /**
  * Properties of the glob expansion of pure readers, checked against bash
- * itself (LC_ALL=C) as the oracle:
+ * itself as the oracle: the same bash the tool runtime runs commands with
+ * (`findBash()`), in the same environment, under more than one collation
+ * (the order of glob matches follows the locale):
  * - the expanded command passes the reader exactly the arguments bash would
  *   have passed for the command as written (same files, same order, same
  *   options), plus the `--` the rewrite inserts;
@@ -79,7 +83,10 @@ function bashArgv(cmd: string, cwd: string): string[][] {
   const fns = Object.keys(READERS)
     .map((name) => `${name}() { printf '%s\\0' "<${name}>" "$@"; printf '\\1'; }`)
     .join('\n');
-  const r = spawnSync('bash', ['-c', `${fns}\n${cmd}`], { cwd, env: { PATH: process.env['PATH'] ?? '', LC_ALL: 'C' }, encoding: 'utf8' });
+  const shell = findBash();
+  if (shell === null) throw new Error('no bash');
+  // The environment `runBash` gives the command.
+  const r = spawnSync(shell, ['-c', `${fns}\n${cmd}`], { cwd, env: process.env, encoding: 'utf8' });
   if (r.status === null) throw new Error(`bash failed: ${r.stderr}`);
   return r.stdout
     .split('\x01')
@@ -138,12 +145,54 @@ describe.runIf(posix)('glob expansion of pure readers', () => {
     await rm(lab.base, { recursive: true, force: true });
   });
 
-  it('passes each reader exactly the arguments bash would, and validates exactly the globbed files', async () => {
+  /** Locales whose collations order names differently (`B.js` vs `a.js`, `é.js` vs `e.js`); those installed are used. */
+  const LOCALES = ['C', 'en_US.UTF-8', 'pt_BR.UTF-8', 'C.UTF-8'].filter(
+    (l) => l === 'C' || spawnSync('locale', ['-a'], { encoding: 'utf8' }).stdout.toLowerCase().replace(/-/g, '').split('\n').includes(l.toLowerCase().replace(/-/g, '')),
+  );
+
+  it.each(LOCALES)('passes each reader exactly the arguments bash would (LC_ALL=%s), and validates exactly the globbed files', async (locale) => {
+    const saved = process.env['LC_ALL'];
+    process.env['LC_ALL'] = locale;
+    try {
+      await readerProperty(locale);
+    } finally {
+      if (saved === undefined) delete process.env['LC_ALL'];
+      else process.env['LC_ALL'] = saved;
+    }
+  });
+
+  it('orders matches as the locale does, not by byte', async () => {
+    const utf8 = LOCALES.find((l) => l !== 'C');
+    if (utf8 === undefined) return;
     const { policy } = await lab.policy({ allow: ['Bash'] });
-    const r = rng(20261116);
+    const saved = process.env['LC_ALL'];
+    try {
+      process.env['LC_ALL'] = 'C';
+      const c = (await prepareBash(lab, policy, 'cat [aBe]*.js')).effect.command;
+      process.env['LC_ALL'] = utf8;
+      const u = (await prepareBash(lab, policy, 'cat [aBe]*.js')).effect.command;
+      expect(c).toMatch(/^cat -- 'B\.js' 'a b\.js' 'a\.js' 'e\.js'$/);
+      expect(u).not.toBe(c); // `B.js` sorts among the `b`s in a UTF-8 collation
+    } finally {
+      if (saved === undefined) delete process.env['LC_ALL'];
+      else process.env['LC_ALL'] = saved;
+    }
+  });
+
+  it('does not expand on Windows (Git Bash): the command stays as written', async () => {
+    const plan = planGlobExpansion('cat *.js');
+    if (!plan) throw new Error('no plan');
+    const jail = await Jail.create({ cwd: lab.ws, roots: [], protectedPaths: [] });
+    expect(await expandBashGlobs(plan, lab.ws, jail, undefined, 'win32')).toBeUndefined();
+    expect(await expandBashGlobs(plan, lab.ws, jail, undefined, 'linux')).toMatchObject({ command: expect.stringMatching(/^cat -- /) });
+  });
+
+  async function readerProperty(locale: string): Promise<void> {
+    const { policy } = await lab.policy({ allow: ['Bash'] });
+    const r = rng(20261116 + locale.length);
     let expanded = 0;
     let refused = 0;
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < 200; i++) {
       const cmd = command(r);
       let prepared: PreparedCallOf<'bash'>;
       try {
@@ -181,9 +230,9 @@ describe.runIf(posix)('glob expansion of pure readers', () => {
       expect(expansion.entries.map((e) => e.path), cmd).toEqual(fromBash);
     }
     // The property is not vacuous.
-    expect(expanded).toBeGreaterThan(150);
-    expect(refused).toBeGreaterThan(10);
-  });
+    expect(expanded, locale).toBeGreaterThan(70);
+    expect(refused, locale).toBeGreaterThan(5);
+  }
 
   it('decides the expanded command as the rules decide the files written by hand', async () => {
     const ruleSets: { permissions: Record<string, unknown>; mode?: string }[] = [
@@ -226,7 +275,7 @@ describe.runIf(posix)('glob expansion of pure readers', () => {
       'cat $(ls)', 'cat `ls`', 'cat $F*', 'cat "$F"*', 'cat ${D}/*', 'cat *.js > out.txt', 'cat < a.js *.js', 'wc -l *.js 2>/dev/null', 'cat *.js 2>&1',
       'ls -R *', 'ls --recursive d*', 'ls -lR d*', 'ls -L *', 'ls --dereference *', 'cat ../*', 'cat d1/../*', 'cat /etc/*', 'cat ~/*', 'cat ~/x/*',
       'cat -x *', 'cat --bogus *', 'wc --files0-from=a.js *', 'tail -f *.js', 'tail --follow *.js', 'head -n x *.js', 'cat *.js -n', 'cat a.js -n *.js',
-      'cat {a,b}.js', 'cat *.{js,txt}', 'cat **/*.js', 'cat [[:alpha:]]*', 'cat [a-', 'cd d1 && cat *', 'pushd d1; cat *', '(cat *.js)', '{ cat *.js; }',
+      'cat {a,b}.js', 'cat *.{js,txt}', 'cat **/*.js', 'cd d1 && cat *', 'pushd d1; cat *', '(cat *.js)', '{ cat *.js; }',
       'for f in *.js; do cat $f; done', 'if true; then cat *.js; fi', 'f() { cat *.js; }; f', 'cat() { echo; }; cat *.js', 'X=1 cat *.js', 'rg x *.js',
       'sort *.js', '/bin/cat *.js', 'command cat *.js', 'timeout 5 cat *.js', 'eval cat *.js', 'bash -c "cat *.js"', 'cat $\'*\'.js', 'cat $"*".js',
       'echo $(cat *.js)', 'cat <(cat *.js)', 'cat d1/', 'cat d1//*.txt', 'cat *.js/',

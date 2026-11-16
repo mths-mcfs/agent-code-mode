@@ -1,9 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, type BigIntStats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
-import type { BashEffect, BashExpandedEntry, BashGlob, BashGlobPlan, BashResult } from '../core/types.js';
+import type { BashEffect, BashExpandedEntry, BashGlobPlan, BashResult } from '../core/types.js';
 import { errnoCode } from './fs-ops.js';
 import type { Jail } from './jail.js';
 import { withSandbox } from './sandbox.js';
@@ -182,44 +182,31 @@ function identityOf(st: BigIntStats): string {
   return `${st.dev}:${st.ino}:${type}`;
 }
 
-/** Matches of one glob, relative to `cwd` as bash would write them, sorted by byte value (bash in the C locale). */
-async function matchGlob(glob: BashGlob, cwd: string): Promise<string[]> {
-  let current: string[] = [''];
-  for (let i = 0; i < glob.segments.length; i++) {
-    const seg = glob.segments[i];
-    if (!seg) break;
-    const last = i === glob.segments.length - 1;
-    const next: string[] = [];
-    for (const rel of current) {
-      if (seg.kind === 'literal') {
-        const candidate = rel === '' ? seg.text : `${rel}/${seg.text}`;
-        // An existing entry; a directory (links followed) before the last segment.
-        const st = last ? await fs.lstat(path.resolve(cwd, candidate)).catch(() => null) : await fs.stat(path.resolve(cwd, candidate)).catch(() => null);
-        if (st && (last || st.isDirectory())) next.push(candidate);
-        continue;
+/** Environment variables that make bash run code at startup; dropped so expanding has no side effect. */
+const STARTUP_CODE_VARS = ['BASH_ENV', 'ENV'];
+
+/**
+ * Matches of one glob word, from the bash that runs the command, in `cwd`,
+ * with the same environment (locale, `GLOBIGNORE`, `BASHOPTS`): exactly the
+ * words, in the order, that bash would pass the command. The word holds only
+ * literal text, quotes and glob characters (the planner refused anything
+ * else), so expanding it runs no code. Empty when nothing matches.
+ */
+function bashGlob(raw: string, cwd: string, shell: string): Promise<string[]> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of STARTUP_CODE_VARS) delete env[name];
+  const script = `shopt -u failglob 2>/dev/null; shopt -s nullglob; for f in ${raw}; do printf '%s\\0' "$f"; done`;
+  return new Promise((resolve, reject) => {
+    execFile(shell, ['--noprofile', '--norc', '-c', script], { cwd, env, encoding: 'buffer', timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
+      if (err) {
+        reject(new ToolError('tool-error', `bash could not expand ${raw}: ${err.message}`));
+        return;
       }
-      let names: string[];
-      try {
-        names = await fs.readdir(path.resolve(cwd, rel === '' ? '.' : rel));
-      } catch {
-        continue; // bash skips directories it cannot read
-      }
-      for (const name of names) {
-        if (!seg.matches(name)) continue;
-        const candidate = rel === '' ? name : `${rel}/${name}`;
-        if (!last) {
-          const st = await fs.stat(path.resolve(cwd, candidate)).catch(() => null);
-          if (!st?.isDirectory()) continue;
-        }
-        next.push(candidate);
-      }
-    }
-    current = next;
-    if (current.length > MAX_EXPANDED_ENTRIES) {
-      throw new ToolError('invalid-args', `${glob.raw} matches more than ${MAX_EXPANDED_ENTRIES} entries; narrow it or use glob()`);
-    }
-  }
-  return current.sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
+      const words = stdout.toString('utf8').split('\0');
+      words.pop();
+      resolve(words);
+    });
+  });
 }
 
 /** An expanded command and the identity of each entry it names. */
@@ -241,11 +228,16 @@ export async function expandBashGlobs(
   cwd: string,
   jail: Jail,
   readFilter: ((realAbsPath: string) => boolean) | undefined,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ExpandedCommand | undefined> {
+  // Git Bash on Windows: paths, inodes and links are not those the checks below rely on.
+  if (platform === 'win32') return undefined;
+  const shell = findBash();
+  if (shell === null) return undefined;
   const lists: string[][] = [];
   const entries: BashExpandedEntry[] = [];
   for (const glob of plan.globs) {
-    const matches = await matchGlob(glob, cwd);
+    const matches = await bashGlob(glob.raw, cwd, shell);
     if (matches.length === 0) return undefined;
     if (entries.length + matches.length > MAX_EXPANDED_ENTRIES) {
       throw new ToolError('invalid-args', `the globs of this command match more than ${MAX_EXPANDED_ENTRIES} entries; narrow them or use glob()`);

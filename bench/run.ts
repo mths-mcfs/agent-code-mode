@@ -363,21 +363,42 @@ export async function resolveBaseline(opts: Pick<Options, 'acmRef' | 'acmDist' |
   if (opts.dryRun || (await exists(path.join(dir, '.built')))) return build;
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
-  const tar = `${dir}.tar`;
-  // Only what the build needs: no bench/ (hidden tests, solutions) next to the run workspaces.
+  // Only what the build needs: no bench/ (hidden tests, solutions) next to the run workspaces. The archive
+  // is written into the build dir and unpacked there by a relative name: a GNU tar on Windows reads a
+  // drive letter (`D:\\...`) as a remote host, the system bsdtar does not care.
+  const tar = path.join(dir, 'source.tar');
   execFileSync('git', ['archive', '--format=tar', '-o', tar, commit, '--', '.', ':(exclude)bench', ':(exclude)test'], { cwd: REPO_ROOT, stdio: 'ignore' });
-  execFileSync('tar', ['-xf', tar, '-C', dir], { stdio: 'ignore' });
+  execFileSync('tar', ['-xf', 'source.tar'], { cwd: dir, stdio: 'ignore' });
   await rm(tar, { force: true });
   const lock = async (d: string): Promise<string | null> => readFile(path.join(d, 'package-lock.json'), 'utf8').catch(() => null);
   if ((await lock(dir)) !== (await lock(REPO_ROOT))) {
     await rm(dir, { recursive: true, force: true });
     throw new Error(`--acm-ref ${opts.acmRef}: its package-lock.json differs from this checkout's; build it in its own checkout and pass --acm-dist <that dist>`);
   }
-  await symlink(path.join(REPO_ROOT, 'node_modules'), path.join(dir, 'node_modules'), 'dir');
-  execFileSync('npm', ['run', 'build'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'], timeout: 600_000 });
+  // A junction on Windows: a directory symlink there needs a privilege the user may not have.
+  await symlink(path.join(REPO_ROOT, 'node_modules'), path.join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+  const npm = npmCommand();
+  execFileSync(npm.command, [...npm.args, 'run', 'build'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'], timeout: 600_000 });
   if (!(await exists(entry))) throw new Error(`--acm-ref ${opts.acmRef}: the build produced no dist/cli.js`);
   await writeFile(path.join(dir, '.built'), `${commit}\n`);
   return build;
+}
+
+/**
+ * How to run npm without a shell: this Node with npm's own `npm-cli.js` (`npm` is a `.cmd` shim on
+ * Windows, which `execFile` cannot start). Found from `npm_execpath` when run under npm, else next to the
+ * Node binary (Windows: `<node dir>/node_modules/npm`, POSIX: `<prefix>/lib/node_modules/npm`); plain
+ * `npm` as the last resort.
+ */
+export function npmCommand(env: NodeJS.ProcessEnv = process.env, execPath: string = process.execPath): { command: string; args: string[] } {
+  const nodeDir = path.dirname(execPath);
+  const candidates = [
+    env['npm_execpath'],
+    path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(nodeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  for (const c of candidates) if (c !== undefined && c !== '' && /npm-cli\.js$/.test(c) && existsSync(c)) return { command: execPath, args: [c] };
+  return { command: 'npm', args: [] };
 }
 
 function stableJson(value: unknown): string {

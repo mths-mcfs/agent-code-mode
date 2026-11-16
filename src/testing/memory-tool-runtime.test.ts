@@ -22,7 +22,8 @@ async function readWith(tools: ToolRuntime<null>, root: string, file: string, wi
   const prepared = await tools.prepare({ id: 'c1', tool: 'read', args: { path: file, ...window } }, makeContext(root), POLICY);
   const result = await tools.commit(prepared, new AbortController().signal);
   if (!('totalLines' in result)) throw new Error('not a read result');
-  return { ...result, path: path.relative(root, result.path) };
+  // The runtimes report real paths (the tmpdir is a symlink on macOS, a short 8.3 name on Windows); D5 is about line accounting, so compare the file name only.
+  return { ...result, path: path.basename(result.path) };
 }
 
 describe('MemoryToolRuntime.read', () => {
