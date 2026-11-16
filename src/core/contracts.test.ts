@@ -148,6 +148,24 @@ describe('PolicySnapshot.readFilter and additionalRoots', () => {
   });
 });
 
+describe('names of files outside the session cwd', () => {
+  it('diff headers and changedFiles name a file in an additional root as <root basename>/<path>', async () => {
+    const ws = path.join(base, 'ws');
+    const extra = path.join(base, 'extra');
+    mkdirSync(ws);
+    mkdirSync(path.join(extra, 'sub'), { recursive: true });
+    writeFileSync(path.join(extra, 'sub', 'x'), 'old\n');
+    const policy: PolicySnapshot<null> = { host: 'generic', bashContainment: { mode: 'none' }, protectedPaths: [], additionalRoots: [extra], payload: null };
+    const d = dispatcherFor(makeContext(ws), policy);
+    const w = value<{ diff: string }>(await d.dispatch('write', { path: path.join(extra, 'sub', 'x'), content: 'new\n' }));
+    value(await d.dispatch('write', { path: 'f', content: 'x\n' }));
+    expect(w.diff.split('\n').slice(0, 2)).toEqual(['--- a/extra/sub/x', '+++ b/extra/sub/x']);
+    expect(d.diff).not.toMatch(/^\+\+\+ b\/\//m);
+    expect(d.diff).toMatch(/^\+\+\+ b\/f$/m);
+    expect(d.changedFiles).toEqual(['extra/sub/x', 'f']);
+  });
+});
+
 describe('Claude policy wiring', () => {
   async function claude(settings: Record<string, unknown>, files: Record<string, string> = {}) {
     const home = path.join(base, 'home');

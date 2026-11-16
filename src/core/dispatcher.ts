@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
 import { frozenCopy } from './freeze.js';
-import { findMatchingPattern } from './paths.js';
+import { findMatchingPattern, workspaceDisplayPath } from './paths.js';
 import { isMutating, parseToolCall } from './schemas.js';
 import type {
   BashContainment,
@@ -515,7 +515,7 @@ export class Dispatcher<P = unknown> {
   #protectedCache: { readonly policy: PolicySnapshot<P>; readonly patterns: readonly string[] } | undefined;
 
   #addChanged(absPath: string): void {
-    const shown = displayPath(absPath, this.#canonicalCwd);
+    const shown = workspaceDisplayPath(absPath, this.#canonicalCwd, this.#canonicalRoots);
     if (!this.#changed.includes(shown)) this.#changed.push(shown);
   }
 

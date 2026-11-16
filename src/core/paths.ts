@@ -8,6 +8,8 @@
  * separators so Windows paths match too.
  */
 
+import path from 'node:path';
+
 const cache = new Map<string, RegExp>();
 
 function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
@@ -65,4 +67,30 @@ export function findMatchingPattern(
   caseInsensitive = DEFAULT_CASE_INSENSITIVE,
 ): string | undefined {
   return patterns.find((pattern) => matchesPathPattern(path, pattern, caseInsensitive));
+}
+
+function insideOrEqual(root: string, abs: string): string | undefined {
+  const rel = path.relative(root, abs);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)) ? rel : undefined;
+}
+
+/**
+ * How a workspace file is named in diffs and `changedFiles`: relative to the
+ * session cwd when inside it; inside another root (client root, additional
+ * directory) as `<root basename>/<path in that root>`, choosing the deepest
+ * root that holds it; otherwise the absolute path. Always `/`-separated, so a
+ * diff header reads `b/src/a.ts` or `b/extra/x`, never `b//abs/path`.
+ */
+export function workspaceDisplayPath(abs: string, cwd: string, roots: readonly string[]): string {
+  const toPosix = (p: string): string => p.split(path.sep).join('/');
+  const inCwd = insideOrEqual(cwd, abs);
+  if (inCwd !== undefined) return inCwd === '' ? '.' : toPosix(inCwd);
+  const holder = [...roots]
+    .filter((r) => path.basename(r) !== '' && insideOrEqual(r, abs) !== undefined)
+    .sort((a, b) => b.length - a.length)[0];
+  if (holder !== undefined) {
+    const rel = insideOrEqual(holder, abs) ?? '';
+    return toPosix(rel === '' ? path.basename(holder) : path.join(path.basename(holder), rel));
+  }
+  return toPosix(abs);
 }

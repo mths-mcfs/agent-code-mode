@@ -10,7 +10,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
-import { DEFAULT_CASE_INSENSITIVE, findMatchingPattern } from '../core/paths.js';
+import { DEFAULT_CASE_INSENSITIVE, findMatchingPattern, workspaceDisplayPath } from '../core/paths.js';
 
 /**
  * Workspace jail: every path a tool touches is resolved to an absolute real
@@ -336,11 +336,6 @@ export class Jail {
 
   /** Path for diffs and messages: relative to the first root when inside it, else absolute. */
   displayPath(abs: string): string {
-    const first = this.roots[0] ?? this.cwd;
-    if (isInsideDir(first, abs)) {
-      const rel = path.relative(first, abs);
-      return rel === '' ? '.' : rel.split(path.sep).join('/');
-    }
-    return abs.split(path.sep).join('/');
+    return workspaceDisplayPath(abs, this.roots[0] ?? this.cwd, this.roots);
   }
 }

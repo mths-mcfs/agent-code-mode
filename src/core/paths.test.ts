@@ -1,5 +1,6 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { matchesPathPattern } from './paths.js';
+import { matchesPathPattern, workspaceDisplayPath } from './paths.js';
 
 describe('matchesPathPattern', () => {
   it.each([
@@ -21,5 +22,18 @@ describe('matchesPathPattern', () => {
   it('can match case-insensitively', () => {
     expect(matchesPathPattern('/ws/.Claude/Settings.json', '/ws/.claude/settings*.json', true)).toBe(true);
     expect(matchesPathPattern('/ws/.Claude/Settings.json', '/ws/.claude/settings*.json', false)).toBe(false);
+  });
+});
+
+describe('workspaceDisplayPath', () => {
+  const sep = (p: string): string => p.split('/').join(path.sep);
+  it('is relative inside the cwd, <root>/<rel> inside another root, absolute elsewhere', () => {
+    const cwd = sep('/w/proj');
+    const roots = [cwd, sep('/data/extra'), sep('/data/extra/deep')];
+    expect(workspaceDisplayPath(sep('/w/proj/src/a.ts'), cwd, roots)).toBe('src/a.ts');
+    expect(workspaceDisplayPath(cwd, cwd, roots)).toBe('.');
+    expect(workspaceDisplayPath(sep('/data/extra/x'), cwd, roots)).toBe('extra/x');
+    expect(workspaceDisplayPath(sep('/data/extra/deep/y'), cwd, roots)).toBe('deep/y');
+    expect(workspaceDisplayPath(sep('/other/z'), cwd, roots)).toBe(sep('/other/z').split(path.sep).join('/'));
   });
 });
