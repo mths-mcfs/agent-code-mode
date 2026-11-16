@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { errorMessage } from '../core/errors.js';
-import { DIFF_INLINE_CHARS, formatRunResult, type McpToolResponse } from '../core/output.js';
+import { DIFF_INLINE_CHARS, TEXT_BLOCK_MIN_CHARS, formatRunResult, type McpToolResponse } from '../core/output.js';
+import { OverflowStore, removeLegacyOverflowFiles } from '../core/overflow.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
@@ -16,26 +17,24 @@ import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 export const SERVER_NAME = 'agent-code-mode';
 
 /**
- * Everything the model needs to write a script. It lives in the tool
- * description, not in the server `instructions`: Claude Code puts server
- * instructions in the per-session environment message, where they are written
- * to the prompt cache again in every session, while tool definitions sit in
- * the prefix that sessions share.
+ * Everything the model needs to write a script: the binding signatures and
+ * one line of rules. It lives in the tool description, not in the server
+ * `instructions`: Claude Code puts server instructions in the per-session
+ * environment message, where they are written to the prompt cache again in
+ * every session, while tool definitions sit in the prefix sessions share.
+ * Kept short on purpose: a worked example script made the model copy its
+ * shape into unrelated tasks.
  */
-export const RUN_DESCRIPTION = `Run a JavaScript script that calls the host's tools. Prefer it when a step needs several tool calls: batch many reads, searches, edits and commands into one script instead of calling tools one by one. A script can look, decide and change things in the same call, so finish the step in one script when you can (each extra call is another model round trip), and return only what you need: filter and aggregate in the script.
-The script is the body of an async function; return a value to get it back. Globals (all async, each call subject to the host permission rules and hooks):
-  bash({command, cwd?, timeoutMs?}) -> {exitCode, signal, stdout, stderr, truncated, timedOut}
-  read({path, offset?, limit?}) -> {path, content, startLine, totalLines, truncated}
-  write({path, content}) -> {path, created, diff}
-  edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStrategy, diff}
-  grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {matches: [{file, line, text}], truncated, filtered}
-  glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
-  console.log/info/warn/error
-read's content is the exact text of the file, final newline included. Paths in results are relative to the working directory.
-A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError.
-In bash, name every file literally: a glob (src/*), a variable or $(...) as a file argument gets the whole command denied when nobody can approve it. Find, read and loop over files with glob, read, grep and JavaScript instead.
-Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).
-Returns JSON: {ok, result | error, logs, calls: {total, byTool, denied, errors}, changedFiles, diff, warnings}; empty fields are left out, and a long list of changed files and a diff above ${DIFF_INLINE_CHARS} chars are cut (verbose: true returns every call and the whole diff).`;
+export const RUN_DESCRIPTION = `Run a JavaScript script (the body of an async function; return a value to get it back) that batches calls to these globals. Each call is checked against the host's permission rules and hooks; a denied call rejects with an Error named PermissionDenied, other failures with ToolError. Paths in results are relative to the working directory.
+declare function bash(a: {command: string; cwd?: string; timeoutMs?: number}): Promise<{exitCode: number | null; signal: string | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean}>;
+declare function read(a: {path: string; offset?: number; limit?: number}): Promise<{path: string; content: string /* exact text */; startLine: number; totalLines: number; truncated: boolean}>;
+declare function write(a: {path: string; content: string}): Promise<{path: string; created: boolean; diff: string}>;
+declare function edit(a: {path: string; oldString: string; newString: string; replaceAll?: boolean}): Promise<{path: string; replacements: number; matchStrategy: string; diff: string}>;
+declare function grep(a: {pattern: string; path?: string; glob?: string; ignoreCase?: boolean; maxResults?: number}): Promise<{columns: ['file', 'line', 'text']; rows: [string, number, string][]; count: number; truncated: boolean; filtered: number}>;
+declare function glob(a: {pattern: string; path?: string; maxResults?: number}): Promise<{files: string[]; truncated: boolean; filtered: number}>;
+declare function readOverflow(id: string, offset?: number, limit?: number): Promise<{text: string; offset: number; totalChars: number; truncated: boolean}>; // the whole result JSON a response cut
+type Response = {ok: boolean; result?: unknown; error?: {name: string; message: string}; logs?: string[]; calls: {total: number; byTool: Record<string, number>; denied?: object[]; errors?: object[]}; changedFiles?: string[]; diff?: string; diffStat?: {files: Record<string, string>; moreFiles?: number; total: string}; warnings?: string[]; truncated?: true; overflow?: {id: string; chars: number}}; // a multi-line string result over ${TEXT_BLOCK_MIN_CHARS} chars comes as plain text in a second block; a diff over ${DIFF_INLINE_CHARS} chars comes as diffStat
+QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits`;
 
 export const RUN_TOOL: Tool = {
   name: 'run',
@@ -58,6 +57,8 @@ export interface McpServerOptions {
   readonly rootsTimeoutMs?: number;
   /** Restore journals left by dead server processes for each workspace first seen. Default true. */
   readonly recoverJournals?: boolean;
+  /** Keeps what responses cut, for `readOverflow`. Default: a new store for this server. */
+  readonly overflow?: OverflowStore;
 }
 
 /** A failed `RunResult` for protocol and validation errors, so they go through the same capped formatter. */
@@ -104,6 +105,9 @@ export function createMcpServer(opts: McpServerOptions): Server {
   const factory = opts.createRuntime ?? ((host: HostKind) => createRuntime(host, { env, serverCwd, stateDir }));
   const recoverJournals = opts.recoverJournals ?? opts.createRuntime === undefined;
   const recoveredRoots = new Set<string>();
+  // Cut results live in this process only; older versions wrote them to the state directory and never removed them.
+  const overflow = opts.overflow ?? new OverflowStore();
+  if (opts.overflow === undefined) void removeLegacyOverflowFiles(stateDir);
   /** Rolls back what runs of crashed server processes left in this workspace, once per root; returns warnings for the model. */
   const recoverFor = async (ctx: SessionContext): Promise<string[]> => {
     if (!recoverJournals) return [];
@@ -128,6 +132,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
   };
 
   const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} } });
+  server.onclose = () => overflow.clear();
 
   const listRoots = async (): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
@@ -143,7 +148,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
     let verbose = false;
-    const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir, verbose });
+    const respond = (result: RunResult): McpToolResponse => formatRunResult(result, { overflow, verbose });
     if (request.params.name !== RUN_TOOL.name) return respond(errorResult(`unknown tool ${JSON.stringify(request.params.name)}`));
     const args = parseRunArgs(request.params.arguments);
     if (!args.ok) return respond(errorResult(`invalid run arguments: ${args.message}`));
@@ -162,10 +167,11 @@ export function createMcpServer(opts: McpServerOptions): Server {
         ctx,
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
+        overflow,
       });
       const result = recoveryWarnings.length === 0 ? ran : { ...ran, warnings: [...recoveryWarnings, ...ran.warnings] };
       await appendRunLog(env[RUN_LOG_ENV], ctx, result);
-      return await respond(result);
+      return respond(result);
     } catch (err) {
       return respond(errorResult(`internal error: ${errorMessage(err)}`));
     }

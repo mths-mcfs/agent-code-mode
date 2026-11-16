@@ -58,11 +58,11 @@ The script is the body of an async function. All bindings are async globals; `re
 
 ```js
 const hits = await grep({ pattern: 'TODO', glob: '*.ts' });
-for (const file of [...new Set(hits.matches.map((m) => m.file))]) {
+for (const file of [...new Set(hits.rows.map(([file]) => file))]) {
   await edit({ path: file, oldString: 'TODO', newString: 'DONE', replaceAll: true });
 }
 const test = await bash({ command: 'npm test --silent' });
-return { files: hits.matches.length, exitCode: test.exitCode };
+return { matches: hits.count, exitCode: test.exitCode };
 ```
 
 | Binding | Returns |
@@ -71,10 +71,11 @@ return { files: hits.matches.length, exitCode: test.exitCode };
 | `read({path, offset?, limit?})` | `{path, content, startLine, totalLines, truncated}` |
 | `write({path, content})` | `{path, created, diff}` |
 | `edit({path, oldString, newString, replaceAll?})` | `{path, replacements, matchStrategy, diff}` |
-| `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{matches: [{file, line, text}], truncated, filtered}` |
+| `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{columns: ['file', 'line', 'text'], rows: [[file, line, text]], count, truncated, filtered}` |
 | `glob({pattern, path?, maxResults?})` | `{files, truncated, filtered}` |
+| `readOverflow(id, offset?, limit?)` | `{text, offset, totalChars, truncated}`: a slice of a result a response cut |
 
-`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `read` returns the exact text of the lines, final newline included, and paths in results are relative to the working directory when inside it. `run` takes `{code, transaction?, timeoutMs?, verbose?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The result holds the return value, logs, the number of calls by tool with every denied or failed call, the changed files and a combined diff; a diff above 1,500 characters is cut and the whole result saved to a file. `verbose: true` returns the log of every call and the whole diff.
+`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `read` returns the exact text of the lines, final newline included, and paths in results are relative to the working directory when inside it. `run` takes `{code, transaction?, timeoutMs?, verbose?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The response is a JSON block: `{ok, result | error, logs, calls: {total, byTool, denied, errors}, changedFiles, diff | diffStat, warnings}`, with empty fields left out. Every denied and failed call is listed with its reason, and every changed file is listed. A multi-line string result longer than 200 characters comes as plain text in a second block instead of an escaped JSON string. A diff above 1,500 characters becomes `diffStat` (lines added and removed for up to 10 files, plus the totals). A response stays under about 10,000 tokens (40,000 characters; 9,500 for an error): above that, the result and the logs keep their start and end, long lists keep their first entries, each cut is marked and `truncated: true` is set. Whenever something is left out, the whole result is kept in the server's memory for 30 minutes and the response carries `overflow: {id, chars}`; a later script reads it with `readOverflow(id)`. The id is random, works only in the same server process and nothing is written to disk. `verbose: true` returns the log of every call and the whole diff.
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` says which rung matched.
 

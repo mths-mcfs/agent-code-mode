@@ -283,11 +283,14 @@ export class MemoryToolRuntime implements ToolRuntime {
         const { absPath, offset, limit } = prepared.effect;
         const content = this.files.get(absPath);
         if (content === undefined) throw new ToolError('not-found', `${absPath} does not exist`);
-        const lines = content.split('\n');
+        // Same line accounting as NodeToolRuntime: a final newline ends the last line, it does not start one.
+        const lines = content === '' ? [] : content.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
         const window = lines.slice(offset - 1, offset - 1 + limit);
         this.commits.push({ id: prepared.id, tool: 'read', target: absPath });
-        const more = offset - 1 + window.length < lines.length;
-        return { path: absPath, content: `${window.join('\n')}${more ? '\n' : ''}`, startLine: offset, totalLines: lines.length, truncated: offset - 1 + limit < lines.length };
+        const unterminated = offset - 1 + window.length >= lines.length && !content.endsWith('\n');
+        const text = window.length === 0 ? '' : `${window.join('\n')}${unterminated ? '' : '\n'}`;
+        return { path: absPath, content: text, startLine: offset, totalLines: lines.length, truncated: offset - 1 + window.length < lines.length };
       }
       case 'grep': {
         const { absRoot, pattern, ignoreCase, maxResults, glob } = prepared.effect;

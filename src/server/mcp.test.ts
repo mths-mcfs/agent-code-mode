@@ -77,7 +77,11 @@ describe('MCP server', () => {
       _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: { type: 'object', required: ['code'] },
     });
-    expect(tools[0]?.description).toContain('bash({command');
+    const description = tools[0]?.description ?? '';
+    for (const binding of ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow']) expect(description).toContain(`declare function ${binding}(`);
+    expect(description).toContain('QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits');
+    expect(description).toContain("columns: ['file', 'line', 'text']");
+    expect(description).not.toMatch(/overflowPath|Example/);
     expect(tools[0]?.inputSchema.properties).toHaveProperty('verbose');
     // Claude Code writes server instructions to the prompt cache again in every session.
     expect(client.getInstructions()).toBeUndefined();
@@ -178,9 +182,10 @@ describe('MCP server', () => {
     expect(unknown.isError).toBe(true);
     const text = textOf(unknown);
     expect(text.length).toBeLessThanOrEqual(9_500);
-    const body = JSON.parse(text) as { overflowPath?: string; truncated?: boolean };
+    const body = JSON.parse(text) as { overflow?: { id: string }; truncated?: boolean };
     expect(body.truncated).toBe(true);
-    expect(typeof body.overflowPath).toBe('string');
+    expect(body.overflow?.id).toMatch(/^ov_/);
+    expect(text).not.toContain('acm-test-state');
 
     const invalid = await client.callTool({ name: 'run', arguments: { code: 'x', transaction: 'y'.repeat(100_000) } });
     expect(invalid.isError).toBe(true);
