@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agent-code-mode": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "<repo>/dist/cli.js",
+        "serve",
+        "--host",
+        "claude"
+      ]
+    }
+  }
+}

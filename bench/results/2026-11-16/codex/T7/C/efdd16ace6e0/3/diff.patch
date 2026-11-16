@@ -1,0 +1,41 @@
+ M src/pipeline/parse.js
+ M src/pipeline/total.js
+ M src/pipeline/validate.js
+
+diff --git a/src/pipeline/parse.js b/src/pipeline/parse.js
+index ef9ee15..525d869 100644
+--- a/src/pipeline/parse.js
++++ b/src/pipeline/parse.js
+@@ -1,7 +1,7 @@
+ /** Parses "sku;qty;unitPriceCents" lines. */
+ 
+ export function parseLine(line) {
+-  const [sku, qty, price] = line.split(',').map((part) => part.trim());
++  const [sku, qty, price] = line.split(';').map((part) => part.trim());
+   return { sku, qty: Number(qty), unitPriceCents: Number(price) };
+ }
+ 
+diff --git a/src/pipeline/total.js b/src/pipeline/total.js
+index 79cf139..85a0577 100644
+--- a/src/pipeline/total.js
++++ b/src/pipeline/total.js
+@@ -7,5 +7,5 @@ export function subtotal(lines) {
+ export function total(lines, discountPercent = 0) {
+   const gross = subtotal(lines);
+   const discount = Math.round((gross * discountPercent) / 100);
+-  return gross + discount;
++  return gross - discount;
+ }
+diff --git a/src/pipeline/validate.js b/src/pipeline/validate.js
+index 8eccaec..58a139d 100644
+--- a/src/pipeline/validate.js
++++ b/src/pipeline/validate.js
+@@ -1,7 +1,7 @@
+ /** Drops lines that cannot be billed. */
+ 
+ export function isBillable(line) {
+-  return typeof line.sku === 'string' && line.sku !== '' && Number.isInteger(line.qty) && line.qty >= 0 && line.unitPriceCents >= 0;
++  return typeof line.sku === 'string' && line.sku !== '' && Number.isInteger(line.qty) && line.qty > 0 && line.unitPriceCents >= 0;
+ }
+ 
+ export function billable(lines) {

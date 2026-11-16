@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "id": "codex-T4-B-r3",
+  "configHash": "3758fe742a37",
+  "config": {
+    "host": "codex",
+    "task": "T4",
+    "arm": "B",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+    "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "B",
+  "armLabel": "Codex code mode",
+  "task": "T4",
+  "run": 3,
+  "round": 3,
+  "orderIndex": 70,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:15:23.326Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 13345,
+  "parsed": {
+    "turns": 4,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 6736,
+      "output": 312,
+      "cacheCreation": 0,
+      "cacheRead": 43904,
+      "reasoning": 0
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "1. Globex — 421,149 cents\n2. Umbrella Labs — 365,117 cents\n3. Initech — 292,124 cents\n\nANSWER: Globex, Umbrella Labs, Initech",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 3,
+      "other": 0,
+      "byName": {
+        "exec": 3
+      }
+    },
+    "innerCalls": {
+      "total": 3,
+      "byTool": {
+        "command_execution": 3
+      }
+    },
+    "availableTools": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "exec.apply_patch",
+      "exec.exec_command",
+      "exec.list_mcp_resource_templates",
+      "exec.list_mcp_resources",
+      "exec.read_mcp_resource",
+      "exec.write_stdin"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        13
+      ],
+      "agentMessage": [
+        12
+      ],
+      "innerItems": [
+        7,
+        9,
+        11
+      ],
+      "requests": [
+        2,
+        4,
+        6,
+        7
+      ],
+      "calls": [
+        1,
+        3,
+        5
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.010491200000000001,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER: <c1>, <c2>, <c3>` line",
+      "ok top 3 in order: Globex, Umbrella Labs, Initech (got Globex, Umbrella Labs, Initech)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

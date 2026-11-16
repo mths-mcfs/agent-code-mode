@@ -1,0 +1,7 @@
+[
+  "functions.list_mcp_resources",
+  "functions.list_mcp_resource_templates",
+  "functions.read_mcp_resource",
+  "functions.request_user_input",
+  "mcp__agent_code_mode.run"
+]

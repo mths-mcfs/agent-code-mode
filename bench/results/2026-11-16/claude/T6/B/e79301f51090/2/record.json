@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "id": "claude-T6-B-r2",
+  "configHash": "e79301f51090",
+  "config": {
+    "host": "claude",
+    "task": "T6",
+    "arm": "B",
+    "hostVersion": "2.1.325 (Claude Code)",
+    "model": "claude-sonnet-5-5",
+    "effort": "medium",
+    "maxTurns": 60,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+    "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "claude",
+  "arm": "B",
+  "armLabel": "agent-code-mode (strict)",
+  "task": "T6",
+  "run": 2,
+  "round": 2,
+  "orderIndex": 29,
+  "dryRun": false,
+  "model": "claude-sonnet-5-5",
+  "effort": "medium",
+  "startedAt": "2026-11-16T01:50:42.554Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 16069,
+  "parsed": {
+    "turns": 6,
+    "hostDurationMs": 14381,
+    "usage": {
+      "input": 10,
+      "output": 1396,
+      "cacheCreation": 29075,
+      "cacheRead": 62561,
+      "reasoning": 124
+    },
+    "hostCostUsd": 0.1365361,
+    "model": "claude-sonnet-5-5",
+    "finalAnswer": "I added `itemCount` to all 40 orders with status \"paid\". It's the sum of `qty` over each order's items. The git diff now shows only that one added line (plus the comma after `items`) in each of the 40 files.\n\nThe other 10 orders (8 pending, 2 refunded… specifically 6 pending and 4 refunded, per the status values I skipped) are untouched. I didn't run any other check on the files.\n\nThe files are still 2-space indented JSON with the original trailing newline. My first write dropped that newline, so I did a second pass to restore it.",
+    "toolCalls": {
+      "native": 0,
+      "run": 5,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "mcp__agent-code-mode__run": 5
+      }
+    },
+    "innerCalls": {
+      "total": 236,
+      "byTool": {
+        "glob": 3,
+        "read": 150,
+        "write": 80,
+        "bash": 3
+      }
+    },
+    "availableTools": [
+      "mcp__agent-code-mode__run"
+    ],
+    "denials": [
+      "{\"ok\":false,\"error\":{\"kind\":\"error\",\"name\":\"PermissionDenied\",\"message\":\"host would ask the user and no interactive channel exists: the command cannot be checked statically (command name \\\"[\\\" is only known at run time)\"},\"logs\":[],\"calls\":[{\"id\":\"c1\",\"tool\":\"bash\",\"summary\":\"bash for f in $(git diff --name-only); do [ -n \\\"$(tail -c1 $f)\\\" ] && echo >> $f; done; git diff --stat | tail -1; git diff data/orders/ord-002.json | tail -8\",\"decision\":\"denied\",\"reason\":\"ask-unavailable: host would ask ",
+      "bash bash for f in $(git diff --name-only); do [ -n \"$(tail -c1 $f)\" ] && echo >> $f; done; git diff --stat | tail -1; git diff data/orders/ord-002.json | tail -8: ask-unavailable: host would ask the user and no interactive channel exists: the command cannot be checked statically (command name \"[\" is only known at run time)"
+    ],
+    "hostContext": {
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "plugins": [
+        "cc-plugin-agents-md@builtin",
+        "cc-plugin-telemetry@builtin",
+        "cc-plugin-privacy@builtin",
+        "cc-plugin-plugin-authoring@builtin"
+      ],
+      "memory": false
+    },
+    "hostError": null,
+    "evidence": {
+      "result": [
+        22
+      ],
+      "toolUse": [
+        2,
+        8,
+        9,
+        16,
+        19
+      ],
+      "innerCalls": [
+        4,
+        10,
+        11,
+        17,
+        20
+      ],
+      "init": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.1365361,
+  "costSource": "host",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok paid orders kept as 2-space indented JSON",
+      "ok itemCount correct in all 40 paid orders, other fields kept",
+      "ok orders that are not paid unchanged",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "claude-settings.json": "claude-settings.json",
+    "mcp-config.json": "mcp-config.json",
+    "command.txt": "command.txt",
+    "auth.txt": "auth.txt",
+    "isolation.txt": "isolation.txt",
+    "diff.patch": "diff.patch"
+  }
+}

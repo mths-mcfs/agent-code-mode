@@ -131,3 +131,43 @@ export function sanitize(text: string, ctx: SanitizeContext): string {
     })
     .join('\n');
 }
+
+/** `sanitize` for a JSON document: sanitized as one value, written back pretty-printed. */
+export function sanitizeJsonDocument(text: string, ctx: SanitizeContext): string {
+  const value = parseStructured(text);
+  if (value === undefined) return sanitize(text, ctx);
+  return `${JSON.stringify(sanitizeValue(value, ctx, 0), null, 2)}\n`;
+}
+
+/** Writes `text` to `file` after sanitizing it (JSON documents as values, everything else line by line). */
+export async function writeSanitized(file: string, text: string, ctx: SanitizeContext): Promise<void> {
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(file, file.endsWith('.json') ? sanitizeJsonDocument(text, ctx) : sanitize(text, ctx));
+}
+
+/**
+ * Sanitizes, in place, every text file under a results directory: the final pass the harness runs
+ * over everything it wrote for commit, and the way to clean results written by an older harness
+ * without re-running them. Compressed files are left alone. Returns the files it changed.
+ */
+export async function sanitizeTree(dir: string, ctx: SanitizeContext): Promise<string[]> {
+  const { readdir, readFile, writeFile } = await import('node:fs/promises');
+  const path = await import('node:path');
+  const changed: string[] = [];
+  const walk = async (d: string): Promise<void> => {
+    for (const entry of await readdir(d, { withFileTypes: true })) {
+      const p = path.join(d, entry.name);
+      if (entry.isDirectory()) await walk(p);
+      else if (entry.isFile() && !p.endsWith('.gz')) {
+        const before = await readFile(p, 'utf8');
+        const after = p.endsWith('.json') ? sanitizeJsonDocument(before, ctx) : sanitize(before, ctx);
+        if (after !== before) {
+          await writeFile(p, after);
+          changed.push(p);
+        }
+      }
+    }
+  };
+  await walk(dir);
+  return changed;
+}

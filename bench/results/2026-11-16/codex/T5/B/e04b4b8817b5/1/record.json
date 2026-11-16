@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "id": "codex-T5-B-r1",
+  "configHash": "e04b4b8817b5",
+  "config": {
+    "host": "codex",
+    "task": "T5",
+    "arm": "B",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "7df2fc36f67874c416206f1dd7637601d898098a579618112a520c4ed3a11a09",
+    "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "B",
+  "armLabel": "Codex code mode",
+  "task": "T5",
+  "run": 1,
+  "round": 1,
+  "orderIndex": 19,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T01:59:49.164Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 16682,
+  "parsed": {
+    "turns": 4,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 16553,
+      "output": 385,
+      "cacheCreation": 0,
+      "cacheRead": 43008,
+      "reasoning": 7
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "Renamed `formatCurrency` to `formatMoney` throughout the source and tests.\n\n`node --test` passes all 5 tests.",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 3,
+      "other": 0,
+      "byName": {
+        "exec": 3
+      }
+    },
+    "innerCalls": {
+      "total": 6,
+      "byTool": {
+        "command_execution": 6
+      }
+    },
+    "availableTools": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "exec.apply_patch",
+      "exec.exec_command",
+      "exec.list_mcp_resource_templates",
+      "exec.list_mcp_resources",
+      "exec.read_mcp_resource",
+      "exec.write_stdin"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        19
+      ],
+      "agentMessage": [
+        18
+      ],
+      "innerItems": [
+        7,
+        9,
+        11,
+        13,
+        15,
+        17
+      ],
+      "requests": [
+        2,
+        4,
+        6,
+        7
+      ],
+      "calls": [
+        1,
+        3,
+        5
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0206284,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok no formatCurrency left in src/ or test/",
+      "ok formatMoney used in all 30 files",
+      "ok src/lib/money.js exports formatMoney",
+      "ok node --test passes (pass 13, fail 0)",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

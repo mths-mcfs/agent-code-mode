@@ -1,0 +1,16 @@
+2026-11-16T01:59:29.164161Z ERROR codex_core::tools::router: error=Command blocked by PreToolUse hook: src/handlers/inventory.js is protected by the repository policy; this change is denied.. Command: python3 - <<'PY'
+from pathlib import Path
+for p in sorted(Path('src/handlers').rglob('*')):
+    if not p.is_file():
+        continue
+    data = p.read_bytes()
+    old = b'TIMEOUT_MS = 3000'
+    if old not in data:
+        continue
+    try:
+        with p.open('r+b') as f:
+            f.write(data.replace(old, b'TIMEOUT_MS = 5000'))
+        print('UPDATED:', p)
+    except PermissionError:
+        print('DENIED:', p)
+PY

@@ -1,0 +1,28 @@
+model = "gpt-6.1-terra"
+model_reasoning_effort = "medium"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+suppress_unstable_features_warning = true
+web_search = "disabled"
+model_catalog_json = "<codex-home>/catalog.json"
+
+[features]
+hooks = true
+apps = false
+view_image = false
+image_generation = false
+goals = false
+multi_agent = false
+sleep_tool = false
+shell_tool = false
+
+[agents]
+enabled = false
+
+[mcp_servers.agent-code-mode]
+command = "node"
+args = ["<repo>/dist/cli.js", "serve", "--host", "codex"]
+default_tools_approval_mode = "approve"
+
+[mcp_servers.agent-code-mode.env]
+CODEX_HOME = "<codex-home>"

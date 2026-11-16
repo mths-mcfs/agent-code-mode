@@ -1,0 +1,481 @@
+ M src/features/budget.js
+ M src/features/cart.js
+ M src/features/checkout.js
+ M src/features/coupon.js
+ M src/features/deposit.js
+ M src/features/gift-card.js
+ M src/features/invoice.js
+ M src/features/ledger.js
+ M src/features/loyalty.js
+ M src/features/payout.js
+ M src/features/quote.js
+ M src/features/receipt.js
+ M src/features/refund.js
+ M src/features/statement.js
+ M src/features/subscription.js
+ M src/features/tax-summary.js
+ M src/features/tip.js
+ M src/features/wallet.js
+ M src/handlers/customers.js
+ M src/handlers/health.js
+ M src/handlers/inventory.js
+ M src/handlers/orders.js
+ M src/handlers/payments.js
+ M src/handlers/reports.js
+ M src/handlers/returns.js
+ M src/handlers/search.js
+ M src/handlers/shipping.js
+ M src/handlers/webhooks.js
+ M src/lib/money.js
+ M test/money.test.js
+
+diff --git a/src/features/budget.js b/src/features/budget.js
+index 9788b09..c07bf43 100644
+--- a/src/features/budget.js
++++ b/src/features/budget.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable budget line. */
+ export function describeBudget(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 28;
+-  return `budget ${order.id}: ${formatCurrency(cents)}`;
++  return `budget ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/cart.js b/src/features/cart.js
+index ef1286c..54a8278 100644
+--- a/src/features/cart.js
++++ b/src/features/cart.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable cart line. */
+ export function describeCart(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 221;
+-  return `cart ${order.id}: ${formatCurrency(cents)}`;
++  return `cart ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/checkout.js b/src/features/checkout.js
+index 1d20304..9177a00 100644
+--- a/src/features/checkout.js
++++ b/src/features/checkout.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable checkout line. */
+ export function describeCheckout(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 41;
+-  return `checkout ${order.id}: ${formatCurrency(cents)}`;
++  return `checkout ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/coupon.js b/src/features/coupon.js
+index 895f0ec..6f001d1 100644
+--- a/src/features/coupon.js
++++ b/src/features/coupon.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable coupon line. */
+ export function describeCoupon(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 491;
+-  return `coupon ${order.id}: ${formatCurrency(cents)}`;
++  return `coupon ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/deposit.js b/src/features/deposit.js
+index 5722180..6240a0d 100644
+--- a/src/features/deposit.js
++++ b/src/features/deposit.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable deposit line. */
+ export function describeDeposit(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 277;
+-  return `deposit ${order.id}: ${formatCurrency(cents)}`;
++  return `deposit ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/gift-card.js b/src/features/gift-card.js
+index 9b7d747..988fdce 100644
+--- a/src/features/gift-card.js
++++ b/src/features/gift-card.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable gift card line. */
+ export function describeGiftCard(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 408;
+-  return `gift-card ${order.id}: ${formatCurrency(cents)}`;
++  return `gift-card ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/invoice.js b/src/features/invoice.js
+index 452d7ae..3705e12 100644
+--- a/src/features/invoice.js
++++ b/src/features/invoice.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable invoice line. */
+ export function describeInvoice(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 131;
+-  return `invoice ${order.id}: ${formatCurrency(cents)}`;
++  return `invoice ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/ledger.js b/src/features/ledger.js
+index 36d5a7c..677b84c 100644
+--- a/src/features/ledger.js
++++ b/src/features/ledger.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable ledger line. */
+ export function describeLedger(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 115;
+-  return `ledger ${order.id}: ${formatCurrency(cents)}`;
++  return `ledger ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/loyalty.js b/src/features/loyalty.js
+index ad7a27a..f8dacbd 100644
+--- a/src/features/loyalty.js
++++ b/src/features/loyalty.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable loyalty line. */
+ export function describeLoyalty(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 460;
+-  return `loyalty ${order.id}: ${formatCurrency(cents)}`;
++  return `loyalty ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/payout.js b/src/features/payout.js
+index 305e63e..80c1180 100644
+--- a/src/features/payout.js
++++ b/src/features/payout.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable payout line. */
+ export function describePayout(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 147;
+-  return `payout ${order.id}: ${formatCurrency(cents)}`;
++  return `payout ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/quote.js b/src/features/quote.js
+index 899d190..3669c28 100644
+--- a/src/features/quote.js
++++ b/src/features/quote.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable quote line. */
+ export function describeQuote(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 6;
+-  return `quote ${order.id}: ${formatCurrency(cents)}`;
++  return `quote ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/receipt.js b/src/features/receipt.js
+index 483e867..0f245ce 100644
+--- a/src/features/receipt.js
++++ b/src/features/receipt.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable receipt line. */
+ export function describeReceipt(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 316;
+-  return `receipt ${order.id}: ${formatCurrency(cents)}`;
++  return `receipt ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/refund.js b/src/features/refund.js
+index f55a5ff..8d27e4c 100644
+--- a/src/features/refund.js
++++ b/src/features/refund.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable refund line. */
+ export function describeRefund(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 420;
+-  return `refund ${order.id}: ${formatCurrency(cents)}`;
++  return `refund ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/statement.js b/src/features/statement.js
+index 26ae36f..44906c1 100644
+--- a/src/features/statement.js
++++ b/src/features/statement.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable statement line. */
+ export function describeStatement(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 475;
+-  return `statement ${order.id}: ${formatCurrency(cents)}`;
++  return `statement ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/subscription.js b/src/features/subscription.js
+index 63f9a19..9386d6e 100644
+--- a/src/features/subscription.js
++++ b/src/features/subscription.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable subscription line. */
+ export function describeSubscription(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 349;
+-  return `subscription ${order.id}: ${formatCurrency(cents)}`;
++  return `subscription ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/tax-summary.js b/src/features/tax-summary.js
+index 1a8cd9e..93034d7 100644
+--- a/src/features/tax-summary.js
++++ b/src/features/tax-summary.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable tax summary line. */
+ export function describeTaxSummary(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 431;
+-  return `tax-summary ${order.id}: ${formatCurrency(cents)}`;
++  return `tax-summary ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/tip.js b/src/features/tip.js
+index cd79dff..f12fc32 100644
+--- a/src/features/tip.js
++++ b/src/features/tip.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable tip line. */
+ export function describeTip(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 312;
+-  return `tip ${order.id}: ${formatCurrency(cents)}`;
++  return `tip ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/features/wallet.js b/src/features/wallet.js
+index 4eebcc1..45997f2 100644
+--- a/src/features/wallet.js
++++ b/src/features/wallet.js
+@@ -1,7 +1,7 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ /** Human-readable wallet line. */
+ export function describeWallet(order) {
+   const cents = order.items.reduce((sum, item) => sum + item.qty * item.unitPriceCents, 0) + 326;
+-  return `wallet ${order.id}: ${formatCurrency(cents)}`;
++  return `wallet ${order.id}: ${formatMoney(cents)}`;
+ }
+diff --git a/src/handlers/customers.js b/src/handlers/customers.js
+index ae48f4e..c48c0a7 100644
+--- a/src/handlers/customers.js
++++ b/src/handlers/customers.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles customers requests. */
+ export function handleCustomers(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/customers', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/customers', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/health.js b/src/handlers/health.js
+index 39ef5d9..c11c7ed 100644
+--- a/src/handlers/health.js
++++ b/src/handlers/health.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles health requests. */
+ export function handleHealth(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/health', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/health', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/inventory.js b/src/handlers/inventory.js
+index 9372179..5906304 100644
+--- a/src/handlers/inventory.js
++++ b/src/handlers/inventory.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles inventory requests. */
+ export function handleInventory(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/inventory', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/inventory', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/orders.js b/src/handlers/orders.js
+index 74ef197..2a9d5c6 100644
+--- a/src/handlers/orders.js
++++ b/src/handlers/orders.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles orders requests. */
+ export function handleOrders(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/orders', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/orders', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/payments.js b/src/handlers/payments.js
+index 784ae8a..9864b72 100644
+--- a/src/handlers/payments.js
++++ b/src/handlers/payments.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles payments requests. */
+ export function handlePayments(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/payments', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/payments', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/reports.js b/src/handlers/reports.js
+index 723822f..610f6f6 100644
+--- a/src/handlers/reports.js
++++ b/src/handlers/reports.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles reports requests. */
+ export function handleReports(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/reports', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/reports', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/returns.js b/src/handlers/returns.js
+index 82a4c3f..b9193c2 100644
+--- a/src/handlers/returns.js
++++ b/src/handlers/returns.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles returns requests. */
+ export function handleReturns(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/returns', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/returns', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/search.js b/src/handlers/search.js
+index fe33446..c51bb37 100644
+--- a/src/handlers/search.js
++++ b/src/handlers/search.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles search requests. */
+ export function handleSearch(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/search', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/search', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/shipping.js b/src/handlers/shipping.js
+index 02a94b3..4ce1ae1 100644
+--- a/src/handlers/shipping.js
++++ b/src/handlers/shipping.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles shipping requests. */
+ export function handleShipping(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/shipping', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/shipping', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/handlers/webhooks.js b/src/handlers/webhooks.js
+index 7fa1b4c..6a5fe9e 100644
+--- a/src/handlers/webhooks.js
++++ b/src/handlers/webhooks.js
+@@ -1,9 +1,9 @@
+-import { formatCurrency } from '../lib/money.js';
++import { formatMoney } from '../lib/money.js';
+ 
+ export const TIMEOUT_MS = 3000;
+ 
+ /** Handles webhooks requests. */
+ export function handleWebhooks(request) {
+   const amount = request.amountCents ?? 0;
+-  return { route: '/webhooks', timeoutMs: TIMEOUT_MS, amount: formatCurrency(amount) };
++  return { route: '/webhooks', timeoutMs: TIMEOUT_MS, amount: formatMoney(amount) };
+ }
+diff --git a/src/lib/money.js b/src/lib/money.js
+index b912561..751fd72 100644
+--- a/src/lib/money.js
++++ b/src/lib/money.js
+@@ -2,7 +2,7 @@
+ 
+ const SYMBOLS = { USD: '$', EUR: '€', GBP: '£' };
+ 
+-export function formatCurrency(cents, currency = 'USD') {
++export function formatMoney(cents, currency = 'USD') {
+   const symbol = SYMBOLS[currency] ?? `${currency} `;
+   const sign = cents < 0 ? '-' : '';
+   const abs = Math.abs(cents);
+diff --git a/test/money.test.js b/test/money.test.js
+index 0352600..ed01355 100644
+--- a/test/money.test.js
++++ b/test/money.test.js
+@@ -1,15 +1,15 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { formatCurrency, sumCents } from '../src/lib/money.js';
++import { formatMoney, sumCents } from '../src/lib/money.js';
+ 
+ test('formats dollars and cents', () => {
+-  assert.equal(formatCurrency(123456), '$1234.56');
+-  assert.equal(formatCurrency(5), '$0.05');
++  assert.equal(formatMoney(123456), '$1234.56');
++  assert.equal(formatMoney(5), '$0.05');
+ });
+ 
+ test('formats negative amounts and other currencies', () => {
+-  assert.equal(formatCurrency(-250, 'EUR'), '-€2.50');
+-  assert.equal(formatCurrency(100, 'JPY'), 'JPY 1.00');
++  assert.equal(formatMoney(-250, 'EUR'), '-€2.50');
++  assert.equal(formatMoney(100, 'JPY'), 'JPY 1.00');
+ });
+ 
+ test('sums cents', () => {

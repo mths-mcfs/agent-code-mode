@@ -1,0 +1,1 @@
+claude -p --output-format stream-json --verbose --model claude-sonnet-5-5 --effort medium --max-turns 60 --setting-sources project --no-session-persistence --permission-mode default --settings <run>/claude-settings.json --strict-mcp-config --mcp-config <run>/mcp-config.json --tools Bash,Read,Write,Edit,Glob,Grep --allowedTools Bash,Read,Write,Edit,Glob,Grep

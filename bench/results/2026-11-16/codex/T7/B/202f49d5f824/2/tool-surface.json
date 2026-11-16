@@ -1,0 +1,11 @@
+[
+  "functions.exec",
+  "functions.wait",
+  "functions.request_user_input",
+  "exec.apply_patch",
+  "exec.exec_command",
+  "exec.list_mcp_resource_templates",
+  "exec.list_mcp_resources",
+  "exec.read_mcp_resource",
+  "exec.write_stdin"
+]

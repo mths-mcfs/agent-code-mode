@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "id": "codex-T1-B-r3",
+  "configHash": "167d8ff9ba82",
+  "config": {
+    "host": "codex",
+    "task": "T1",
+    "arm": "B",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+    "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "B",
+  "armLabel": "Codex code mode",
+  "task": "T1",
+  "run": 3,
+  "round": 3,
+  "orderIndex": 60,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:12:23.677Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 8051,
+  "parsed": {
+    "turns": 2,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 5556,
+      "output": 61,
+      "cacheCreation": 0,
+      "cacheRead": 18688,
+      "reasoning": 0
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "ANSWER: 7",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 1,
+      "other": 0,
+      "byName": {
+        "exec": 1
+      }
+    },
+    "innerCalls": {
+      "total": 1,
+      "byTool": {
+        "command_execution": 1
+      }
+    },
+    "availableTools": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "exec.apply_patch",
+      "exec.exec_command",
+      "exec.list_mcp_resource_templates",
+      "exec.list_mcp_resources",
+      "exec.read_mcp_resource",
+      "exec.write_stdin"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        9
+      ],
+      "agentMessage": [
+        8
+      ],
+      "innerItems": [
+        7
+      ],
+      "requests": [
+        2,
+        3
+      ],
+      "calls": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0067954,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER: <value>` line",
+      "ok answer is 7 (got 7)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "id": "claude-T2-A-r1",
+  "configHash": "af3ac3e7b6d4",
+  "config": {
+    "host": "claude",
+    "task": "T2",
+    "arm": "A",
+    "hostVersion": "2.1.325 (Claude Code)",
+    "model": "claude-sonnet-5-5",
+    "effort": "medium",
+    "maxTurns": 60,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+    "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "claude",
+  "arm": "A",
+  "armLabel": "native tools",
+  "task": "T2",
+  "run": 1,
+  "round": 1,
+  "orderIndex": 0,
+  "dryRun": false,
+  "model": "claude-sonnet-5-5",
+  "effort": "medium",
+  "startedAt": "2026-11-16T01:46:30.725Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 10162,
+  "parsed": {
+    "turns": 5,
+    "hostDurationMs": 8845,
+    "usage": {
+      "input": 10,
+      "output": 441,
+      "cacheCreation": 2397,
+      "cacheRead": 37486,
+      "reasoning": 0
+    },
+    "hostCostUsd": 0.017766600000000004,
+    "model": "claude-sonnet-5-5",
+    "finalAnswer": "`truncate` in `src/lib/strings.js` was slicing `max` characters and then adding the ellipsis. That made the result longer than `max`. I changed line 16 to slice `max - ellipsis.length` characters instead, so the ellipsis counts toward the limit.\n\nAll 13 tests pass now, including the one that was failing. I didn't edit any tests.",
+    "toolCalls": {
+      "native": 4,
+      "run": 0,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "Bash": 4
+      }
+    },
+    "innerCalls": null,
+    "availableTools": [
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Read",
+      "Write"
+    ],
+    "denials": [],
+    "hostContext": {
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "plugins": [
+        "cc-plugin-agents-md@builtin",
+        "cc-plugin-telemetry@builtin",
+        "cc-plugin-privacy@builtin",
+        "cc-plugin-plugin-authoring@builtin"
+      ],
+      "memory": false
+    },
+    "hostError": null,
+    "evidence": {
+      "result": [
+        12
+      ],
+      "toolUse": [
+        2,
+        5,
+        7,
+        9
+      ],
+      "innerCalls": [],
+      "init": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.017766600000000004,
+  "costSource": "host",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok node --test passes (pass 13, fail 0)",
+      "ok test files unchanged",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "claude-settings.json": "claude-settings.json",
+    "mcp-config.json": "mcp-config.json",
+    "command.txt": "command.txt",
+    "auth.txt": "auth.txt",
+    "isolation.txt": "isolation.txt",
+    "diff.patch": "diff.patch"
+  }
+}

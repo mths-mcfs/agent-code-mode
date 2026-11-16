@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "id": "claude-T4-B-r2",
+  "configHash": "7dc1a71e6840",
+  "config": {
+    "host": "claude",
+    "task": "T4",
+    "arm": "B",
+    "hostVersion": "2.1.325 (Claude Code)",
+    "model": "claude-sonnet-5-5",
+    "effort": "medium",
+    "maxTurns": 60,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+    "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "claude",
+  "arm": "B",
+  "armLabel": "agent-code-mode (strict)",
+  "task": "T4",
+  "run": 2,
+  "round": 2,
+  "orderIndex": 19,
+  "dryRun": false,
+  "model": "claude-sonnet-5-5",
+  "effort": "medium",
+  "startedAt": "2026-11-16T01:49:26.883Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 10596,
+  "parsed": {
+    "turns": 4,
+    "hostDurationMs": 9078,
+    "usage": {
+      "input": 8,
+      "output": 845,
+      "cacheCreation": 5361,
+      "cacheRead": 15035,
+      "reasoning": 0
+    },
+    "hostCostUsd": 0.0314135,
+    "model": "claude-sonnet-5-5",
+    "finalAnswer": "I read all 50 files in `data/orders/` and summed `qty * unitPriceCents` over the items of each order with status \"paid\". Then I totalled those by customer. All 50 files parsed, and no order had a status that only looked like \"paid\", such as different casing or extra spaces. I didn't change any files.\n\nThe top three paid totals are:\n\n| Rank | Customer | Paid total |\n|---|---|---|\n| 1 | Globex | 421,149 cents ($4,211.49) |\n| 2 | Umbrella Labs | 365,117 cents ($3,651.17) |\n| 3 | Initech | 292,124 cents ($2,921.24) |\n\nCyberdyne Retail is a close fourth at 291,834 cents, 290 cents behind Initech.\n\nANSWER: Globex, Umbrella Labs, Initech",
+    "toolCalls": {
+      "native": 0,
+      "run": 3,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "mcp__agent-code-mode__run": 3
+      }
+    },
+    "innerCalls": {
+      "total": 56,
+      "byTool": {
+        "bash": 1,
+        "glob": 2,
+        "read": 53
+      }
+    },
+    "availableTools": [
+      "mcp__agent-code-mode__run"
+    ],
+    "denials": [
+      "{\"ok\":false,\"error\":{\"kind\":\"error\",\"name\":\"PermissionDenied\",\"message\":\"host would ask the user and no interactive channel exists: Bash needs approval in default mode\"},\"logs\":[],\"calls\":[{\"id\":\"c1\",\"tool\":\"bash\",\"summary\":\"bash ls data/orders | head -5; ls data/orders | wc -l; head -c 600 data/orders/$(ls data/orders | head -1)\",\"decision\":\"denied\",\"reason\":\"ask-unavailable: host would ask the user and no interactive channel exists: Bash needs approval in default mode\",\"durationMs\":14}],\"chang",
+      "bash bash ls data/orders | head -5; ls data/orders | wc -l; head -c 600 data/orders/$(ls data/orders | head -1): ask-unavailable: host would ask the user and no interactive channel exists: Bash needs approval in default mode"
+    ],
+    "hostContext": {
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "plugins": [
+        "cc-plugin-agents-md@builtin",
+        "cc-plugin-telemetry@builtin",
+        "cc-plugin-privacy@builtin",
+        "cc-plugin-plugin-authoring@builtin"
+      ],
+      "memory": false
+    },
+    "hostError": null,
+    "evidence": {
+      "result": [
+        11
+      ],
+      "toolUse": [
+        2,
+        6,
+        8
+      ],
+      "innerCalls": [
+        4,
+        7,
+        9
+      ],
+      "init": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0314135,
+  "costSource": "host",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER: <c1>, <c2>, <c3>` line",
+      "ok top 3 in order: Globex, Umbrella Labs, Initech (got Globex, Umbrella Labs, Initech)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "claude-settings.json": "claude-settings.json",
+    "mcp-config.json": "mcp-config.json",
+    "command.txt": "command.txt",
+    "auth.txt": "auth.txt",
+    "isolation.txt": "isolation.txt",
+    "diff.patch": "diff.patch"
+  }
+}
