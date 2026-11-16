@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { VerifyResult } from './types.ts';
 
@@ -61,10 +62,10 @@ export interface NodeTestRun {
   readonly output: string;
 }
 
-/** Runs `node --test` in the workspace (same Node as the harness), with a timeout. */
-export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
+/** Runs `node --test` in the workspace (same Node as the harness), with a timeout; `files` limits it to those test files. */
+export function runNodeTests(workspace: string, timeoutMs = 60_000, files: readonly string[] = []): Promise<NodeTestRun> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
+    const child = spawn(process.execPath, ['--test', '--test-reporter=spec', ...files], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
     let output = '';
     child.stdout.on('data', (d: Buffer) => (output += d.toString('utf8')));
     child.stderr.on('data', (d: Buffer) => (output += d.toString('utf8')));
@@ -151,4 +152,31 @@ export async function checkScope(checks: Checks, workspace: string, initial: Rea
   const outside = [...c.modified.filter((f) => !allowed(f)).map((f) => `modified ${f}`), ...c.deleted.map((f) => `deleted ${f}`)];
   checks.check(outside.length === 0, outside.length === 0 ? 'no file outside the task changed' : `changed outside the task: ${outside.join(', ')}`);
   if (c.added.length > 0) checks.check(true, `new files (allowed): ${c.added.join(', ')}`);
+}
+
+/**
+ * Runs hidden tests: tests the agent never saw. The workspace is copied (without `.git`) to a temporary
+ * directory, the hidden files are added there under `hidden-tests/`, and only they run. The workspace
+ * itself is never written, so the recorded diff is the agent's alone.
+ */
+export async function runHiddenTests(workspace: string, hidden: Readonly<Record<string, string>>, timeoutMs = 60_000): Promise<NodeTestRun> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-hidden-'));
+  try {
+    await cp(workspace, dir, { recursive: true, filter: (src) => path.basename(src) !== '.git' });
+    await mkdir(path.join(dir, 'hidden-tests'), { recursive: true });
+    const files: string[] = [];
+    for (const [name, text] of Object.entries(hidden)) {
+      const rel = `hidden-tests/${name}`;
+      await writeFile(path.join(dir, rel), text);
+      files.push(rel);
+    }
+    return await runNodeTests(dir, timeoutMs, files);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** Failing test names from spec-reporter output (lines starting with the cross mark). */
+export function failedTests(output: string): string[] {
+  return [...new Set([...output.matchAll(/^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/gm)].map((m) => (m[1] ?? '').trim()))].filter((n) => n !== '' && !/^failing tests:?$/.test(n));
 }

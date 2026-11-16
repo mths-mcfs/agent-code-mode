@@ -2,11 +2,35 @@ import { z } from 'zod';
 
 /** Arms per host. Claude: A native, B agent-code-mode. Codex: A native, B Codex code mode, C agent-code-mode. */
 export const HOST_ARMS = { claude: ['A', 'B'], codex: ['A', 'B', 'C'] } as const;
+/** The tool surface of an arm: what the host is configured with. */
 export type ArmId = 'A' | 'B' | 'C';
+/**
+ * Baseline arms: the agent-code-mode arm of a host (Claude B, Codex C) run against another build of
+ * agent-code-mode (`--acm-ref` / `--acm-dist`), so two versions are measured in the same matrix.
+ */
+export const BASELINE_ARMS = { claude: 'B0', codex: 'C0' } as const;
+export type BenchArm = ArmId | 'B0' | 'C0';
+export const BENCH_ARMS: readonly BenchArm[] = ['A', 'B', 'C', 'B0', 'C0'];
+
+/** The arm whose tool surface a bench arm uses (a baseline arm is its host's agent-code-mode arm). */
+export function surfaceArm(arm: BenchArm): ArmId {
+  return arm === 'B0' ? 'B' : arm === 'C0' ? 'C' : arm;
+}
+
+/** True for the arms that run an agent-code-mode build. */
+export function isAcmArm(host: 'claude' | 'codex', arm: BenchArm): boolean {
+  const s = surfaceArm(arm);
+  return host === 'claude' ? s === 'B' : s === 'C';
+}
+
+/** Arms a host runs: its own arms plus, with a baseline build, its baseline arm. */
+export function hostArms(host: 'claude' | 'codex', withBaseline: boolean): BenchArm[] {
+  return withBaseline ? [...HOST_ARMS[host], BASELINE_ARMS[host]] : [...HOST_ARMS[host]];
+}
 
 export const ARM_LABELS: Readonly<Record<'claude' | 'codex', Readonly<Record<string, string>>>> = {
-  claude: { A: 'native tools', B: 'agent-code-mode (strict)' },
-  codex: { A: 'native tools (direct)', B: 'Codex code mode', C: 'agent-code-mode (strict)' },
+  claude: { A: 'native tools', B: 'agent-code-mode (strict)', B0: 'agent-code-mode baseline build (strict)' },
+  codex: { A: 'native tools (direct)', B: 'Codex code mode', C: 'agent-code-mode (strict)', C0: 'agent-code-mode baseline build (strict)' },
 };
 
 const Counts = z.record(z.string(), z.number().int().nonnegative());
@@ -36,8 +60,13 @@ export type ToolCalls = z.infer<typeof ToolCallsSchema>;
 
 /** Metrics parsed from one host transcript. Every number comes from a host event, never an estimate. */
 export const ParsedRunSchema = z.object({
-  /** Claude `num_turns`; Codex number of model requests (rollout token records). */
+  /** Claude `num_turns` (it counts tool-use rounds, not model requests); Codex number of model requests (rollout token records). */
   turns: z.number().int().nonnegative().nullable(),
+  /**
+   * Model requests, counted from usage events: Claude distinct assistant `message.id`s that carry usage
+   * (one request can stream several assistant events), Codex rollout token records. Null when not observable.
+   */
+  requests: z.number().int().nonnegative().nullable().default(null),
   /** Host-reported duration (Claude `duration_ms`), null when the host does not report one. */
   hostDurationMs: z.number().nonnegative().nullable(),
   usage: UsageSchema.nullable(),
@@ -71,8 +100,10 @@ export const RunRecordSchema = z.object({
   configHash: z.string().regex(/^[0-9a-f]{12}$/),
   config: z.record(z.string(), z.unknown()),
   host: z.enum(['claude', 'codex']),
-  arm: z.enum(['A', 'B', 'C']),
+  arm: z.enum(['A', 'B', 'C', 'B0', 'C0']),
   armLabel: z.string(),
+  /** A warmup run: made before the matrix to warm the prompt cache, kept apart and out of every statistic. */
+  warmup: z.boolean().default(false),
   task: z.string(),
   run: z.number().int().positive(),
   round: z.number().int().positive(),

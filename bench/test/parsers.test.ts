@@ -14,6 +14,7 @@ describe('Claude transcript parser', () => {
   it('reads the metrics of a real native run (claude-A.jsonl, Claude Code 2.1.325)', () => {
     const p = parseClaudeTranscript(read('claude-A.jsonl'));
     expect(p.turns).toBe(2);
+    expect(p.requests).toBe(2);
     expect(p.hostDurationMs).toBe(2414);
     expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0 });
     expect(p.hostCostUsd).toBeCloseTo(0.0116847, 10);
@@ -234,5 +235,22 @@ describe('Codex transcript parser', () => {
       { type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec_command' }, { type: 'custom', name: 'apply_patch' }] }, { type: 'tool_search' }] },
     ]);
     expect(codexToolSurface(input)).toEqual(['functions.exec_command', 'functions.apply_patch', 'tool_search']);
+  });
+});
+
+describe('model requests', () => {
+  it('counts distinct Claude assistant message ids, not num_turns', () => {
+    const usage = { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 10 };
+    const lines = [
+      { type: 'assistant', message: { id: 'msg_1', usage, content: [{ type: 'tool_use', id: 't1', name: 'Edit', input: {} }] } },
+      { type: 'assistant', message: { id: 'msg_1', usage, content: [{ type: 'tool_use', id: 't2', name: 'Edit', input: {} }] } },
+      { type: 'assistant', message: { id: 'msg_1', usage, content: [{ type: 'tool_use', id: 't3', name: 'Edit', input: {} }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+      { type: 'assistant', message: { id: 'msg_2', usage, content: [{ type: 'text', text: 'done' }] } },
+      { type: 'result', subtype: 'success', is_error: false, num_turns: 4, duration_ms: 10, total_cost_usd: 0.001, result: 'done', usage },
+    ];
+    const p = parseClaudeTranscript(lines.map((l) => JSON.stringify(l)).join('\n'));
+    expect(p.turns).toBe(4);
+    expect(p.requests).toBe(2);
   });
 });
