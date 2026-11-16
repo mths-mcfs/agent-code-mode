@@ -1,8 +1,11 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, type BigIntStats } from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
-import type { BashEffect, BashResult } from '../core/types.js';
+import type { BashEffect, BashExpandedEntry, BashGlob, BashGlobPlan, BashResult } from '../core/types.js';
+import { errnoCode } from './fs-ops.js';
+import type { Jail } from './jail.js';
 import { withSandbox } from './sandbox.js';
 
 /** Default `bash` timeout. */
@@ -171,20 +174,167 @@ function spawnAndWait(
   });
 }
 
+/** Most entries one command's globs may expand to. */
+export const MAX_EXPANDED_ENTRIES = 1000;
+
+function identityOf(st: BigIntStats): string {
+  const type = st.isFile() ? 'file' : st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'link' : 'other';
+  return `${st.dev}:${st.ino}:${type}`;
+}
+
+/** Matches of one glob, relative to `cwd` as bash would write them, sorted by byte value (bash in the C locale). */
+async function matchGlob(glob: BashGlob, cwd: string): Promise<string[]> {
+  let current: string[] = [''];
+  for (let i = 0; i < glob.segments.length; i++) {
+    const seg = glob.segments[i];
+    if (!seg) break;
+    const last = i === glob.segments.length - 1;
+    const next: string[] = [];
+    for (const rel of current) {
+      if (seg.kind === 'literal') {
+        const candidate = rel === '' ? seg.text : `${rel}/${seg.text}`;
+        // An existing entry; a directory (links followed) before the last segment.
+        const st = last ? await fs.lstat(path.resolve(cwd, candidate)).catch(() => null) : await fs.stat(path.resolve(cwd, candidate)).catch(() => null);
+        if (st && (last || st.isDirectory())) next.push(candidate);
+        continue;
+      }
+      let names: string[];
+      try {
+        names = await fs.readdir(path.resolve(cwd, rel === '' ? '.' : rel));
+      } catch {
+        continue; // bash skips directories it cannot read
+      }
+      for (const name of names) {
+        if (!seg.matches(name)) continue;
+        const candidate = rel === '' ? name : `${rel}/${name}`;
+        if (!last) {
+          const st = await fs.stat(path.resolve(cwd, candidate)).catch(() => null);
+          if (!st?.isDirectory()) continue;
+        }
+        next.push(candidate);
+      }
+    }
+    current = next;
+    if (current.length > MAX_EXPANDED_ENTRIES) {
+      throw new ToolError('invalid-args', `${glob.raw} matches more than ${MAX_EXPANDED_ENTRIES} entries; narrow it or use glob()`);
+    }
+  }
+  return current.sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')));
+}
+
+/** An expanded command and the identity of each entry it names. */
+export interface ExpandedCommand {
+  readonly command: string;
+  readonly entries: readonly BashExpandedEntry[];
+}
+
+/**
+ * Expands `plan` against `cwd` (the real directory the command runs in).
+ * Undefined when a glob matches nothing (bash would pass it as written, so
+ * the command stays as it is). Throws `ToolError` when a match is outside the
+ * workspace (symbolic links resolved), is not a regular file (or a directory,
+ * where the reader lists directories), names a directory the host's Read rules
+ * refuse to list, or there are too many matches.
+ */
+export async function expandBashGlobs(
+  plan: BashGlobPlan,
+  cwd: string,
+  jail: Jail,
+  readFilter: ((realAbsPath: string) => boolean) | undefined,
+): Promise<ExpandedCommand | undefined> {
+  const lists: string[][] = [];
+  const entries: BashExpandedEntry[] = [];
+  for (const glob of plan.globs) {
+    const matches = await matchGlob(glob, cwd);
+    if (matches.length === 0) return undefined;
+    if (entries.length + matches.length > MAX_EXPANDED_ENTRIES) {
+      throw new ToolError('invalid-args', `the globs of this command match more than ${MAX_EXPANDED_ENTRIES} entries; narrow them or use glob()`);
+    }
+    for (const rel of matches) {
+      const abs = path.resolve(cwd, rel);
+      const shown = JSON.stringify(rel);
+      // Identity first, then the jail: what is recorded is what was found inside the workspace.
+      let own: BigIntStats;
+      let target: BigIntStats;
+      try {
+        own = await fs.lstat(abs, { bigint: true });
+        target = await fs.stat(abs, { bigint: true });
+      } catch (err) {
+        throw new ToolError('not-found', `${shown} (matched by ${glob.raw}) cannot be read: ${errnoCode(err) ?? String(err)}`);
+      }
+      const real = await jail.resolve(abs).catch((err: unknown) => {
+        if (err instanceof ToolError) throw new ToolError(err.code, `${shown} (matched by ${glob.raw}): ${err.message}`);
+        throw err;
+      });
+      const atReal = await fs.stat(real, { bigint: true }).catch(() => null);
+      if (!atReal || identityOf(atReal) !== identityOf(target)) {
+        throw new ToolError('stale', `${shown} (matched by ${glob.raw}) changed while it was being checked`);
+      }
+      if (target.isDirectory()) {
+        if (!glob.directories) throw new ToolError('invalid-args', `${shown} (matched by ${glob.raw}) is a directory; the command reads only regular files`);
+      } else if (!target.isFile()) {
+        throw new ToolError('invalid-args', `${shown} (matched by ${glob.raw}) is not a regular file`);
+      }
+      if (glob.directories && readFilter) {
+        // A listing shows names and metadata: refuse an entry, or a directory child, the Read rules refuse.
+        const shownPaths = [abs, real];
+        if (target.isDirectory()) {
+          for (const child of await fs.readdir(real).catch(() => [])) shownPaths.push(path.join(abs, child), path.join(real, child));
+        }
+        const refused = shownPaths.find((p) => !readFilter(p));
+        if (refused !== undefined) {
+          throw new ToolError('invalid-args', `${shown} (matched by ${glob.raw}) would list ${refused}, which the host's Read rules refuse`);
+        }
+      }
+      entries.push({ path: abs, identity: identityOf(own), targetIdentity: identityOf(target) });
+    }
+    lists.push(matches);
+  }
+  return { command: plan.render(lists), entries };
+}
+
+/**
+ * Refuses to run when an expanded entry is no longer the one that was
+ * authorized: replaced, turned into a symbolic link, or a link retargeted.
+ * What remains is the time between this check and the moment the command
+ * opens the file (see README, "Security model and limits").
+ */
+export async function assertEntriesUnchanged(entries: readonly BashExpandedEntry[]): Promise<void> {
+  for (const entry of entries) {
+    let own: string;
+    let target: string;
+    try {
+      own = identityOf(await fs.lstat(entry.path, { bigint: true }));
+      target = identityOf(await fs.stat(entry.path, { bigint: true }));
+    } catch (err) {
+      throw new ToolError('stale', `${entry.path} changed after the command was authorized (${errnoCode(err) ?? String(err)}); nothing ran`);
+    }
+    if (own !== entry.identity || target !== entry.targetIdentity) {
+      throw new ToolError('stale', `${entry.path} changed after the command was authorized (it is no longer the same file); nothing ran`);
+    }
+  }
+}
+
 /** Runs a prepared `bash` effect. */
 export async function runBash(effect: BashEffect, signal: AbortSignal, opts: BashRunOptions = {}): Promise<BashResult> {
   if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
+  if (effect.expansion) await assertEntriesUnchanged(effect.expansion.entries);
   const shell = findBash();
   if (shell === null) {
     throw new ToolError('tool-error', process.platform === 'win32' ? 'bash requires Git Bash, which was not found' : 'bash was not found');
   }
   const cap = opts.outputCapBytes ?? DEFAULT_OUTPUT_CAP_BYTES;
   const containment = effect.containment;
+  const shown = (r: BashResult): BashResult => (effect.expansion ? { ...r, command: effect.command } : r);
   if (containment.mode === 'none') {
-    return spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap);
+    return shown(await spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap));
   }
-  return withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], (wrapped) => {
-    if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-    return spawnAndWait(wrapped.argv, { ...process.env, ...wrapped.env }, effect.cwd, effect.timeoutMs, signal, cap);
-  });
+  return shown(
+    await withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], async (wrapped) => {
+      if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
+      // The sandbox setup took time: check the entries again right before the spawn.
+      if (effect.expansion) await assertEntriesUnchanged(effect.expansion.entries);
+      return spawnAndWait(wrapped.argv, { ...process.env, ...wrapped.env }, effect.cwd, effect.timeoutMs, signal, cap);
+    }),
+  );
 }

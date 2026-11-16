@@ -69,6 +69,23 @@ describe('summarizeCalls', () => {
     });
   });
 
+  it('does not repeat the run error in the reason of the call that raised it', () => {
+    const message = 'host would ask the user and no interactive channel exists: Bash needs approval in default mode';
+    const calls: CallLogEntry[] = [
+      { id: 'c1', tool: 'bash', summary: 'bash node -v', decision: 'denied', reason: `ask-unavailable: ${message}`, durationMs: 1 },
+      { id: 'c2', tool: 'read', summary: 'read x', decision: 'denied', reason: message, durationMs: 1 },
+      { id: 'c3', tool: 'read', summary: 'read y', decision: 'denied', reason: 'rule: another reason', durationMs: 1 },
+    ];
+    expect(summarizeCalls(calls, message).denied).toEqual([
+      { id: 'c1', tool: 'bash', summary: 'bash node -v', reason: 'ask-unavailable (see error)' },
+      { id: 'c2', tool: 'read', summary: 'read x' },
+      { id: 'c3', tool: 'read', summary: 'read y', reason: 'rule: another reason' },
+    ]);
+    const view = json(formatRunResult({ ...base, ok: false, error: { name: 'PermissionDenied', message, kind: 'error' }, calls }));
+    expect(all(formatRunResult({ ...base, ok: false, error: { name: 'PermissionDenied', message, kind: 'error' }, calls })).split(message)).toHaveLength(2);
+    expect(view['error']).toMatchObject({ message });
+  });
+
   it('D1: lists every denied call, however many', () => {
     const out = formatRunResult({ ...base, result: 'caught all', calls: Array.from({ length: 25 }, (_, i) => deniedCall(i + 1)) });
     const calls = json(out)['calls'];

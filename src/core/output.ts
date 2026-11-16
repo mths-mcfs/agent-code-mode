@@ -61,12 +61,30 @@ export function safeStringify(value: unknown): string {
 
 type FailedCall = Pick<CallLogEntry, 'id' | 'tool' | 'summary'> & { readonly reason?: string };
 
-/** The call log as counts plus every denied and failed call (without the duration). */
-export function summarizeCalls(calls: readonly CallLogEntry[]): { total: number; byTool: Record<string, number>; denied?: FailedCall[]; errors?: FailedCall[] } {
+/**
+ * The call log as counts plus every denied and failed call (without the
+ * duration). A reason that repeats `errorMessage` (the run's error, already in
+ * the result) is cut to what it adds: its source prefix, or nothing.
+ */
+export function summarizeCalls(
+  calls: readonly CallLogEntry[],
+  errorMessage?: string,
+): { total: number; byTool: Record<string, number>; denied?: FailedCall[]; errors?: FailedCall[] } {
   const byTool: Record<string, number> = {};
   for (const c of calls) byTool[c.tool] = (byTool[c.tool] ?? 0) + 1;
+  const shown = (reason: string | undefined): string | undefined => {
+    if (reason === undefined || errorMessage === undefined || errorMessage === '') return reason;
+    if (reason === errorMessage) return undefined;
+    if (reason.endsWith(`: ${errorMessage}`)) return `${reason.slice(0, -errorMessage.length - 2)} (see error)`;
+    return reason;
+  };
   const failed = (decision: CallLogEntry['decision']): FailedCall[] =>
-    calls.filter((c) => c.decision === decision).map(({ id, tool, summary, reason }) => ({ id, tool, summary, ...(reason === undefined ? {} : { reason }) }));
+    calls
+      .filter((c) => c.decision === decision)
+      .map(({ id, tool, summary, reason }) => {
+        const r = shown(reason);
+        return { id, tool, summary, ...(r === undefined ? {} : { reason: r }) };
+      });
   const denied = failed('denied');
   const errors = failed('error');
   return { total: calls.length, byTool, ...(denied.length > 0 ? { denied } : {}), ...(errors.length > 0 ? { errors } : {}) };
@@ -143,7 +161,7 @@ export function runResultView(result: RunResult, verbose = false): { readonly vi
   const view: Record<string, unknown> = {
     ...rest,
     ...(logs.length > 0 ? { logs } : {}),
-    calls: verbose ? calls : summarizeCalls(calls),
+    calls: verbose ? calls : summarizeCalls(calls, result.error?.message),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
     ...(diff === '' ? {} : bigDiff ? { diffStat: diffStat(diff) } : { diff }),
     ...(warnings.length > 0 ? { warnings } : {}),

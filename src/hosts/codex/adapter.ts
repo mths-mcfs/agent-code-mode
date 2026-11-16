@@ -29,7 +29,7 @@ import { ConfigError, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPol
 import { isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
 import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
 import { mapUpdatedInput, nativeCall, NativeShapeError, shellCommandFor, type NativeCall } from './native.js';
-import { ShellParseError, splitShellCommands } from './shell.js';
+import { INEXACT, ShellParseError, splitShellCommands } from './shell.js';
 
 /** Adapter-specific part of the policy snapshot. */
 export interface CodexPolicy {
@@ -235,6 +235,28 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
 }
 
 /** Static decision for a shell command (exec policy rules plus Codex heuristics). */
+/**
+ * Whether `rule` could match `argv` once bash expands its first inexact word
+ * (see `INEXACT`): the words before it match the rule, and the rule goes on
+ * past it.
+ */
+function mayMatchInexact(rule: PrefixRule, argv: readonly string[]): boolean {
+  const at = argv.findIndex((a) => a.startsWith(INEXACT));
+  if (at === -1 || rule.rest.length + 1 <= at) return false;
+  for (let j = 0; j < at; j++) {
+    const a = argv[j] ?? '';
+    if (j === 0) {
+      if (a !== rule.program && !(a.startsWith('/') && a.endsWith(`/${rule.program}`))) return false;
+    } else if (!(rule.rest[j - 1] ?? []).includes(a)) return false;
+  }
+  return true;
+}
+
+/** argv for messages, without the inexact markers. */
+function shown(argv: readonly string[]): string {
+  return argv.map((a) => a.replaceAll(INEXACT, '')).join(' ');
+}
+
 export function checkShellCommand(command: string, p: CodexPolicy): Decision {
   let split;
   try {
@@ -250,13 +272,16 @@ export function checkShellCommand(command: string, p: CodexPolicy): Decision {
   const matched: PrefixRule[] = [];
   let unmatchedAsk: string | undefined;
   for (const argv of commands) {
+    // A forbidden or prompt rule that may match a word bash changes at run time cannot be settled statically.
+    const maybe = p.rules.rules.find((r) => r.decision !== 'allow' && mayMatchInexact(r, argv));
+    if (maybe) unmatchedAsk ??= `${shown(argv)} has a word bash expands at run time, which Codex rule ${maybe.source} may match`;
     const rules = matchRules(p.rules, argv);
     if (rules.length > 0) {
       matched.push(...rules);
       continue;
     }
-    if (isDangerousCommand(argv)) unmatchedAsk ??= `${argv.join(' ')} is a forced rm (Codex asks before running it)`;
-    else if (p.approvalPolicy === 'untrusted') unmatchedAsk ??= `${argv.join(' ')} is not allowed by an exec policy rule and the approval policy is untrusted`;
+    if (isDangerousCommand(argv)) unmatchedAsk ??= `${shown(argv)} is a forced rm (Codex asks before running it)`;
+    else if (p.approvalPolicy === 'untrusted') unmatchedAsk ??= `${shown(argv)} is not allowed by an exec policy rule and the approval policy is untrusted`;
   }
   // A wrapper whose options this server does not know may run anything: ask.
   if (split.unsure.length > 0) unmatchedAsk ??= `cannot tell which command runs behind a wrapper (${split.unsure[0] ?? ''})`;
