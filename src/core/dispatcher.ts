@@ -515,7 +515,7 @@ export class Dispatcher<P = unknown> {
   #protectedCache: { readonly policy: PolicySnapshot<P>; readonly patterns: readonly string[] } | undefined;
 
   #addChanged(absPath: string): void {
-    const shown = workspaceDisplayPath(absPath, this.#canonicalCwd, this.#canonicalRoots);
+    const shown = workspaceDisplayPath(absPath, this.#canonicalCwd);
     if (!this.#changed.includes(shown)) this.#changed.push(shown);
   }
 

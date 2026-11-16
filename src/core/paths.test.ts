@@ -27,13 +27,13 @@ describe('matchesPathPattern', () => {
 
 describe('workspaceDisplayPath', () => {
   const sep = (p: string): string => p.split('/').join(path.sep);
-  it('is relative inside the cwd, <root>/<rel> inside another root, absolute elsewhere', () => {
+  it('is the path relative to the cwd, also for files in other roots', () => {
     const cwd = sep('/w/proj');
-    const roots = [cwd, sep('/data/extra'), sep('/data/extra/deep')];
-    expect(workspaceDisplayPath(sep('/w/proj/src/a.ts'), cwd, roots)).toBe('src/a.ts');
-    expect(workspaceDisplayPath(cwd, cwd, roots)).toBe('.');
-    expect(workspaceDisplayPath(sep('/data/extra/x'), cwd, roots)).toBe('extra/x');
-    expect(workspaceDisplayPath(sep('/data/extra/deep/y'), cwd, roots)).toBe('deep/y');
-    expect(workspaceDisplayPath(sep('/other/z'), cwd, roots)).toBe(sep('/other/z').split(path.sep).join('/'));
+    expect(workspaceDisplayPath(sep('/w/proj/src/a.ts'), cwd)).toBe('src/a.ts');
+    expect(workspaceDisplayPath(cwd, cwd)).toBe('.');
+    expect(workspaceDisplayPath(sep('/w/extra/x'), cwd)).toBe('../extra/x');
+    // A cwd folder and an additional root with the same name stay distinct.
+    expect(workspaceDisplayPath(sep('/w/proj/extra/x'), cwd)).toBe('extra/x');
+    expect(workspaceDisplayPath(sep('/data/deep/y'), cwd)).toBe('../../data/deep/y');
   });
 });
