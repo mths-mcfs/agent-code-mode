@@ -85,15 +85,25 @@ describe('cancellation', () => {
     const controller = new AbortController();
     const pending = server.run(`for (let i = 0; ; i++) await write({ path: 'out/f' + i + '.txt', content: String(i) });`, { signal: controller.signal });
     const outDir = path.join(lab.ws, 'out');
-    for (let i = 0; i < 300 && !(existsSync(outDir) && readdirSync(outDir).length >= 3); i++) await sleep(50);
+    // Only completed targets count: writes land by an atomic rename, so f<n>.txt exists only once it is whole;
+    // the in-flight `.f<n>.txt.acm-*.tmp` temp file is not a write.
+    const completed = (): string[] => (existsSync(outDir) ? readdirSync(outDir).filter((n) => /^f\d+\.txt$/.test(n)).sort() : []);
+    const temps = (): string[] => (existsSync(outDir) ? readdirSync(outDir).filter((n) => n.endsWith('.tmp')) : []);
+    // Explicit signal: the third file of the sequence is complete (writes are serialized, so f0..f2 are too).
+    const third = path.join(outDir, 'f2.txt');
+    for (let i = 0; i < 600 && !existsSync(third); i++) await sleep(25);
+    expect(existsSync(third)).toBe(true);
     controller.abort();
     await expect(pending).rejects.toThrow();
-    // The dispatcher's settle grace is 2 s; after it nothing may land.
+    // The dispatcher's settle grace is 2 s: a commit already running when the run stopped may still land within it.
     await sleep(3_000);
-    const settled = readdirSync(outDir).length;
+    const settled = completed();
+    expect(settled.length).toBeGreaterThanOrEqual(3);
     await sleep(2_000);
-    expect(readdirSync(outDir).length).toBe(settled);
-    expect(settled).toBeGreaterThanOrEqual(3);
+    // Strict: after the run stopped and settled, not one more file and no write in progress.
+    expect(completed()).toEqual(settled);
+    expect(temps()).toEqual([]);
+    for (const name of settled) expect(readFileSync(path.join(outDir, name), 'utf8')).toBe(name.slice(1, -4));
   });
 
   it.runIf(posix)('a cancelled bash call is killed and its later effect never happens', async () => {
