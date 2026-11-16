@@ -1,6 +1,6 @@
 import { parse, walk } from 'sh-syntax/sync';
 import type { CallExpr, File, Stmt, Word } from 'sh-syntax/sync';
-import type { BashGlob, BashGlobPlan, BashGlobSegment } from '../../core/types.js';
+import type { BashGlob, BashGlobPlan } from '../../core/types.js';
 import { BashAnalyzer } from './bash.js';
 
 /**
@@ -19,16 +19,16 @@ import { BashAnalyzer } from './bash.js';
  *   backticks, brace expansion or a leading `~`);
  * - every option is in that reader's grammar (`READERS`), and options come
  *   before the operands (no permutation);
- * - each glob is relative, has no `..` and no `**`, and uses only `*`, `?`
- *   and simple bracket expressions;
+ * - each glob is relative and has no `..` and no `**`;
  * - the whole command has no `cd`, no function definition and nothing the
  *   analyzer cannot evaluate statically.
  * Anything else: no plan, and the command stays as written.
  *
  * The rewrite puts `--` before the first operand (every reader accepts it)
  * and each match in single quotes, so a file named `-n` or with a space,
- * quote or newline is one operand. Match order is bash's in the C locale: the
- * matches of each glob sorted by byte value of the whole path.
+ * quote or newline is one operand. The matches and their order come from the
+ * bash that runs the command, with the same environment (see
+ * `expandBashGlobs`), so the reader gets what bash would have passed.
  */
 
 /** Option grammar of one reader. */
@@ -164,99 +164,22 @@ function wordChars(word: Word): Ch[] | undefined {
 const text = (chars: readonly Ch[]): string => chars.map((ch) => ch.c).join('');
 const isGlob = (chars: readonly Ch[]): boolean => chars.some((ch) => !ch.quoted && GLOB_META.has(ch.c));
 
-/** Escapes each byte of `s` (as UTF-8) for a regular expression over latin1 text. */
-function bytesRe(s: string): string {
-  let out = '';
-  for (const byte of Buffer.from(s, 'utf8')) out += `\\x${byte.toString(16).padStart(2, '0')}`;
-  return out;
-}
-
-/** Latin1 view of a name's UTF-8 bytes: one character per byte, so `?` matches one byte as in the C locale. */
-const asBytes = (name: string): string => Buffer.from(name, 'utf8').toString('latin1');
-
-/** Compiles one segment with glob characters; undefined when it uses anything beyond `*`, `?` and simple brackets. */
-function compileSegment(chars: readonly Ch[]): BashGlobSegment | undefined {
-  let re = '';
-  for (let i = 0; i < chars.length; i++) {
-    const ch = chars[i];
-    if (!ch) return undefined;
-    if (ch.quoted || !GLOB_META.has(ch.c)) {
-      re += bytesRe(ch.c);
-      continue;
-    }
-    if (ch.c === '*') {
-      if (chars[i + 1]?.c === '*' && chars[i + 1]?.quoted === false) return undefined; // `**`: globstar semantics vary
-      re += '[\\s\\S]*';
-      continue;
-    }
-    if (ch.c === '?') {
-      re += '[\\s\\S]';
-      continue;
-    }
-    // Bracket expression.
-    let j = i + 1;
-    let negate = false;
-    const first = chars[j];
-    if (first && !first.quoted && (first.c === '!' || first.c === '^')) {
-      negate = true;
-      j++;
-    }
-    const members: string[] = [];
-    let closed = false;
-    for (let k = j; k < chars.length; k++) {
-      const m = chars[k];
-      if (!m) return undefined;
-      if (!m.quoted && m.c === ']' && k > j) {
-        closed = true;
-        j = k;
-        break;
-      }
-      if (!m.quoted && m.c === '[' && (chars[k + 1]?.c === ':' || chars[k + 1]?.c === '=' || chars[k + 1]?.c === '.')) return undefined; // classes
-      if (m.c.charCodeAt(0) > 0x7e || m.c.charCodeAt(0) < 0x20) return undefined; // C-locale ranges only over printable ASCII
-      const dash = chars[k + 1];
-      const to = chars[k + 2];
-      if (dash && !dash.quoted && dash.c === '-' && to && !(to.c === ']' && !to.quoted)) {
-        if (to.c.charCodeAt(0) > 0x7e || to.c.charCodeAt(0) < 0x20 || to.c < m.c) return undefined;
-        members.push(`${bytesRe(m.c)}-${bytesRe(to.c)}`);
-        k += 2;
-        continue;
-      }
-      members.push(bytesRe(m.c));
-    }
-    if (!closed || members.length === 0) return undefined;
-    re += `[${negate ? '^' : ''}${members.join('')}]`;
-    i = j;
-  }
-  const compiled = new RegExp(`^${re}$`);
-  // A leading dot is matched only by a literal dot (no dotglob).
-  const dotOk = chars[0]?.c === '.';
-  return {
-    kind: 'pattern',
-    matches: (name: string) => (name.startsWith('.') && !dotOk ? false : compiled.test(asBytes(name))),
-  };
-}
-
-/** Splits a glob word into segments; undefined when it is absolute, has `..`, an empty segment or unsupported syntax. */
+/**
+ * The glob word as bash would read it; undefined when it is absolute, has a
+ * `..` or empty segment (`a//b`, a trailing slash) or a `**` (globstar may be
+ * on). Which entries it matches, and in what order, is left to bash itself.
+ */
 function compileGlob(chars: readonly Ch[], raw: string, directories: boolean): BashGlob | undefined {
   const segments: Ch[][] = [[]];
   for (const ch of chars) {
     if (ch.c === '/') segments.push([]);
     else segments[segments.length - 1]?.push(ch);
   }
-  const out: BashGlobSegment[] = [];
   for (const seg of segments) {
-    if (seg.length === 0) return undefined; // absolute, `a//b` or a trailing slash
-    const t = text(seg);
-    if (t === '..') return undefined;
-    if (isGlob(seg)) {
-      const compiled = compileSegment(seg);
-      if (!compiled) return undefined;
-      out.push(compiled);
-    } else {
-      out.push({ kind: 'literal', text: t });
-    }
+    if (seg.length === 0 || text(seg) === '..') return undefined;
+    if (seg.some((ch, i) => !ch.quoted && ch.c === '*' && seg[i + 1]?.c === '*' && seg[i + 1]?.quoted === false)) return undefined;
   }
-  return { raw, segments: out, directories };
+  return { raw, directories };
 }
 
 /** A pending text change, in byte offsets of the source. */

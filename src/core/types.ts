@@ -317,23 +317,13 @@ export interface BashGlobPlan {
   render(matches: readonly (readonly string[])[]): string;
 }
 
-/** One glob word of a `bash` command, split at `/`. */
+/** One glob word of a `bash` command. */
 export interface BashGlob {
-  /** The word as written. */
+  /** The word as written: literal text, quotes and glob characters only. */
   readonly raw: string;
-  readonly segments: readonly BashGlobSegment[];
   /** Whether a match may be a directory (`ls`); otherwise only regular files. */
   readonly directories: boolean;
 }
-
-/** A path segment of a glob: literal text, or a name pattern. */
-export type BashGlobSegment =
-  | { readonly kind: 'literal'; readonly text: string }
-  | {
-      readonly kind: 'pattern';
-      /** Whether the name matches the pattern (bash glob semantics, C locale). */
-      readonly matches: (name: string) => boolean;
-    };
 
 /** Effect of a `read` call. */
 export interface ReadEffect {

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { findBash } from '../../src/tools/bash.js';
 import { claudeServer, makeLab, posix, type Lab, type Server } from './harness.js';
 
 /**
@@ -129,13 +130,16 @@ symlinkSync(${JSON.stringify(secret)}, dir + '/' + target);`,
     mkdirSync(path.join(lab.ws, 'w'));
     for (const name of names) writeFileSync(path.join(lab.ws, 'w', name), `<${name}>\n`);
     server = await claudeServer(lab, { permissions: { allow: ALLOW } });
-    // C-locale order: `--lines=1` < `-n` < `a b` < `it's` < `new\nline` < `q"x`.
-    const order = ['--lines=1', '-n', 'a b', "it's", 'new\nline', 'q"x'];
+    // The order bash itself gives the glob in this environment (it follows the locale's collation).
+    const shell = findBash() ?? 'bash';
+    const listed = spawnSync(shell, ['-c', `for f in w/*; do printf '%s\\0' "$f"; done`], { cwd: lab.ws, env: process.env, encoding: 'utf8' }).stdout.split('\0').slice(0, -1);
+    const order = listed.map((p) => p.slice(2));
+    expect([...order].sort()).toEqual([...names].sort());
     const out = await server.run(`return await bash({ command: 'cat w/*' })`);
     expect(out.ok).toBe(true);
     const result = out.result as { stdout: string; command: string };
     expect(result.stdout).toBe(order.map((n) => `<${n}>\n`).join('')); // no `-n` numbering: it was a file
-    expect(result.command.startsWith("cat -- 'w/--lines=1' 'w/-n' 'w/a b' 'w/it'\\''s' 'w/new\nline' 'w/q\"x'")).toBe(true);
+    expect(result.command).toBe(`cat -- ${order.map((n) => `'w/${n.replace(/'/g, "'\\''")}'`).join(' ')}`);
     const counted = await server.run(`return (await bash({ command: 'wc -l w/*' })).stdout`);
     expect(counted.result).toMatch(/ 7 total\n$/); // the file named with a newline holds its name, so two lines
   });

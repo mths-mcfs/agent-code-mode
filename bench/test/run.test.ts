@@ -5,7 +5,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { claudeArgs, claudeMcpConfig } from '../lib/claude.ts';
 import { catalogForArm, codexConfigToml } from '../lib/codex.ts';
-import { assertWorkspaceIsolated, defaultWorkDir, insideRepo, main, parseOptions, planRuns, planWarmup, REPO_ROOT, resolveBaseline, WARMUP_TASK, type PlannedRun } from '../run.ts';
+import { assertWorkspaceIsolated, defaultWorkDir, insideRepo, main, npmCommand, parseOptions, planRuns, planWarmup, REPO_ROOT, resolveBaseline, WARMUP_TASK, type PlannedRun } from '../run.ts';
 import { Rng } from '../lib/rng.ts';
 import { TASK_IDS, type TaskId } from '../tasks/types.ts';
 
@@ -338,4 +338,29 @@ describe('workspace isolation from the checkout', () => {
       await rm(work, { recursive: true, force: true });
     }
   }, 600_000);
+});
+
+describe('npm without a shell', () => {
+  it('runs npm-cli.js with this Node (npm is a .cmd shim on Windows), from npm_execpath or next to node', async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'acm-npm-'));
+    try {
+      const win = path.join(tmp, 'win');
+      const cli = path.join(win, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+      await mkdir(path.dirname(cli), { recursive: true });
+      await writeFile(cli, '');
+      const node = path.join(win, 'node.exe');
+      expect(npmCommand({}, node)).toEqual({ command: node, args: [cli] });
+      const posix = path.join(tmp, 'prefix');
+      const cli2 = path.join(posix, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+      await mkdir(path.dirname(cli2), { recursive: true });
+      await writeFile(cli2, '');
+      expect(npmCommand({}, path.join(posix, 'bin', 'node'))).toEqual({ command: path.join(posix, 'bin', 'node'), args: [path.join(posix, 'bin', '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')] });
+      expect(npmCommand({ npm_execpath: cli2 }, node)).toEqual({ command: node, args: [cli2] });
+      expect(npmCommand({ npm_execpath: path.join(tmp, 'pnpm.cjs') }, path.join(tmp, 'none', 'node'))).toEqual({ command: 'npm', args: [] });
+      // On this machine it resolves to a real npm-cli.js.
+      expect(npmCommand().args[0] ?? '').toMatch(/npm-cli\.js$/);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
 });

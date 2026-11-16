@@ -9,9 +9,12 @@ import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
+// About 50 workspaces, each a git repo of 340-560 entries (T12 adds 80 log files): some 17k. Deleting them takes
+// longer than the 10 s hook default on Windows, where every delete is scanned and a file still held
+// open fails with EBUSY for a moment, so the cleanup gets its own timeout and retries.
 afterAll(async () => {
-  await rm(root, { recursive: true, force: true });
-});
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+}, 180_000);
 
 let n = 0;
 async function workspace(task: (typeof TASK_IDS)[number], host: 'claude' | 'codex' = 'codex') {
