@@ -1,3 +1,5 @@
+import { appendFile } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -66,6 +68,24 @@ function rootPaths(roots: readonly { uri: string }[]): string[] {
   return out;
 }
 
+/** Env var naming a file where the server appends one JSON line per run (context sources and call log), for debugging host setups. */
+export const RUN_LOG_ENV = 'AGENT_CODE_MODE_LOG';
+
+async function appendRunLog(file: string | undefined, ctx: SessionContext, result: RunResult): Promise<void> {
+  if (file === undefined || file === '' || !path.isAbsolute(file)) return;
+  const line = {
+    at: new Date().toISOString(),
+    host: ctx.host,
+    cwd: ctx.cwd,
+    permissionMode: ctx.permissionMode,
+    sources: ctx.sources,
+    ...(ctx.agentType === undefined ? {} : { agentType: ctx.agentType }),
+    ok: result.ok,
+    calls: result.calls.map((c) => ({ id: c.id, summary: c.summary, decision: c.decision, ...(c.reason === undefined ? {} : { reason: c.reason }) })),
+  };
+  await appendFile(file, `${JSON.stringify(line)}\n`, { mode: 0o600 }).catch(() => undefined);
+}
+
 /** Creates the MCP server exposing the `run` tool. Connect it to a transport to serve. */
 export function createMcpServer(opts: McpServerOptions): Server {
   const env = opts.env ?? process.env;
@@ -131,6 +151,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
         maxTimeoutMs: runtime.maxTimeoutMs,
       });
       const result = recoveryWarnings.length === 0 ? ran : { ...ran, warnings: [...recoveryWarnings, ...ran.warnings] };
+      await appendRunLog(env[RUN_LOG_ENV], ctx, result);
       return await respond(result);
     } catch (err) {
       return respond(errorResult(`internal error: ${errorMessage(err)}`));
