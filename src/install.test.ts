@@ -81,6 +81,57 @@ describe('install', () => {
     expect((await planInstall(opts({ host: 'codex', scope: 'user', env: { CODEX_HOME: codexHome } }))).changes).toEqual([]);
   });
 
+  describe('Codex config edited through a TOML parser', () => {
+    const plan = async (text: string | null) => {
+      const codexHome = path.join(base, 'codex-home');
+      mkdirSync(codexHome, { recursive: true });
+      if (text !== null) writeFileSync(path.join(codexHome, 'config.toml'), text);
+      return planInstall(opts({ host: 'codex', scope: 'user', env: { CODEX_HOME: codexHome } }));
+    };
+
+    it.each([
+      ['single-quoted key', `[mcp_servers.'agent-code-mode']\ncommand = "custom"\n`],
+      ['double-quoted key', `[mcp_servers."agent-code-mode"]\ncommand = "custom"\n`],
+      ['spaced dotted key', `[ mcp_servers . "agent-code-mode" ]\ncommand = "custom"\n`],
+      ['inline table', `mcp_servers = { "agent-code-mode" = { command = "custom" } }\n`],
+      ['dotted key at the top', `mcp_servers.agent-code-mode.command = "custom"\n`],
+    ])('finds an existing table spelled with a %s and refuses instead of duplicating it', async (_name, text) => {
+      const p = await plan(text);
+      expect(p.changes).toEqual([]);
+      expect(p.refusals).toEqual([expect.stringMatching(/already defines mcp_servers\.agent-code-mode/)]);
+      await expect(applyPlan(p)).rejects.toThrow(/refusing to write/);
+    });
+
+    it('refuses when appending would redefine a table (mcp_servers given inline)', async () => {
+      const p = await plan(`mcp_servers = { other = { command = "x" } }\n`);
+      expect(p.changes).toEqual([]);
+      expect(p.refusals).toEqual([expect.stringMatching(/would not give a valid configuration/)]);
+    });
+
+    it('refuses a config that is not valid TOML', async () => {
+      const p = await plan(`model = \n`);
+      expect(p.refusals).toEqual([expect.stringMatching(/is not valid TOML/)]);
+    });
+
+    it('appends after unrelated content, keeping it byte-identical, and the result parses', async () => {
+      const original = `# my settings\nmodel = "m" # inline comment\n\n[mcp_servers.other]\ncommand = "x"\n`;
+      const p = await plan(original);
+      expect(p.refusals).toEqual([]);
+      const after = p.changes[0]?.after ?? '';
+      expect(after.startsWith(original)).toBe(true);
+      expect(parseToml(after)).toMatchObject({ model: 'm', mcp_servers: { other: { command: 'x' }, 'agent-code-mode': { tool_timeout_sec: 300 } } });
+    });
+
+    it('reports an identical existing entry as already configured', async () => {
+      const first = await plan('');
+      await applyPlan(first);
+      const again = await plan(null);
+      expect(again.changes).toEqual([]);
+      expect(again.refusals).toEqual([]);
+      expect(again.text).toMatch(/already has this configuration/);
+    });
+  });
+
   it('--local runs this checkout with the current node', async () => {
     const plan = await planInstall(opts({ host: 'codex', local: true }));
     expect(plan.text).toContain(JSON.stringify(process.execPath));

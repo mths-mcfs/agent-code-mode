@@ -74,7 +74,7 @@ return { files: hits.matches.length, exitCode: test.exitCode };
 | `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{matches: [{file, line, text}], truncated, filtered}` |
 | `glob({pattern, path?, maxResults?})` | `{files, truncated, filtered}` |
 
-`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `run` takes `{code, transaction?, timeoutMs?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied. The result holds the return value, logs, a call log, the changed files and a combined diff.
+`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `run` takes `{code, transaction?, timeoutMs?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The result holds the return value, logs, a call log, the changed files and a combined diff.
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` says which rung matched.
 
@@ -93,6 +93,7 @@ Semantics:
 - **Auto mode (Claude).** Claude's classifier reviews the whole `run` call once. Deny and ask rules still apply to every inner call. If an allow rule approves `run` itself, the classifier never saw the script, so inner calls no rule decides follow auto mode's fallback: reads and edits inside the working directories pass, everything else asks.
 - **Paths.** Calls are confined to the session cwd, the client's roots and the host's additional directories. Symlinks leading out are refused. Host policy files (`.claude/settings*.json`, `.claude/hooks/`, `.mcp.json`, `.codex/`, `~/.claude/`, `$CODEX_HOME`, the server state dir) cannot be written. `grep` and `glob` drop files your Read rules deny and count them in `filtered`.
 - **`bash` containment** mirrors the host. When Claude's sandbox is enabled, or Codex runs `read-only`/`workspace-write`, commands run in an OS sandbox (bubblewrap on Linux, Seatbelt on macOS) with the host's writable roots. If that cannot be enforced, the call is refused, never run unconfined.
+- **Overlapping transactions.** Within one server, a transactional run may not write a file that another unfinished transactional run already changed: that write fails, so both runs can still roll back to the true original.
 - **Rollback covers files only.** Effects of `bash` (processes, network, files a command wrote) are never undone; the result warns when a rolled-back run had committed `bash` calls.
 - **Network on Node 22/24.** Node's permission model blocks sockets in the sandbox child only from Node 25. On Node 22 and 24, network isolation of scripts rests on the QuickJS VM exposing no network API.
 - **Windows.** `bash` needs Git Bash and is otherwise refused; OS containment is not available there.

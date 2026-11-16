@@ -48,6 +48,8 @@ export interface NodeToolRuntimeOptions {
 interface CallMeta {
   /** Workspace root that contains the call's path. */
   readonly root: string;
+  /** Every real root of the run (journaled so crash recovery stays inside them). */
+  readonly runRoots: readonly string[];
   /** Path shown in diffs. */
   readonly display: string;
   /** Paths a sandboxed bash may never write. */
@@ -150,6 +152,7 @@ export class NodeToolRuntime implements ToolRuntime {
     const readFilter = policy.readFilter;
     const meta = (abs: string, denyWrite: readonly string[] = []): CallMeta => ({
       root: jail.rootOf(abs) ?? jail.cwd,
+      runRoots: jail.roots,
       display: jail.displayPath(abs),
       denyWrite,
       ...(readFilter && (call.tool === 'grep' || call.tool === 'glob') ? { readFilter } : {}),
@@ -311,7 +314,7 @@ export class NodeToolRuntime implements ToolRuntime {
   }
 
   #metaOf(prepared: PreparedCall, fallbackPath: string): CallMeta {
-    return this.#meta.take(prepared) ?? { root: path.dirname(fallbackPath), display: fallbackPath, denyWrite: [] };
+    return this.#meta.take(prepared) ?? { root: path.dirname(fallbackPath), runRoots: [], display: fallbackPath, denyWrite: [] };
   }
 
   /** grep and glob must have been prepared here: the Read filter travels in their metadata, so a missing one fails closed. */
@@ -400,7 +403,7 @@ export class NodeToolRuntime implements ToolRuntime {
     const outcome = await atomicWrite(absPath, bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {
       signal,
       identity: m.identity,
-      ...(tx ? { beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs) } : {}),
+      ...(tx ? { beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs, m.runRoots) } : {}),
     });
     tx?.written(absPath, nextHash);
     if (prepared.tool === 'write') return { path: absPath, created: outcome.before === null, diff: prepared.effect.diff };

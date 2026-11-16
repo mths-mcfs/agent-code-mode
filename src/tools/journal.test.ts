@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -175,6 +175,47 @@ describe('crash recovery', () => {
     expect(recovered[0]?.report.restored).toEqual([]);
     expect(recovered[0]?.report.skipped[0]?.reason).toBe('error');
     expect(readFileSync(path.join(outside, 'victim.txt'), 'utf8')).toBe('victim\n');
+  });
+
+  it('restores files in the run\'s additional roots when recovery is given only the session cwd', async () => {
+    const extra = path.join(base, 'extra');
+    mkdirSync(extra);
+    writeFileSync(path.join(extra, 'x'), 'original\n');
+    const withExtra: PolicySnapshot = { ...policy, additionalRoots: [extra] };
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    for (const [p, content] of [['a.txt', 'a1\n'], [path.join(extra, 'x'), 'CHANGED\n']] as const) {
+      const prepared = await rt.prepare({ id: `c${++seq}`, tool: 'write', args: { path: p, content } } satisfies ToolCall, ctx, withExtra);
+      await rt.commit(prepared, signal, tx);
+    }
+    const moved = abandon(tx);
+    const recovered = await recoverStaleJournals(stateDir, [ws]);
+    expect(recovered).toMatchObject([{ kept: false, report: { skipped: [] } }]);
+    expect(readFileSync(path.join(extra, 'x'), 'utf8')).toBe('original\n');
+    expect(read('a.txt')).toBe('a0\n');
+    expect(existsSync(moved)).toBe(false);
+  });
+
+  it('never restores through a run root that became a symbolic link, and keeps that journal', async () => {
+    if (process.platform === 'win32') return;
+    const extra = path.join(base, 'extra');
+    mkdirSync(extra);
+    writeFileSync(path.join(extra, 'x'), 'original\n');
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    const prepared = await rt.prepare({ id: `c${++seq}`, tool: 'write', args: { path: path.join(extra, 'x'), content: 'CHANGED\n' } } satisfies ToolCall, ctx, { ...policy, additionalRoots: [extra] });
+    await rt.commit(prepared, signal, tx);
+    const moved = abandon(tx);
+    // After the crash the root is swapped for a link to a directory holding the same content.
+    writeFileSync(path.join(outside, 'x'), 'CHANGED\n');
+    renameSync(extra, path.join(base, 'extra-old'));
+    symlinkSync(outside, extra);
+    const recovered = await recoverStaleJournals(stateDir, [ws]);
+    expect(recovered).toMatchObject([{ kept: true, report: { restored: [], skipped: [{ path: path.join(extra, 'x'), reason: 'error' }] } }]);
+    expect(readFileSync(path.join(outside, 'x'), 'utf8')).toBe('CHANGED\n');
+    expect(existsSync(moved)).toBe(true);
+    // Kept, not claimed: a later pass sees it again.
+    expect((await recoverStaleJournals(stateDir, [ws])).map((r) => r.kept)).toEqual([true]);
   });
 
   it('skips a malformed record', async () => {

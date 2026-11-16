@@ -31,7 +31,11 @@ export const RunOutputSchema = z.looseObject({
   result: z.unknown().optional(),
   error: z.looseObject({ name: z.string(), message: z.string(), kind: z.string() }).optional(),
   logs: z.array(z.string()).optional(),
-  calls: z.array(z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() })).optional(),
+  // Long call logs are shaped: entries past the cap become a string note, which is dropped here.
+  calls: z
+    .array(z.union([z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() }), z.string()]))
+    .transform((xs) => xs.filter((x) => typeof x !== 'string'))
+    .optional(),
   changedFiles: z.array(z.string()).optional(),
   warnings: z.array(z.string()).optional(),
   rolledBack: z.unknown().optional(),

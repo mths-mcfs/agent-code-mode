@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseToml } from 'smol-toml';
 import { z } from 'zod';
 import { claudeConfigDir } from './hosts/claude/settings.js';
 import { REGISTERED_SERVER_NAME } from './server/runtime.js';
@@ -41,6 +42,8 @@ export interface InstallPlan {
   readonly changes: readonly FileChange[];
   /** Commands the user runs themselves (never run by `install`). */
   readonly commands: readonly string[];
+  /** Why `--write` refuses to apply the plan (it then writes nothing). */
+  readonly refusals: readonly string[];
 }
 
 const RUN_TOOL = `mcp__${REGISTERED_SERVER_NAME}__run`;
@@ -151,16 +154,60 @@ export function codexServerBlock(local: boolean): string {
   ].join('\n');
 }
 
-function hasCodexServer(text: string): boolean {
-  const name = REGISTERED_SERVER_NAME.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
-  return new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*(?:"${name}"|${name})\\s*[\\].]`, 'm').test(text);
+const TomlTableSchema = z.record(z.string(), z.unknown());
+
+function parseTomlTable(text: string): Record<string, unknown> | Error {
+  try {
+    const parsed = TomlTableSchema.safeParse(parseToml(text));
+    return parsed.success ? parsed.data : new Error('not a TOML table');
+  } catch (err) {
+    return err instanceof Error ? err : new Error(String(err));
+  }
 }
+
+/** The server entry the block declares, as a parsed TOML value. */
+function codexServerEntry(local: boolean): unknown {
+  const parsed = parseTomlTable(codexServerBlock(local));
+  return parsed instanceof Error ? undefined : TomlTableSchema.safeParse(parsed['mcp_servers']).data?.[REGISTERED_SERVER_NAME];
+}
+
+/**
+ * How to add the server block to a Codex config. The existing file is read
+ * through a TOML parser, so the table is found however its key is spelled
+ * (`agent-code-mode`, `'agent-code-mode'`, `"agent-code-mode"`, dotted or
+ * inline). The block is only ever appended, so everything already in the file
+ * (comments included) stays byte-identical, and the result is parsed again
+ * before it is offered for writing.
+ */
+function planCodexConfig(before: string | null, file: string, local: boolean): { after?: string; note?: string; refusal?: string } {
+  const current = before === null ? {} : parseTomlTable(before);
+  if (current instanceof Error) return { refusal: `${file} is not valid TOML (${current.message.split('\n')[0] ?? ''}); fix it or add the block by hand` };
+  const servers = TomlTableSchema.safeParse(current['mcp_servers'] ?? {});
+  if (!servers.success) return { refusal: `${file}: mcp_servers is not a table; add the block by hand` };
+  const existing = servers.data[REGISTERED_SERVER_NAME];
+  if (existing !== undefined) {
+    if (JSON.stringify(existing) === JSON.stringify(codexServerEntry(local))) return { note: `${file} already has this configuration.` };
+    return { refusal: `${file} already defines mcp_servers.${REGISTERED_SERVER_NAME} with other settings; --write does not edit an existing table, so compare it with the block above and change it by hand` };
+  }
+  const sep = before === null || before === '' ? '' : before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n';
+  const after = `${before ?? ''}${sep}${codexServerBlock(local)}`;
+  const check = parseTomlTable(after);
+  const added = check instanceof Error ? undefined : TomlTableSchema.safeParse(check['mcp_servers']).data?.[REGISTERED_SERVER_NAME];
+  if (check instanceof Error || JSON.stringify(added) !== JSON.stringify(codexServerEntry(local))) {
+    return {
+      refusal: `appending the block to ${file} would not give a valid configuration (${check instanceof Error ? check.message.split('\n')[0] : 'the table would merge with existing keys'}); add it by hand`,
+    };
+  }
+  return { after };
+}
+
 
 /** Builds what `install` shows and, with `--write`, changes. */
 export async function planInstall(o: InstallOptions): Promise<InstallPlan> {
   const lines: string[] = [];
   const changes: FileChange[] = [];
   const commands: string[] = [];
+  const refusals: string[] = [];
   if (o.host === 'claude') {
     const settingsFile = o.scope === 'user' ? path.join(claudeConfigDir(o.env, o.home), 'settings.json') : path.join(o.cwd, '.claude', 'settings.json');
     const serverArgv = [...cliArgv(o.local), 'serve', '--host', 'claude'];
@@ -190,15 +237,16 @@ export async function planInstall(o: InstallOptions): Promise<InstallPlan> {
     const block = codexServerBlock(o.local);
     const before = await readText(configFile);
     lines.push(`# Add to ${configFile}:`, block);
-    if (before !== null && hasCodexServer(before)) {
-      lines.push(`# ${configFile} already has [mcp_servers.${REGISTERED_SERVER_NAME}]; --write leaves it alone, compare it with the block above by hand.`);
-    } else {
-      const sep = before === null || before === '' ? '' : before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n';
-      changes.push({ file: configFile, before, after: `${before ?? ''}${sep}${block}` });
+    const planned = planCodexConfig(before, configFile, o.local);
+    if (planned.after !== undefined) changes.push({ file: configFile, before, after: planned.after });
+    if (planned.note !== undefined) lines.push(`# ${planned.note}`);
+    if (planned.refusal !== undefined) {
+      refusals.push(planned.refusal);
+      lines.push(`# ${planned.refusal}`);
     }
     if (o.scope === 'project') lines.push('# Codex reads <project>/.codex/config.toml only when the project is trusted.');
   }
-  return { text: `${lines.join('\n')}\n`, changes, commands };
+  return { text: `${lines.join('\n')}\n`, changes, commands, refusals };
 }
 
 /** The diff of every change, for showing before `--write` applies it. */
@@ -207,6 +255,7 @@ export function planDiff(plan: InstallPlan): string {
 }
 
 export async function applyPlan(plan: InstallPlan): Promise<void> {
+  if (plan.refusals.length > 0) throw new Error(`refusing to write: ${plan.refusals.join('; ')}`);
   for (const change of plan.changes) {
     await mkdir(path.dirname(change.file), { recursive: true });
     await writeFile(change.file, change.after, 'utf8');
