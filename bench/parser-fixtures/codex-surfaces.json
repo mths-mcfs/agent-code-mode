@@ -1,5 +1,5 @@
 {
-  "note": "Model-visible tools per Codex arm, from `codex debug prompt-input` (Codex CLI 0.169.0) with the configs the harness writes. No model call.",
+  "note": "Model-visible tools per Codex arm (direct as namespace.name, nested in code-mode exec as exec.name), from `codex debug prompt-input` (Codex CLI 0.169.0) with the configs the harness writes and the agent-code-mode server built. No model call.",
   "A": [
     "functions.exec_command",
     "functions.write_stdin",
@@ -7,49 +7,24 @@
     "functions.list_mcp_resource_templates",
     "functions.read_mcp_resource",
     "functions.request_user_input",
-    "functions.request_user_input_async",
-    "functions.request_plugin_install",
-    "functions.apply_patch",
-    "functions.view_image",
-    "clock.curr_time",
-    "clock.sleep",
-    "collaboration.followup_task",
-    "collaboration.interrupt_agent",
-    "collaboration.list_agents",
-    "collaboration.send_message",
-    "collaboration.spawn_agent",
-    "collaboration.wait_agent",
-    "tool_search"
+    "functions.apply_patch"
   ],
   "B": [
     "functions.exec",
     "functions.wait",
     "functions.request_user_input",
-    "functions.request_user_input_async",
-    "clock.sleep",
-    "collaboration.followup_task",
-    "collaboration.interrupt_agent",
-    "collaboration.list_agents",
-    "collaboration.send_message",
-    "collaboration.spawn_agent",
-    "collaboration.wait_agent"
+    "exec.apply_patch",
+    "exec.exec_command",
+    "exec.list_mcp_resource_templates",
+    "exec.list_mcp_resources",
+    "exec.read_mcp_resource",
+    "exec.write_stdin"
   ],
   "C": [
     "functions.list_mcp_resources",
     "functions.list_mcp_resource_templates",
     "functions.read_mcp_resource",
     "functions.request_user_input",
-    "functions.request_user_input_async",
-    "functions.request_plugin_install",
-    "functions.view_image",
-    "clock.curr_time",
-    "clock.sleep",
-    "collaboration.followup_task",
-    "collaboration.interrupt_agent",
-    "collaboration.list_agents",
-    "collaboration.send_message",
-    "collaboration.spawn_agent",
-    "collaboration.wait_agent",
-    "tool_search"
+    "mcp__agent_code_mode.run"
   ]
 }

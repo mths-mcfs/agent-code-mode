@@ -55,6 +55,8 @@ export const ParsedRunSchema = z.object({
    * logs, as short texts. Null when the log cannot show denials (Codex without its rollout).
    */
   denials: z.array(z.string()).nullable().default(null),
+  /** Claude: agents, plugin sources and auto memory from the init event (isolation proof). Null for Codex. */
+  hostContext: z.object({ agents: z.array(z.string()), plugins: z.array(z.string()), memory: z.boolean() }).nullable().default(null),
   /** Host-reported error, e.g. a Claude result with `is_error`. */
   hostError: z.string().nullable(),
   /** Where the numbers came from: transcript line numbers (1-based) of the source events. */
@@ -123,27 +125,52 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
   return { fallback: false, reasons };
 }
 
-const CLAUDE_NATIVE = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
-const CODEX_NATIVE = ['exec_command', 'write_stdin', 'apply_patch', 'shell', 'local_shell'];
 
-/** Checks that the tools the model could see match the arm (a config error shows up here before any tool call). */
+/** The exact tool set each Claude arm must see in its `system/init` event. */
+export const CLAUDE_ARM_SURFACE: Readonly<Record<'A' | 'B', readonly string[]>> = {
+  A: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
+  B: ['mcp__agent-code-mode__run'],
+};
+/**
+ * Non-file tools every Codex arm must reach, and nothing else: the arms differ only in how files and the
+ * shell are reached (direct tools, code-mode `exec`, agent-code-mode `run`).
+ */
+export const CODEX_COMMON_NON_FILE = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource', 'request_user_input'];
+const CODEX_FILE_SHELL = ['exec_command', 'write_stdin', 'apply_patch'];
+const CODEX_CODE_MODE = ['exec', 'wait'];
+const isRunTool = (t: string): boolean => /^mcp__agent[-_]code[-_]mode(__|\.)run$/.test(t);
+
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  const x = [...new Set(a)].sort();
+  const y = [...new Set(b)].sort();
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
+/**
+ * Checks that the tools the model could see are exactly the arm's surface (a config error or a tool
+ * surface that differs between arms shows up here before any tool call). Codex names come from
+ * `codexToolSurface`: `namespace.name` for direct tools, `exec.name` for tools nested in code mode.
+ */
 export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readonly string[]): string[] {
   const reasons: string[] = [];
-  const base = tools.map((t) => t.slice(t.lastIndexOf('.') + 1));
-  const has = (name: string): boolean => base.includes(name) || tools.includes(name);
   if (host === 'claude') {
-    const run = has('mcp__agent-code-mode__run');
-    const native = CLAUDE_NATIVE.filter(has);
-    if (arm === 'A' && run) reasons.push('native arm sees the run tool');
-    if (arm === 'A' && !has('Bash')) reasons.push('native arm does not see Bash');
-    if (arm === 'B' && !run) reasons.push('agent-code-mode arm does not see the run tool (server not connected?)');
-    if (arm === 'B' && native.length > 0) reasons.push(`agent-code-mode arm sees native tools: ${native.join(', ')}`);
+    const expected = arm === 'B' ? CLAUDE_ARM_SURFACE.B : CLAUDE_ARM_SURFACE.A;
+    if (!sameSet(tools, expected)) reasons.push(`Claude arm ${arm} tools are [${[...tools].sort().join(', ')}], expected exactly [${[...expected].sort().join(', ')}]`);
     return reasons;
   }
-  const native = CODEX_NATIVE.filter(has);
-  const exec = has('exec');
-  if (arm === 'A' && (exec || !has('exec_command'))) reasons.push('native arm is not in direct tool mode');
-  if (arm === 'B' && (!exec || native.length > 0)) reasons.push('Codex code-mode arm is not in code_mode_only');
-  if (arm === 'C' && (exec || native.length > 0)) reasons.push(`agent-code-mode arm sees native or code-mode tools: ${[...native, ...(exec ? ['exec'] : [])].join(', ')}`);
+  const apps = tools.filter((t) => t.includes('codex_apps'));
+  if (apps.length > 0) reasons.push(`Codex account apps are exposed (${apps.length} tools): the run is not isolated`);
+  const nested = tools.filter((t) => t.startsWith('exec.')).map((t) => t.slice('exec.'.length));
+  const direct = tools.filter((t) => !t.startsWith('exec.')).map((t) => (isRunTool(t) ? 'run' : t.slice(t.lastIndexOf('.') + 1)));
+  const reachable = [...direct, ...nested];
+  const nonFile = reachable.filter((t) => !CODEX_FILE_SHELL.includes(t) && !CODEX_CODE_MODE.includes(t) && t !== 'run');
+  if (!sameSet(nonFile, CODEX_COMMON_NON_FILE)) reasons.push(`Codex arm ${arm} non-file tools are [${[...new Set(nonFile)].sort().join(', ')}], expected exactly [${CODEX_COMMON_NON_FILE.join(', ')}]`);
+  const fileDirect = direct.filter((t) => CODEX_FILE_SHELL.includes(t));
+  const codeMode = direct.filter((t) => CODEX_CODE_MODE.includes(t));
+  const run = direct.includes('run');
+  if (arm === 'A' && (!sameSet(fileDirect, CODEX_FILE_SHELL) || codeMode.length > 0 || run)) reasons.push('native arm is not exactly the direct file/shell tools');
+  if (arm === 'B' && (fileDirect.length > 0 || !sameSet(codeMode, CODEX_CODE_MODE) || run || !CODEX_FILE_SHELL.every((t) => nested.includes(t)))) reasons.push('Codex code-mode arm is not exec/wait with the file/shell tools nested');
+  if (arm === 'C' && (fileDirect.length > 0 || codeMode.length > 0 || nested.length > 0)) reasons.push(`agent-code-mode arm sees native or code-mode tools: ${[...fileDirect, ...codeMode].join(', ')}`);
+  if (arm === 'C' && !run) reasons.push('agent-code-mode arm does not see the run tool directly (deferred behind tool_search, or server not configured)');
   return reasons;
 }

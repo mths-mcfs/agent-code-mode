@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { createCodexHome, HOME_MARKER, removeCodexHome, sweepStaleHomes, syncBack } from '../lib/codex-home.ts';
 
 const BENCH = path.join(import.meta.dirname, '..');
@@ -12,6 +14,8 @@ const posix = process.platform !== 'win32';
 const ORIGINAL = JSON.stringify({ token: 'FAKE_AUTH_ONLY', refresh: 'r1' });
 const REFRESHED = JSON.stringify({ token: 'REFRESHED', refresh: 'r2' });
 const OTHER = JSON.stringify({ token: 'OTHER_LOGIN', refresh: 'r9' });
+/** The real arm A surface (functions.* names), so the fake passes the arm-integrity check. */
+const ARM_A_TOOLS = z.object({ A: z.array(z.string()) }).parse(JSON.parse(readFileSync(path.join(BENCH, 'parser-fixtures', 'codex-surfaces.json'), 'utf8'))).A.map((t) => ({ type: 'function', name: t.replace(/^functions\./, '') }));
 
 type ExecMode = 'hang' | 'exit' | 'refresh-hang' | 'refresh-exit' | 'refresh-conflict-exit';
 
@@ -28,7 +32,7 @@ const a = process.argv.slice(2);
 const mode = ${JSON.stringify(mode)};
 if (a[0] === '--version') { console.log('codex-cli 0.169.0'); process.exit(0); }
 if (a[0] === 'debug' && a[1] === 'models') { process.stdout.write(fs.readFileSync(${JSON.stringify(CATALOG)}, 'utf8')); process.exit(0); }
-if (a[0] === 'debug' && a[1] === 'prompt-input') { console.log(JSON.stringify([{ type: 'additional_tools', tools: [{ type: 'function', name: 'exec_command' }] }])); process.exit(0); }
+if (a[0] === 'debug' && a[1] === 'prompt-input') { console.log(JSON.stringify([{ type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: ${JSON.stringify(ARM_A_TOOLS)} }] }])); process.exit(0); }
 if (a[0] !== 'exec') process.exit(2);
 if (mode.startsWith('refresh')) {
   const auth = path.join(process.env.CODEX_HOME, 'auth.json');
@@ -207,6 +211,11 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
     try {
       expect(await readFile(h.realAuth, 'utf8')).toBe(ORIGINAL);
       expect(await findFile(path.join(h.root, 'results'), 'auth.txt')).toBe('auth.json: unchanged\n');
+      // A real (non-dry) Codex run whose tool surface was observed is a valid run.
+      const record = JSON.parse(await findFile(path.join(h.root, 'results'), 'record.json'));
+      expect(record.invalidReasons).toEqual([]);
+      expect(record.valid).toBe(true);
+      expect(record.parsed.availableTools).toContain('functions.exec_command');
     } finally {
       await cleanup(h);
     }
@@ -223,6 +232,26 @@ describe('syncBack rule', () => {
     createCodexHome(home, path.join(root, 'src'));
     return { root, real, home };
   }
+
+  it('applies the same rule to the Claude credentials file in a temp CLAUDE_CONFIG_DIR', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'acm-claude-cfg-'));
+    try {
+      await mkdir(path.join(root, 'user'));
+      const real = path.join(root, 'user', '.credentials.json');
+      await writeFile(real, ORIGINAL, { mode: 0o600 });
+      const cfg = path.join(root, 'cfg');
+      createCodexHome(cfg, path.join(root, 'user'), '.credentials.json');
+      expect(await readFile(path.join(cfg, '.credentials.json'), 'utf8')).toBe(ORIGINAL);
+      // Claude rewrites its config dir freely; only the credentials file is synced back.
+      await writeFile(path.join(cfg, '.credentials.json'), REFRESHED);
+      await writeFile(path.join(cfg, '.claude.json'), '{}');
+      expect(removeCodexHome(cfg)).toBe('written-back');
+      expect(await readFile(real, 'utf8')).toBe(REFRESHED);
+      expect((await readdir(path.join(root, 'user'))).sort()).toEqual(['.credentials.json']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it('copies (never links) with mode 0600', async () => {
     const { root, home } = await setup();

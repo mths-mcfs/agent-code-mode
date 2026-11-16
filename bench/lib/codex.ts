@@ -26,7 +26,19 @@ export interface CodexHomeOptions {
   readonly catalogFile: string | null;
   readonly serverEntry: string;
   readonly nodePath: string;
+  /** The empty MCP server (bench/lib/empty-mcp-server.mjs), configured in arms A and B. */
+  readonly emptyServerEntry: string;
 }
+
+/** Path of the empty MCP server shipped with the bench. */
+export const EMPTY_MCP_SERVER = new URL('./empty-mcp-server.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+
+/**
+ * Non-file features turned off in every Codex arm, so the arms differ only in how files and the shell
+ * are reached (direct tools, code-mode `exec`, or agent-code-mode `run`). `apps` would also expose the
+ * apps connected to the user's ChatGPT account (mail, calendar, drive, repos...): a privacy leak.
+ */
+export const CODEX_FEATURES_OFF = ['apps', 'view_image', 'image_generation', 'goals', 'multi_agent', 'sleep_tool'];
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
@@ -34,39 +46,57 @@ function tomlString(value: string): string {
 
 /** `config.toml` for the temporary CODEX_HOME of one run. */
 export function codexConfigToml(o: CodexHomeOptions): string {
-  const lines = [
+  const top = [
     `model = ${tomlString(o.model)}`,
     `model_reasoning_effort = ${tomlString(o.effort)}`,
     'approval_policy = "never"',
     'sandbox_mode = "workspace-write"',
     'suppress_unstable_features_warning = true',
+    'web_search = "disabled"',
+    ...(o.catalogFile !== null ? [`model_catalog_json = ${tomlString(o.catalogFile)}`] : []),
   ];
-  if (o.catalogFile !== null) lines.push(`model_catalog_json = ${tomlString(o.catalogFile)}`);
-  lines.push('', '[features]', 'hooks = true');
-  if (o.arm === 'B') lines.push('code_mode = true');
+  const features = ['hooks = true', ...CODEX_FEATURES_OFF.map((f) => `${f} = false`)];
+  if (o.arm === 'B') features.push('code_mode = true');
+  if (o.arm === 'C') features.push('shell_tool = false');
+  // Each table is built whole, so no key can land in the wrong table.
+  const tables: [string, string[]][] = [
+    ['features', features],
+    // Multi-agent tools (spawn_agent, followup_task, ...): `features.multi_agent` does not remove them;
+    // `agents.enabled = false` forces MultiAgentVersion::Disabled (core/src/config/mod.rs).
+    ['agents', ['enabled = false']],
+  ];
   if (o.arm === 'C') {
-    lines.push('shell_tool = false');
-    lines.push(
-      '',
-      `[mcp_servers.${CODEX_SERVER_NAME}]`,
-      `command = ${tomlString(o.nodePath)}`,
-      `args = [${[o.serverEntry, 'serve', '--host', 'codex'].map(tomlString).join(', ')}]`,
-      'default_tools_approval_mode = "approve"',
-      '',
-      `[mcp_servers.${CODEX_SERVER_NAME}.env]`,
-      `CODEX_HOME = ${tomlString(o.codexHome)}`,
+    tables.push(
+      [`mcp_servers.${CODEX_SERVER_NAME}`, [`command = ${tomlString(o.nodePath)}`, `args = [${[o.serverEntry, 'serve', '--host', 'codex'].map(tomlString).join(', ')}]`, 'default_tools_approval_mode = "approve"']],
+      [`mcp_servers.${CODEX_SERVER_NAME}.env`, [`CODEX_HOME = ${tomlString(o.codexHome)}`]],
     );
+  } else {
+    // Same MCP resource tools as arm C (Codex adds them whenever any MCP server is configured).
+    tables.push(['mcp_servers.bench-empty', [`command = ${tomlString(o.nodePath)}`, `args = [${tomlString(o.emptyServerEntry)}]`]]);
   }
-  return `${lines.join('\n')}\n`;
+  return `${[...top, ...tables.flatMap(([name, body]) => ['', `[${name}]`, ...body])].join('\n')}\n`;
 }
 
 const CatalogSchema = z.object({ models: z.array(z.object({ slug: z.string() }).passthrough()) }).passthrough();
 
-/** The catalog override for an arm, from the raw `codex debug models` output; null when the arm uses the shipped catalog. */
-export function catalogForArm(arm: ArmId, rawCatalog: string): string | null {
-  if (arm === 'B') return null;
+/**
+ * The catalog override for an arm, from the raw `codex debug models` output. Every arm drops the
+ * model's experimental extra tools (`clock`, `send_user_message_async`) and `supports_search_tool`;
+ * A and C switch to direct tools (B keeps the shipped `code_mode_only`); C also drops apply_patch.
+ */
+export function catalogForArm(arm: ArmId, rawCatalog: string): string {
   const catalog = CatalogSchema.parse(JSON.parse(rawCatalog));
-  const models = catalog.models.map((m) => ({ ...m, tool_mode: 'direct', ...(arm === 'C' ? { apply_patch_tool_type: null } : {}) }));
+  // Arm C also turns off `supports_search_tool`: with it, Codex 0.169 defers MCP tools behind
+  // `tool_search` (core/src/tools/spec_plan.rs, exposure planning), and in direct mode the model calls
+  // that search as a plain function (`tool_search.tool_search_tool`), which the router rejects as an
+  // unsupported call, so `run` was never reachable. Without it, MCP tools are exposed directly.
+  const models = catalog.models.map((m) => ({
+    ...m,
+    experimental_supported_tools: [],
+    supports_search_tool: false,
+    ...(arm === 'B' ? {} : { tool_mode: 'direct' }),
+    ...(arm === 'C' ? { apply_patch_tool_type: null } : {}),
+  }));
   return `${JSON.stringify({ ...catalog, models })}\n`;
 }
 
@@ -319,6 +349,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     toolCalls: calls,
     innerCalls,
     availableTools: null,
+    hostContext: null,
     denials,
     hostError,
     evidence,
@@ -341,5 +372,20 @@ export function codexToolSurface(promptInput: string): string[] {
     }
   };
   for (const item of items) if (item.type === 'additional_tools' && item.tools) walk(item.tools, '');
+  // In code mode the file/shell tools are nested in `exec`, declared in its description as
+  // `declare const tools: { name(...` blocks: listed as `exec.<name>`.
+  for (const item of items) {
+    if (item.type !== 'additional_tools' || !item.tools) continue;
+    const stack = [...item.tools];
+    while (stack.length > 0) {
+      const t = ToolEntry.safeParse(stack.pop());
+      if (!t.success) continue;
+      if (t.data.tools) stack.push(...t.data.tools);
+      const description = z.string().safeParse(t.data['description']);
+      if (t.data.name === 'exec' && description.success) {
+        for (const m of description.data.matchAll(/declare const tools: \{ ([A-Za-z0-9_]+)\(/g)) names.push(`exec.${m[1] ?? ''}`);
+      }
+    }
+  }
   return names;
 }
