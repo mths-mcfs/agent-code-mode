@@ -156,10 +156,16 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       path.join(config.projectRoot, '.mcp.json'),
     ]);
 
+    // The configured writable roots (`sandbox_workspace_write.writable_roots`) are where Codex lets
+    // file edits land besides the cwd, so the tools jail must reach them too (real paths, like the jail's).
+    const additionalRoots =
+      sandboxMode === 'workspace-write' ? unique(config.writableRoots.filter((p) => path.isAbsolute(p)).map((p) => io.realpath(path.resolve(p)))) : [];
+
     return {
       host: 'codex',
       bashContainment,
       protectedPaths,
+      ...(additionalRoots.length > 0 ? { additionalRoots } : {}),
       payload: {
         sandboxMode,
         approvalPolicy: config.approvalPolicy,

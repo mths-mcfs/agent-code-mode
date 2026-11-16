@@ -101,9 +101,10 @@ export function createMcpServer(opts: McpServerOptions): Server {
     if (roots.length === 0) return [];
     roots.forEach((r) => recoveredRoots.add(r));
     const recovered = await recoverStaleJournals(stateDir, roots);
-    return recovered.flatMap(({ id, report }) => [
+    return recovered.flatMap(({ id, report, kept }) => [
       ...(report.restored.length > 0 ? [`an earlier run (${id}) was cut off mid-transaction; restored: ${report.restored.join(', ')}`] : []),
-      ...report.skipped.map((s) => `an earlier run (${id}) was cut off mid-transaction; ${s.path} was not restored (${s.reason})`),
+      ...report.skipped.map((s) => `an earlier run (${id}) was cut off mid-transaction; ${s.path} was not restored (${s.reason}${s.detail ? `: ${s.detail}` : ''})`),
+      ...(kept ? [`the journal of ${id} is kept so a later start can retry the files that could not be restored`] : []),
     ]);
   };
   const runtimes = new Map<HostKind, Runtime>();

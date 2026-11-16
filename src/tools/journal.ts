@@ -52,6 +52,7 @@ const ManifestSchema = z.object({
   pid: z.number().int(),
   host: z.string(),
   startedAt: z.number(),
+  /** Real paths of every root the run was allowed to touch (session cwd, client roots, host additional directories). Recovery restores only inside these. */
   roots: z.array(z.string()),
   /** Directories the transaction created, outermost first. */
   dirs: z.array(z.string()),
@@ -68,6 +69,13 @@ export function journalRoot(stateDir: string): string {
 
 /** Ids of transactions this process still has open; a recovery pass leaves them alone. */
 const openTransactions = new Set<string>();
+
+/**
+ * Which open transaction journaled each file. A transaction may not write a
+ * file another open transaction holds: rolling back two overlapping
+ * snapshots of the same file would restore the wrong original.
+ */
+const fileOwners = new Map<string, string>();
 
 interface LiveEntry {
   readonly entry: Entry;
@@ -138,7 +146,9 @@ export class FileTransaction implements Transaction {
   /**
    * Called by a commit after the stale check and before the write. Records
    * the original on the first write to `absPath` and the hash about to be
-   * written. Throws when the journal is full or closed.
+   * written. `runRoots` are the real roots of the whole run (the root that
+   * holds `absPath` among them): crash recovery restores only inside them.
+   * Throws when the journal is full or closed.
    */
   record(
     absPath: string,
@@ -146,15 +156,23 @@ export class FileTransaction implements Transaction {
     before: { readonly bytes: Buffer; readonly mode: number } | null,
     nextHash: string,
     createdDirs: readonly string[],
+    runRoots: readonly string[] = [],
   ): Promise<void> {
     return this.#serial(async () => {
       if (this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
-      if (!this.#roots.includes(root)) this.#roots.push(root);
+      for (const r of [root, ...runRoots]) if (!this.#roots.includes(r)) this.#roots.push(r);
       const existing = this.#entries.get(absPath);
       if (existing) {
         existing.entry.written.push(nextHash);
         await this.#persist();
         return;
+      }
+      const owner = fileOwners.get(absPath);
+      if (owner !== undefined && owner !== this.id) {
+        throw new ToolError(
+          'tool-error',
+          `${absPath} is being changed by another transactional run that has not finished; the write was refused so both runs can still roll back. Retry after that run ends.`,
+        );
       }
       const size = before?.bytes.length ?? 0;
       if (this.#bytes + size > MAX_JOURNAL_BYTES) {
@@ -171,6 +189,7 @@ export class FileTransaction implements Transaction {
       }
       this.#bytes += size;
       for (const d of createdDirs) if (!this.#dirs.includes(d)) this.#dirs.push(d);
+      fileOwners.set(absPath, this.id);
       this.#entries.set(absPath, {
         entry: {
           path: absPath,
@@ -219,6 +238,7 @@ export class FileTransaction implements Transaction {
       }
       await removeCreatedDirs(this.#dirs, this.#roots);
       await this.#removeRecord();
+      this.#releaseFiles();
       return { restored, skipped };
     });
   }
@@ -228,7 +248,12 @@ export class FileTransaction implements Transaction {
       this.#closed = true;
       openTransactions.delete(this.id);
       await this.#removeRecord();
+      this.#releaseFiles();
     });
+  }
+
+  #releaseFiles(): void {
+    for (const p of this.#entries.keys()) if (fileOwners.get(p) === this.id) fileOwners.delete(p);
   }
 
   async #removeRecord(): Promise<void> {
@@ -293,6 +318,8 @@ function ownerGone(manifest: Manifest, openHere: ReadonlySet<string>, id: string
 export interface RecoveredJournal {
   readonly id: string;
   readonly report: RollbackReport;
+  /** True when some entry could not be restored (reason `error`): the journal is kept for a later pass. */
+  readonly kept: boolean;
 }
 
 async function realOrSelf(p: string): Promise<string> {
@@ -308,18 +335,34 @@ async function readOriginal(dir: string, entry: Entry): Promise<Buffer | null> {
   return fs.readFile(path.join(dir, entry.blob));
 }
 
-async function undoRecord(manifest: Manifest, dir: string, roots: readonly string[]): Promise<RollbackReport> {
+/**
+ * The journal's own roots that still resolve to themselves. A root recorded
+ * as a real path that now resolves elsewhere (replaced by a link, removed) is
+ * dropped, so nothing is restored through it.
+ */
+async function trustedRoots(manifest: Manifest): Promise<string[]> {
+  const out: string[] = [];
+  for (const root of manifest.roots) {
+    if (!path.isAbsolute(root)) continue;
+    try {
+      if ((await fs.realpath(root)) === root) out.push(root);
+    } catch {
+      // Gone: nothing to restore there.
+    }
+  }
+  return out;
+}
+
+async function undoRecord(manifest: Manifest, dir: string): Promise<RollbackReport> {
   const restored: string[] = [];
   const skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[] = [];
+  const roots = await trustedRoots(manifest);
   for (const entry of [...manifest.entries].reverse()) {
     try {
-      // The record is data on disk: each path is checked like a tool argument.
+      // The record is data on disk: each path is checked like a tool argument,
+      // against the roots of the run that wrote it.
       if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
-        skipped.push({ path: entry.path, reason: 'error', detail: 'outside the workspace roots; not touched' });
-        continue;
-      }
-      if (!manifest.roots.some((root) => isInsideDir(root, entry.path))) {
-        skipped.push({ path: entry.path, reason: 'error', detail: 'outside the roots the journal was written for; not touched' });
+        skipped.push({ path: entry.path, reason: 'error', detail: 'outside the roots the journal was written for (or a root no longer resolves to itself); not touched' });
         continue;
       }
       const current = await currentContent(entry.path);
@@ -337,17 +380,19 @@ async function undoRecord(manifest: Manifest, dir: string, roots: readonly strin
       skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
     }
   }
-  // Only directories inside both the given roots and the roots the journal was written for.
-  const dirs = manifest.dirs.filter((d) => manifest.roots.some((root) => isInsideDir(root, d)));
-  await removeCreatedDirs(dirs, roots);
+  await removeCreatedDirs(manifest.dirs, roots);
   return { restored, skipped };
 }
 
 /**
- * Restores every journal left by a server process that is gone and that
- * touched one of `roots` (newest first, so two cut-off runs that changed the
- * same file unwind in order). Files are restored only when they still hold
- * what that run wrote; anything else is reported in `skipped`. Never throws.
+ * Restores every journal left by a server process that is gone and whose run
+ * shared a root with `roots` (newest first, so two cut-off runs that changed
+ * the same file unwind in order). Each journal is restored inside the roots
+ * of its own run, recorded in it, never through a root that now resolves
+ * elsewhere. Files are restored only when they still hold what that run
+ * wrote; anything else is reported in `skipped`. A journal with an entry that
+ * could not be restored (reason `error`) is kept for a later pass and marked
+ * `kept`. Never throws.
  */
 export async function recoverStaleJournals(stateDir: string, roots: readonly string[]): Promise<RecoveredJournal[]> {
   const base = journalRoot(stateDir);
@@ -386,9 +431,11 @@ export async function recoverStaleJournals(stateDir: string, roots: readonly str
           continue;
         }
       }
-      const report = await undoRecord(manifest, claimed, realRoots);
-      await fs.rm(claimed, { recursive: true, force: true });
-      out.push({ id: record.id, report });
+      const report = await undoRecord(manifest, claimed);
+      const kept = report.skipped.some((s) => s.reason === 'error');
+      if (kept) await fs.rename(claimed, path.join(base, record.id));
+      else await fs.rm(claimed, { recursive: true, force: true });
+      out.push({ id: record.id, report, kept });
     } catch {
       // One bad record must not stop the others.
     }

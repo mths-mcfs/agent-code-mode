@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ERROR_CAP_CHARS, SUCCESS_CAP_CHARS } from '../../src/core/output.js';
@@ -48,6 +48,34 @@ describe('transactions roll back after a denied call', () => {
     const out = await server.run(`await write({ path: 'a.txt', content: 'changed' }); await write({ path: '.mcp.json', content: '{}' });`, { transaction: true });
     expect(out.ok).toBe(false);
     expect(snapshot(lab.ws)).toEqual(before);
+  });
+});
+
+describe('overlapping transactional runs on the same workspace', () => {
+  it('a second transaction may not write a file the first one journaled, so both roll back to the original', async () => {
+    const { lab, server } = await start({ 'x': 'original', 'gateA': 'wait', 'gateB': 'wait' });
+    const wait = (gate: string): string => `while ((await read({ path: '${gate}' })).content === 'wait') {}`;
+    const a = server.run(`await write({ path: 'x', content: 'A' }); await write({ path: 'readyA', content: 'y' }); ${wait('gateA')}; throw new Error('abort A');`, { transaction: true });
+    const ready = async (f: string): Promise<void> => {
+      for (let i = 0; i < 400 && !existsSync(path.join(lab.ws, f)); i++) await sleep(25);
+    };
+    await ready('readyA');
+    const b = server.run(
+      `const w = await write({ path: 'x', content: 'B' }).then(() => 'written', (e) => e.message); await write({ path: 'readyB', content: w }); ${wait('gateB')}; throw new Error('abort B');`,
+      { transaction: true },
+    );
+    await ready('readyB');
+    expect(readFileSync(path.join(lab.ws, 'readyB'), 'utf8')).toMatch(/another transactional run/);
+    writeFileSync(path.join(lab.ws, 'gateA'), 'go');
+    expect((await a).ok).toBe(false);
+    writeFileSync(path.join(lab.ws, 'gateB'), 'go');
+    expect((await b).ok).toBe(false);
+    expect(readFileSync(path.join(lab.ws, 'x'), 'utf8')).toBe('original');
+    // Once the first run ended, the file is free again.
+    const later = await server.run(`await write({ path: 'x', content: 'C' }); throw new Error('abort C');`, { transaction: true });
+    expect(later.ok).toBe(false);
+    expect(readFileSync(path.join(lab.ws, 'x'), 'utf8')).toBe('original');
+    expect(existsSync(path.join(lab.ws, 'readyA'))).toBe(false);
   });
 });
 

@@ -61,8 +61,11 @@ export async function main(argv: readonly string[]): Promise<number> {
       }
       // Undo what runs of a crashed server left in this workspace before serving.
       const recovered = await recoverStaleJournals(stateDirPath(), [process.cwd()]);
-      for (const { id, report } of recovered) {
-        process.stderr.write(`agent-code-mode: recovered interrupted run ${id}: ${report.restored.length} file(s) restored, ${report.skipped.length} skipped\n`);
+      for (const { id, report, kept } of recovered) {
+        process.stderr.write(
+          `agent-code-mode: recovered interrupted run ${id}: ${report.restored.length} file(s) restored, ${report.skipped.length} skipped${kept ? '; its journal is kept because some files could not be restored' : ''}\n`,
+        );
+        for (const s of report.skipped) process.stderr.write(`agent-code-mode:   not restored: ${s.path} (${s.reason}${s.detail ? `: ${s.detail}` : ''})\n`);
       }
       const server = createMcpServer({ version: readVersion(), ...(host ? { host } : {}) });
       await server.connect(new StdioServerTransport());
@@ -85,6 +88,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       if (!opts.write) {
         if (plan.changes.length > 0) process.stdout.write(`\n# Run again with --write to apply the file changes above.\n`);
         return 0;
+      }
+      if (plan.refusals.length > 0) {
+        process.stderr.write(`agent-code-mode install: nothing written:\n${plan.refusals.map((r) => `  ${r}`).join('\n')}\n`);
+        return 1;
       }
       const diff = planDiff(plan);
       if (diff === '') {

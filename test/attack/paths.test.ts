@@ -1,4 +1,4 @@
-import { symlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { callAt, claudeServer, codexServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
@@ -141,5 +141,34 @@ describe('grep and glob never return a file the Read rules deny', () => {
     const out = await server.run(script(lab, `await read({ path: '.env' })`));
     expect(out.result).toBe('PermissionDenied:denied');
     expect(callAt(out, 1)?.reason).toMatch(/^rule:/);
+  });
+});
+
+describe('Codex writable roots reach the tools jail', () => {
+  let lab: Lab;
+  let server: Server;
+  let extra: string;
+  beforeAll(async () => {
+    lab = makeLab();
+    extra = path.join(lab.base, 'extra');
+    mkdirSync(extra);
+    server = await codexServer(lab, {
+      sandboxMode: 'workspace-write',
+      extraToml: `[sandbox_workspace_write]\nwritable_roots = [${JSON.stringify(extra)}]\n`,
+    });
+  });
+  afterAll(async () => {
+    await server.close();
+    lab.cleanup();
+  });
+
+  it('writes into a configured writable root, and still refuses a directory outside every root', async () => {
+    const ok = await server.run(`return (await write({ path: ${JSON.stringify(path.join(extra, 'x.txt'))}, content: 'allowed\\n' })).created`);
+    expect(ok.result).toBe(true);
+    expect(readFileSync(path.join(extra, 'x.txt'), 'utf8')).toBe('allowed\n');
+    const before = snapshot(lab.outside);
+    const out = await server.run(script(lab, `await write({ path: OUTSIDE + '/new.txt', content: 'x\\n' })`));
+    expect(out.result).toBe('ToolError:outside-workspace');
+    expect(snapshot(lab.outside)).toEqual(before);
   });
 });
