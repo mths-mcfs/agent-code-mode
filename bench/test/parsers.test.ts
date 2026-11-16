@@ -45,6 +45,24 @@ describe('Claude transcript parser', () => {
     expect(p.innerCalls).toEqual({ total: 3, byTool: { read: 2, grep: 1 } });
   });
 
+  it('collects denied calls from hook errors and the run call log', () => {
+    const lines = [
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: {} }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'e1', is_error: true, content: 'PreToolUse:Edit hook error: src/handlers/reports.js is protected by the repository policy; this change is denied.' }] } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e2', name: 'Read', input: {} }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'e2', is_error: true, content: 'File does not exist.' }] } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'r1', name: 'mcp__agent-code-mode__run', input: {} }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: [{ type: 'text', text: JSON.stringify({ ok: false, calls: [{ id: '1', tool: 'edit', summary: 'edit src/handlers/reports.js', decision: 'denied', reason: 'blocked by hook', durationMs: 1 }] }) }] }] } },
+    ].map((l) => JSON.stringify(l));
+    const result = read('claude-B.jsonl').split('\n').filter((l) => l.includes('"type": "result"') || l.includes('"type":"result"'));
+    const p = parseClaudeTranscript([...lines, ...result].join('\n'));
+    expect(p.denials).toEqual([
+      'PreToolUse:Edit hook error: src/handlers/reports.js is protected by the repository policy; this change is denied.',
+      'edit edit src/handlers/reports.js: blocked by hook',
+    ]);
+    expect(parseClaudeTranscript(read('claude-A.jsonl')).denials).toEqual([]);
+  });
+
   it('rejects a transcript without a result event', () => {
     expect(() => parseClaudeTranscript(read('claude-A.jsonl').split('\n').slice(0, 3).join('\n'))).toThrow(/no result event/);
   });
@@ -129,6 +147,23 @@ describe('Codex transcript parser', () => {
     expect(classifyCodexTool('run', 'mcp__agent-code-mode__')).toBe('run');
     expect(classifyCodexTool('mcp__unrelated_agent_code_mode__overrun')).toBe('other');
     expect(classifyCodexTool('mcp__agent-code-mode__rerun')).toBe('other');
+  });
+
+  it('keeps hook denials from the rollout and reports them', () => {
+    const rollout = [
+      JSON.stringify({ type: 'response_item', payload: { type: 'custom_tool_call', name: 'apply_patch', input: '*** Update File: src/handlers/reports.js' } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'c', output: 'Command blocked by PreToolUse hook: src/handlers/reports.js is protected by the repository policy; this change is denied.. Command: *** Begin Patch' } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'function_call_output', call_id: 'd', output: 'Process exited with code 0\nOutput: ok' } }),
+      JSON.stringify({ type: 'token_usage_record', payload: { usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3 } } }),
+    ].join('\n');
+    const requests = extractCodexRequests(rollout);
+    expect(requests.trim().split('\n').map((l) => JSON.parse(l).kind)).toEqual(['call', 'denial', 'request']);
+    const json = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3 } });
+    const p = parseCodexTranscript(json, requests);
+    expect(p.denials).toHaveLength(1);
+    expect(p.denials?.[0]).toContain('src/handlers/reports.js is protected');
+    expect(parseCodexTranscript(json, null).denials).toBeNull();
+    expect(parseCodexTranscript(read('codex-A.jsonl'), read('codex-A.requests.jsonl')).denials).toEqual([]);
   });
 
   it('keeps only usage and call names from a rollout', () => {

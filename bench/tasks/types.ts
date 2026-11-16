@@ -11,6 +11,11 @@ export interface VerifyContext {
   readonly facts: FixtureFacts;
   /** The tree as committed before the agent started (fixture plus task setup). */
   readonly initial: Tree;
+  /**
+   * Denied tool calls from the host's log and the agent-code-mode call log. Undefined or null when
+   * the log cannot show denials (dry runs, Codex without its rollout).
+   */
+  readonly denials?: readonly string[] | null;
 }
 
 export interface VerifyResult {

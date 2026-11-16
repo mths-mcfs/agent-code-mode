@@ -27,10 +27,26 @@ export async function readWorkspaceFile(workspace: string, rel: string): Promise
   }
 }
 
-/** The text after the last `ANSWER:` marker, or the whole answer when there is none. */
-export function answerSection(answer: string): string {
-  const i = answer.lastIndexOf('ANSWER:');
-  return i === -1 ? answer : answer.slice(i + 'ANSWER:'.length);
+/**
+ * The answer block the prompts ask for: the text after the last line that starts with `ANSWER:`
+ * (leading spaces allowed), or undefined when there is no such line. With `lastLine`, the `ANSWER:`
+ * line must also be the last non-empty line and only its own text is returned ("End your reply with
+ * a line `ANSWER: <value>`").
+ */
+export function answerBlock(answer: string, opts: { readonly lastLine: boolean }): string | undefined {
+  const lines = answer.replace(/\r\n/g, '\n').split('\n');
+  let at = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*ANSWER:/.test(lines[i] ?? '')) {
+      at = i;
+      break;
+    }
+  }
+  if (at === -1) return undefined;
+  const first = (lines[at] ?? '').replace(/^\s*ANSWER:/, '');
+  const rest = lines.slice(at + 1);
+  if (opts.lastLine) return rest.every((l) => l.trim() === '') ? first : undefined;
+  return [first, ...rest].join('\n');
 }
 
 /** Removes whitespace, backticks and asterisks, so formatting does not matter. */

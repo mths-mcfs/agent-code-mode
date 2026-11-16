@@ -90,6 +90,13 @@ const RolloutLine = z.object({ type: z.string(), payload: z.unknown() }).passthr
 const TokenRecord = z.object({
   usage: z.object({ input_tokens: z.number(), cached_input_tokens: z.number(), output_tokens: z.number() }).passthrough(),
 }).passthrough();
+const OutputItem = z.object({
+  type: z.enum(['function_call_output', 'custom_tool_call_output']),
+  output: z.union([z.string(), z.array(z.object({ text: z.string().optional() }).passthrough())]),
+}).passthrough();
+/** Tool output of a blocked call: a PreToolUse hook or policy denial. */
+const CODEX_DENIAL = /blocked by PreToolUse hook|denied|forbidden by|not allowed/i;
+
 const CallItem = z.object({
   type: z.enum(['function_call', 'custom_tool_call']),
   name: z.string(),
@@ -101,7 +108,7 @@ const CallItem = z.object({
 /**
  * Keeps only what the bench needs from a Codex rollout file (which also holds account ids and the
  * full prompt): one `request` line per model response with its usage, one `call` line per tool call
- * the model made, in order.
+ * the model made, and one `denial` line per tool output that reports a blocked call, in order.
  */
 export function extractCodexRequests(rollout: string): string {
   const out: string[] = [];
@@ -123,6 +130,11 @@ export function extractCodexRequests(rollout: string): string {
       if (call.success) {
         const args = (call.data.arguments ?? call.data.input ?? '').slice(0, 4000);
         out.push(JSON.stringify({ kind: 'call', type: call.data.type, name: call.data.name, ...(call.data.namespace ? { namespace: call.data.namespace } : {}), args }));
+      }
+      const output = OutputItem.safeParse(entry.data.payload);
+      if (output.success) {
+        const text = typeof output.data.output === 'string' ? output.data.output : output.data.output.map((o) => o.text ?? '').join('');
+        if (CODEX_DENIAL.test(text)) out.push(JSON.stringify({ kind: 'denial', text: text.slice(0, 500) }));
       }
     }
   }
@@ -147,7 +159,10 @@ const McpItem = z.object({ type: z.literal('mcp_tool_call'), server: z.string(),
 const Failure = z.object({ type: z.enum(['turn.failed', 'error']), error: z.object({ message: z.string() }).passthrough().optional(), message: z.string().optional() }).passthrough();
 const RequestLine = z.object({ kind: z.literal('request'), usage: TokenRecord.shape.usage });
 const CallLine = z.object({ kind: z.literal('call'), type: z.string(), name: z.string(), namespace: z.string().optional() });
-const RunResultText = z.object({ calls: z.array(z.object({ tool: z.string() }).passthrough()) }).passthrough();
+const DenialLine = z.object({ kind: z.literal('denial'), text: z.string() });
+const RunResultText = z.object({
+  calls: z.array(z.object({ tool: z.string(), decision: z.string().optional(), summary: z.string().optional(), reason: z.string().optional() }).passthrough()),
+}).passthrough();
 const McpResult = z.object({ content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()) }).passthrough();
 
 export function classifyCodexTool(name: string, namespace?: string): 'native' | 'run' | 'codeMode' | 'other' {
@@ -188,6 +203,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
   const runInner: Record<string, number> = {};
   let runInnerTotal = 0;
   let runInnerSeen = false;
+  const runDenials: string[] = [];
   const jsonCalls: ToolCalls = { native: 0, run: 0, codeMode: 0, other: 0, byName: {} };
 
   json.split('\n').forEach((line, i) => {
@@ -235,6 +251,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
           for (const c of log.data.calls) {
             runInnerTotal += 1;
             runInner[c.tool] = (runInner[c.tool] ?? 0) + 1;
+            if (c.decision === 'denied') runDenials.push(`${c.tool} ${c.summary ?? ''}: ${c.reason ?? 'denied'}`.slice(0, 500));
           }
         }
       }
@@ -247,15 +264,22 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
 
   let turns: number | null = null;
   let calls = jsonCalls;
+  let denials: string[] | null = runInnerSeen ? [...runDenials] : null;
   if (requests !== null && requests.trim() !== '') {
     turns = 0;
     calls = { native: 0, run: 0, codeMode: 0, other: 0, byName: {} };
+    denials = [...runDenials];
     requests.split('\n').forEach((line, i) => {
       if (line.trim() === '') return;
       const value = parseJson(line);
       if (RequestLine.safeParse(value).success) {
         turns = (turns ?? 0) + 1;
         evidence['requests']?.push(i + 1);
+        return;
+      }
+      const denial = DenialLine.safeParse(value);
+      if (denial.success) {
+        denials?.push(denial.data.text);
         return;
       }
       const call = CallLine.safeParse(value);
@@ -295,6 +319,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     toolCalls: calls,
     innerCalls,
     availableTools: null,
+    denials,
     hostError,
     evidence,
   };
