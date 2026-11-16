@@ -38,6 +38,23 @@ function rng(seed: number): () => number {
   };
 }
 
+/** Pieces for tilde words: quotes (empty too), backslashes, assignment heads, `+=`, `:` and `~` in every position. */
+const TILDE_PIECES = [
+  "''", '""', "'a'", '"a"', '\\a', '\\~', '\\=', '\\:', '\\+', '\\/', 'a', 'A_1', '_', '1', '=', '+=', '+', ':', '~', '/', 'x', '[1]', '[', ']',
+  "'~'", '"~"', "'='", '"="', "':'", '"/"', '~+', '-', 'a=', 'a+=', 'a=~', 'a+=~', ':~', '=~',
+];
+
+/** Random words built from `TILDE_PIECES`, plus every piece alone. */
+function tildeWords(count: number): string[] {
+  const r = rng(SEED + 1);
+  const words: string[] = [...TILDE_PIECES];
+  for (let i = 0; i < count; i++) {
+    const n = 1 + Math.floor(r() * 5);
+    words.push(Array.from({ length: n }, () => TILDE_PIECES[Math.floor(r() * TILDE_PIECES.length)] ?? '').join(''));
+  }
+  return words;
+}
+
 /** The words bash passes to `X` for each line of `lines`, run in `cwd`. */
 function bashWords(lines: readonly string[], cwd: string): (string[] | undefined)[] {
   const script = ['X() { printf "\\2"; for a in "$@"; do printf "%s\\0" "$a"; done; printf "\\1"; }', ...lines.map((l) => `${l}\nprintf "\\3"`)].join('\n');
@@ -92,6 +109,39 @@ describe.runIf(posix)('BashAnalyzer word values against bash', () => {
     }
     expect(exact).toBeGreaterThan(150);
     expect(refused).toBeGreaterThan(50);
+  });
+
+  it('expands `~` exactly where bash does: quotes, empty quotes, backslashes, `=`, `+=` and `:`', () => {
+    const words = tildeWords(3000);
+    const lines = words.map((w) => `X ${w}`);
+    const fromBash = bashWords(lines, dir);
+    let exact = 0;
+    let expanded = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? '';
+      const analysis = BashAnalyzer.analyze(line, { home: HOME });
+      if (analysis.uncertain.length > 0) continue;
+      const cmd = analysis.commands.find((c) => c.words[0]?.value === 'X');
+      const got = fromBash[i];
+      if (!cmd) continue;
+      const args = cmd.words.slice(1);
+      if (args.some((w) => w.value === undefined || w.glob)) {
+        expect(cmd.dynamic || cmd.globbed, line).toBe(true);
+        continue;
+      }
+      expect(got, line).toEqual(args.map((w) => w.value));
+      exact++;
+      if (got?.some((w) => w.includes(HOME))) expanded++;
+    }
+    expect(exact).toBeGreaterThan(1500);
+    expect(expanded).toBeGreaterThan(40);
+  });
+
+  it('keeps `~` literal after empty quotes and expands it after `+=`', () => {
+    const values = (line: string): (string | undefined)[] | undefined => BashAnalyzer.analyze(line, { home: '/h' }).commands[0]?.words.map((w) => w.value);
+    expect(values("cat ''a=~/s \"\"~/s a=''~/s ~''/s a=x:''~/s a=~\"\"")).toEqual(['cat', 'a=~/s', '~/s', 'a=~/s', '~/s', 'a=x:~/s', 'a=~']);
+    expect(values('printf %s a+=~ a+=x:~/y _=~ ~:x')).toEqual(['printf', '%s', 'a+=/h', 'a+=x:/h/y', '_=/h', '/h:x']);
+    expect(BashAnalyzer.analyze('cat a[1]=~/s', { home: '/h' }).uncertain.length).toBeGreaterThan(0);
   });
 
   it('reports brace expansion, `~user` and `shopt` as uncertain, and expands `~` to the home', () => {

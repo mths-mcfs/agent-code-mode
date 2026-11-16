@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { claudeServer, codexServer, makeLab, posix, type Lab, type Server } from './harness.js';
 
 /**
@@ -102,6 +102,63 @@ describe.runIf(posix)('Codex rules see the words bash runs', () => {
       const text = await attempt(server, command);
       expect(text, command).toMatch(/^PermissionDenied:denied:/);
       expect(existsSync(victim), command).toBe(true);
+    }
+  });
+});
+
+/**
+ * Tilde words a naive analysis expands where bash does not (after empty
+ * quotes) or keeps literal where bash expands (`+=`). Bash runs with the
+ * server process's `HOME`, which these tests point at the lab home the
+ * adapters expand `~` to (in production both are the user's home).
+ */
+function useLabHome(l: Lab): string {
+  const saved = process.env['HOME'];
+  process.env['HOME'] = l.home;
+  onTestFinished(() => {
+    if (saved === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = saved;
+  });
+  return l.home;
+}
+
+describe.runIf(posix)('tilde expansion follows bash, not the text (Claude)', () => {
+  it('denies a Read deny rule hidden behind empty quotes before an assignment-like word', async () => {
+    lab = makeLab({ 'a=~/secret.txt': 'DENIED_SECRET\n' });
+    useLabHome(lab);
+    server = await claudeServer(lab, { permissions: { allow: ['Bash', 'Read'], deny: ['Read(./a=~/secret.txt)'] } });
+    for (const command of ["cat 'a=~/secret.txt'", "cat ''a=~/secret.txt", 'cat ""a=~/secret.txt', "cat a''=~/secret.txt", 'cat a=""~/secret.txt', 'cat a=~""/secret.txt']) {
+      const text = await attempt(server, command);
+      expect(text, command).not.toContain('DENIED_SECRET');
+      expect(text, command).toMatch(/^PermissionDenied:denied:denied by deny rule/);
+    }
+  });
+
+  it('denies a Bash deny rule on the expanded `+=` word', async () => {
+    lab = makeLab();
+    const home = useLabHome(lab);
+    server = await claudeServer(lab, { permissions: { allow: ['Bash'], deny: [`Bash(printf %s a+=${home})`] } });
+    for (const command of [`printf %s a+=${home}`, 'printf %s a+=~']) {
+      const text = await attempt(server, command);
+      expect(text, command).not.toMatch(/^RAN:/);
+      expect(text, command).toMatch(/^PermissionDenied:/);
+    }
+  });
+});
+
+describe.runIf(posix)('tilde expansion follows bash, not the text (Codex)', () => {
+  it('denies a forbidden argv written with `+=~`, `declare`/`export` assignments and subscripts', async () => {
+    lab = makeLab();
+    const home = useLabHome(lab);
+    server = await codexServer(lab, {
+      rules: [`printf %s a+=${home}`, `export a+=${home}`, `declare a+=${home}:x`, `declare a[1]=${home}`]
+        .map((argv) => `prefix_rule(pattern = ${JSON.stringify(argv.split(' '))}, decision = "forbidden")\n`)
+        .join(''),
+    });
+    for (const command of [`printf %s ${JSON.stringify(`a+=${home}`)}`, 'printf %s a+=~', 'export a+=~', 'declare a+=~:x', 'declare a[1]=~']) {
+      const text = await attempt(server, command);
+      expect(text, command).not.toMatch(/^RAN:/);
+      expect(text, command).toMatch(/^PermissionDenied:denied:/);
     }
   });
 });

@@ -224,7 +224,11 @@ interface Ctx {
   readonly depth: number;
 }
 
-/** One character of a static word and whether quoting (or a backslash) made it literal. */
+/**
+ * One character of a static word and whether quoting (or a backslash) made it
+ * literal. An empty `''` or `""` leaves a zero-width quoted marker (`c: ''`):
+ * it adds no text but still stops a tilde-prefix or an assignment name.
+ */
 interface WordChar {
   readonly c: string;
   readonly quoted: boolean;
@@ -239,6 +243,7 @@ function wordChars(parts: readonly WordPart[]): { chars: WordChar[]; static: boo
   const chars: WordChar[] = [];
   let isStatic = true;
   const push = (text: string, quoted: boolean): void => {
+    if (text === '' && quoted) chars.push({ c: '', quoted });
     for (const c of text) chars.push({ c, quoted });
   };
   for (const part of parts) {
@@ -295,38 +300,64 @@ function hasBraceExpansion(chars: readonly WordChar[]): boolean {
   return false;
 }
 
-const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*=/;
-
 /**
- * Applies bash's tilde expansion to a static word: a leading unquoted `~`,
- * and in a word that looks like an assignment (`a=~/x`, `PATH=a:~/b`) a `~`
- * after the `=` or an unquoted `:`. `~` and `~/...` become `home`; any other
- * tilde prefix (`~user`, `~+`, `~-`, `~1`) is reported as unknown.
+ * Where bash looks for a tilde-prefix in a word (bash `general.c`
+ * `assignment` and `subst.c` tilde handling, outside POSIX mode):
+ * - at the start of the word, when its first character is an unquoted `~`
+ *   (an empty `''` or `""` in front makes it quoted);
+ * - in a word that is an assignment as written, `NAME=` or `NAME+=` with
+ *   every character unquoted, right after that `=` and after each unquoted
+ *   `:` of the value. `declare`, `export`, `local` and plain arguments follow
+ *   the same rule.
+ * A subscripted assignment (`a[1]=~`) is reported as unknown: bash parses the
+ * subscript with its own rules.
  */
-function expandTilde(chars: readonly WordChar[], home: string | undefined): { value: string } | { unknown: string } | undefined {
+function tildeStarts(chars: readonly WordChar[]): { starts: number[]; assignment: boolean } | 'unknown' {
   const starts: number[] = [];
   if (chars[0]?.c === '~' && !chars[0].quoted) starts.push(0);
-  const unquotedHead = chars.slice(0, chars.findIndex((c) => c.c === '=') + 1);
-  const assignment = unquotedHead.length > 0 && unquotedHead.every((c) => !c.quoted) && ASSIGNMENT_LIKE.test(unquotedHead.map((c) => c.c).join(''));
-  if (assignment) {
-    for (let i = unquotedHead.length - 1; i < chars.length; i++) {
-      const ch = chars[i];
-      if (ch && !ch.quoted && (ch.c === '=' ? i === unquotedHead.length - 1 : ch.c === ':') && chars[i + 1]?.c === '~' && chars[i + 1]?.quoted === false) starts.push(i + 1);
-    }
+  const unquoted = (i: number, test: (c: string) => boolean): boolean => {
+    const ch = chars[i];
+    return ch !== undefined && !ch.quoted && test(ch.c);
+  };
+  let i = 0;
+  if (!unquoted(0, (c) => /^[A-Za-z_]$/.test(c))) return { starts, assignment: false };
+  while (unquoted(i + 1, (c) => /^[A-Za-z0-9_]$/.test(c))) i++;
+  i++;
+  if (unquoted(i, (c) => c === '[')) return chars.some((ch) => ch.c === '~') ? 'unknown' : { starts, assignment: false };
+  if (unquoted(i, (c) => c === '+')) i++;
+  if (!unquoted(i, (c) => c === '=')) return { starts, assignment: false };
+  for (let j = i; j < chars.length; j++) {
+    if ((j === i || unquoted(j, (c) => c === ':')) && unquoted(j + 1, (c) => c === '~')) starts.push(j + 1);
   }
-  if (starts.length === 0) return undefined;
+  return { starts, assignment: true };
+}
+
+/**
+ * Applies bash's tilde expansion to a static word (see `tildeStarts`). Bash
+ * reads the tilde word up to the next unquoted `/` (in an assignment, also
+ * `:`); when any of its characters is quoted (`~''`, `~"x"`, `~:\x`) it stays
+ * as written. The user name inside it ends at a `:` (`~:x` is the home and
+ * `:x`). An empty name becomes `home`; any other (`~user`, `~+`, `~-`, `~1`)
+ * is reported as unknown.
+ */
+function expandTilde(chars: readonly WordChar[], home: string | undefined): { value: string } | { unknown: string } | undefined {
+  const found = tildeStarts(chars);
+  if (found === 'unknown') return { unknown: 'in a subscripted assignment' };
+  if (found.starts.length === 0) return undefined;
   let out = '';
   let from = 0;
-  for (const at of starts) {
+  for (const at of found.starts) {
     let end = at + 1;
     while (end < chars.length) {
       const ch = chars[end];
-      if (!ch || (!ch.quoted && (ch.c === '/' || (assignment && ch.c === ':')))) break;
+      if (!ch || (!ch.quoted && (ch.c === '/' || (found.assignment && ch.c === ':')))) break;
       end++;
     }
-    const prefix = chars.slice(at + 1, end);
-    if (prefix.some((c) => c.quoted)) continue; // a quoted tilde-prefix is not expanded
-    if (prefix.length > 0) return { unknown: `~${prefix.map((c) => c.c).join('')}` };
+    const tildeWord = chars.slice(at + 1, end);
+    if (tildeWord.some((c) => c.quoted)) continue; // a quoted tilde word is not expanded
+    const colon = tildeWord.findIndex((c) => c.c === ':');
+    const name = colon === -1 ? tildeWord : tildeWord.slice(0, colon);
+    if (name.length > 0) return { unknown: `~${name.map((c) => c.c).join('')}` };
     if (home === undefined) return { unknown: '~' };
     out += chars.slice(from, at).map((c) => c.c).join('') + home;
     from = at + 1;

@@ -47,12 +47,17 @@ interface Word {
   dynamic: boolean;
   /** Any part of it was quoted. */
   quoted: boolean;
-  /** Each character of `text` and whether quoting made it literal (substitutions count as quoted). */
+  /**
+   * Each character of `text` and whether quoting made it literal (substitutions
+   * count as quoted). An empty `''` or `""` leaves a zero-width quoted marker
+   * (`c: ''`): it adds no text but still stops a tilde or an assignment name.
+   */
   chars: { c: string; quoted: boolean }[];
 }
 
 function add(word: Word, text: string, quoted: boolean): void {
   word.text += text;
+  if (text === '' && quoted) word.chars.push({ c: '', quoted });
   for (const c of text) word.chars.push({ c, quoted });
 }
 
@@ -77,12 +82,35 @@ function hasBraceExpansion(chars: readonly { c: string; quoted: boolean }[]): bo
   return false;
 }
 
-/** Whether bash would tilde-expand part of the word: a leading `~`, or `~` after `=`/`:` in an assignment-like word. */
+/**
+ * Whether bash would tilde-expand part of the word (bash `general.c`
+ * `assignment` and `subst.c` tilde handling, outside POSIX mode):
+ * - a leading unquoted `~` (an empty `''` or `""` in front makes it quoted);
+ * - in a word that is an assignment as written, `NAME=` or `NAME+=` with
+ *   every character unquoted, a `~` right after that `=` or after an
+ *   unquoted `:` of the value (also for `declare`, `export` and `local`);
+ * - any `~` in a subscripted assignment (`a[1]=~`), whose subscript bash
+ *   parses with its own rules.
+ * Whether the tilde-prefix is then quoted (`~''`) does not matter here: the
+ * word is only treated as inexact, never resolved.
+ */
 function hasTilde(chars: readonly { c: string; quoted: boolean }[]): boolean {
-  if (chars[0]?.c === '~' && !chars[0].quoted) return true;
-  const eq = chars.findIndex((c) => c.c === '=');
-  if (eq <= 0 || chars.slice(0, eq + 1).some((c) => c.quoted) || !/^[A-Za-z_][A-Za-z0-9_]*=$/.test(chars.slice(0, eq + 1).map((c) => c.c).join(''))) return false;
-  return chars.some((c, i) => i > eq && c.c === '~' && !c.quoted && (i === eq + 1 || (chars[i - 1]?.c === ':' && chars[i - 1]?.quoted === false)));
+  const unquoted = (i: number, test: (c: string) => boolean): boolean => {
+    const ch = chars[i];
+    return ch !== undefined && !ch.quoted && test(ch.c);
+  };
+  if (unquoted(0, (c) => c === '~')) return true;
+  if (!unquoted(0, (c) => /^[A-Za-z_]$/.test(c))) return false;
+  let i = 0;
+  while (unquoted(i + 1, (c) => /^[A-Za-z0-9_]$/.test(c))) i++;
+  i++;
+  if (unquoted(i, (c) => c === '[')) return chars.some((ch) => ch.c === '~');
+  if (unquoted(i, (c) => c === '+')) i++;
+  if (!unquoted(i, (c) => c === '=')) return false;
+  for (let j = i; j < chars.length; j++) {
+    if ((j === i || unquoted(j, (c) => c === ':')) && unquoted(j + 1, (c) => c === '~')) return true;
+  }
+  return false;
 }
 
 /** True when bash may change the word before the command sees it (expansion, substitution, glob, braces, tilde). */
@@ -319,6 +347,7 @@ class Tokenizer {
   #readDoubleQuoted(word: Word): void {
     const s = this.src;
     word.quoted = true;
+    add(word, '', true);
     this.#i++;
     while (true) {
       if (this.#i >= s.length) throw new ShellParseError('unterminated double quote');
