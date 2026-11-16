@@ -122,6 +122,11 @@ if (unavailable !== null) {
   console.log(`bash containment tests skipped: ${unavailable}`);
 }
 
+// CI sets ACM_REQUIRE_CONTAINMENT=1 where the dependencies are installed, so a silent skip there is a failure.
+it.runIf(process.env['ACM_REQUIRE_CONTAINMENT'] === '1')('bash containment is available where it is required', () => {
+  expect(unavailable).toBeNull();
+});
+
 describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   const readOnly: BashContainment = { mode: 'sandbox', readOnly: true, writableRoots: [], network: false };
 

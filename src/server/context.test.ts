@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { HookContextRecord, HookContextStore } from '../core/types.js';
-import { ClaudeContextProvider, CodexContextProvider, GenericContextProvider, detectHost } from './context.js';
+import { ClaudeContextProvider } from '../hosts/claude/context.js';
+import { CodexContextProvider } from '../hosts/codex/context.js';
+import { GenericContextProvider, detectHost } from './context.js';
 
 const store = (record: HookContextRecord | undefined): HookContextStore => ({ lookup: async () => record });
 

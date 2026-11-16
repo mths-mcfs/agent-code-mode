@@ -306,3 +306,23 @@ function parentAwareEnv(): Record<string, string | undefined> {
   }
   return env;
 }
+
+/**
+ * `mcp_servers.<serverName>.tool_timeout_sec` as the Codex configuration for
+ * `cwd` sets it (the same layers `loadPolicy` reads), or undefined when it is
+ * not set, not a positive number, or the configuration cannot be loaded.
+ */
+export function codexToolTimeoutSec(cwd: string, serverName: string, io: ConfigIo = nodeConfigIo(parentAwareEnv())): number | undefined {
+  let config;
+  try {
+    config = loadCodexConfig(cwd, io);
+  } catch {
+    return undefined;
+  }
+  const servers = config.merged['mcp_servers'];
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) return undefined;
+  const entry: unknown = Object.entries(servers).find(([name]) => name === serverName)?.[1];
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
+  const value: unknown = Object.entries(entry).find(([key]) => key === 'tool_timeout_sec')?.[1];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}

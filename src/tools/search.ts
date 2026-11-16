@@ -396,14 +396,21 @@ export async function runGrep(
   jailRoot: string,
   signal: AbortSignal,
   fileBudgetMs: number = DEFAULT_GREP_FILE_BUDGET_MS,
+  readFilter?: (realAbsPath: string) => boolean,
 ): Promise<GrepResult> {
   compileGrep(effect.pattern, effect.ignoreCase);
   const globs = effect.glob === null ? null : expandBraces(effect.glob.replace(/\\/g, '/'));
   const matches: GrepMatch[] = [];
+  let filtered = 0;
   const worker = new MatchWorker(effect.pattern, effect.ignoreCase ? 'i' : '');
   try {
     for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
       if (globs && file !== effect.absRoot && !matchesFileGlob(toRel(effect.absRoot, file), globs)) continue;
+      // A file the host's Read rules deny is never opened.
+      if (readFilter && !readFilter(file)) {
+        filtered++;
+        continue;
+      }
       // Opened without following links and checked to be the file at this path,
       // so a directory swapped for a link mid-walk cannot lead outside.
       const bytes = await readFileInside(file, MAX_GREP_FILE_BYTES);
@@ -411,23 +418,31 @@ export async function runGrep(
       const room = effect.maxResults - matches.length;
       const found = await worker.match(file, bytes.toString('utf8'), room, fileBudgetMs, signal);
       for (const [line, text] of found.hits) matches.push({ file, line, text });
-      if (found.more) return { matches, truncated: true };
+      if (found.more) return { matches, truncated: true, filtered };
     }
   } finally {
     worker.close();
   }
-  return { matches, truncated: false };
+  return { matches, truncated: false, filtered };
 }
 
-export async function runGlob(effect: GlobEffect, jailRoot: string, signal: AbortSignal): Promise<GlobResult> {
+export async function runGlob(
+  effect: GlobEffect,
+  jailRoot: string,
+  signal: AbortSignal,
+  readFilter?: (realAbsPath: string) => boolean,
+): Promise<GlobResult> {
   const patterns = expandBraces(normalizeGlob(effect.pattern, effect.absRoot));
   const all: string[] = [];
+  let filtered = 0;
   for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
     if (file === effect.absRoot) continue;
     const rel = toRel(effect.absRoot, file);
-    if (patterns.some((p) => matchesPathPattern(rel, p))) all.push(file);
+    if (!patterns.some((p) => matchesPathPattern(rel, p))) continue;
+    if (readFilter && !readFilter(file)) filtered++;
+    else all.push(file);
   }
   all.sort();
-  return { files: all.slice(0, effect.maxResults), truncated: all.length > effect.maxResults };
+  return { files: all.slice(0, effect.maxResults), truncated: all.length > effect.maxResults, filtered };
 }
 

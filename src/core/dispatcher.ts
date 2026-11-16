@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
 import { frozenCopy } from './freeze.js';
@@ -139,10 +140,15 @@ export class Dispatcher<P = unknown> {
   readonly #warnings: string[] = [];
   #deniedCount = 0;
   #bashCommits = 0;
+  /** The session cwd and roots as real paths, the form prepared paths take. */
+  readonly #canonicalCwd: string;
+  readonly #canonicalRoots: readonly string[];
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
     this.#now = opts.now ?? (() => performance.now());
+    this.#canonicalCwd = canonicalPath(opts.ctx.cwd);
+    this.#canonicalRoots = [...new Set([...opts.ctx.roots, ...(isPolicyError(opts.policy) ? [] : (opts.policy.additionalRoots ?? []))])].map(canonicalPath);
   }
 
   /** Signal aborted when the dispatcher stops. */
@@ -329,7 +335,7 @@ export class Dispatcher<P = unknown> {
       if (returned === ABORTED) return this.#stoppedFailure();
       // A dispatcher-owned deep-frozen copy: what is authorized and then
       // committed cannot be changed by the runtime or anyone holding its object.
-      prepared = frozenCopy(returned);
+      prepared = frozenCopy(withRequestedPath(returned, call));
     } catch (err) {
       return this.#toolFailure(err);
     }
@@ -337,7 +343,7 @@ export class Dispatcher<P = unknown> {
       return { kind: 'error', error: new ToolError('tool-error', 'tool runtime returned a prepared call for another call') };
     }
     if (prepared.tool === 'write' || prepared.tool === 'edit') {
-      const hit = findMatchingPattern(prepared.effect.absPath, policy.protectedPaths);
+      const hit = findMatchingPattern(prepared.effect.absPath, this.#protectedPatterns(policy));
       if (hit !== undefined) {
         return { kind: 'error', error: new ToolError('protected-path', `${prepared.effect.absPath} is a protected host policy path`) };
       }
@@ -477,14 +483,81 @@ export class Dispatcher<P = unknown> {
     return { ok: false, error };
   }
 
+  /**
+   * Protected patterns as written by the adapter plus the same patterns with
+   * a cwd or root prefix rewritten to its real path: prepared paths are real
+   * paths, so a cwd reached through a symlink must not let a write slip past
+   * a pattern spelled with the symlinked cwd.
+   */
+  #protectedPatterns(policy: PolicySnapshot<P>): readonly string[] {
+    if (this.#protectedCache?.policy === policy) return this.#protectedCache.patterns;
+    const pairs: [string, string][] = [];
+    const add = (spelled: string, real: string): void => {
+      if (spelled !== real && path.isAbsolute(spelled)) pairs.push([spelled, real]);
+    };
+    add(this.#opts.ctx.cwd, this.#canonicalCwd);
+    const spelledRoots = [...new Set([...this.#opts.ctx.roots, ...(policy.additionalRoots ?? [])])];
+    spelledRoots.forEach((root, i) => add(root, this.#canonicalRoots[i] ?? root));
+    const out = new Set(policy.protectedPaths);
+    for (const pattern of policy.protectedPaths) {
+      for (const [spelled, real] of pairs) {
+        const rel = path.relative(spelled, pattern);
+        if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) out.add(rel === '' ? real : path.join(real, rel));
+      }
+      // Patterns under some other symlinked directory (e.g. home): resolve their literal prefix.
+      out.add(canonicalPattern(pattern));
+    }
+    const patterns = [...out];
+    this.#protectedCache = { policy, patterns };
+    return patterns;
+  }
+
+  #protectedCache: { readonly policy: PolicySnapshot<P>; readonly patterns: readonly string[] } | undefined;
+
   #addChanged(absPath: string): void {
-    const shown = displayPath(absPath, this.#opts.ctx.cwd);
+    const shown = displayPath(absPath, this.#canonicalCwd);
     if (!this.#changed.includes(shown)) this.#changed.push(shown);
   }
 
   #elapsed(started: number): number {
     return Math.max(0, Math.round(this.#now() - started));
   }
+}
+
+/** Real path of `p`, or `p` resolved lexically when it does not exist. */
+function canonicalPath(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** A path pattern whose literal (wildcard-free) directory prefix is replaced by its real path when it exists. */
+function canonicalPattern(pattern: string): string {
+  if (!path.isAbsolute(pattern)) return pattern;
+  const parts = pattern.split(/[\\/]/);
+  const firstWild = parts.findIndex((part) => /[*?[]/.test(part));
+  const literalCount = firstWild === -1 ? parts.length - 1 : firstWild;
+  for (let n = literalCount; n > 1; n--) {
+    const prefix = parts.slice(0, n).join(path.sep) || path.sep;
+    let real: string;
+    try {
+      real = realpathSync.native(prefix);
+    } catch {
+      continue;
+    }
+    return path.join(real, ...parts.slice(n));
+  }
+  return pattern;
+}
+
+/** The prepared call with `requestedPath` set from the call the script made (never from the runtime). */
+function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall {
+  const { requestedPath: _ignored, ...rest } = prepared;
+  const requested = call.tool === 'bash' ? undefined : call.args.path;
+  // The spread keeps the tool/args/effect pairing of `prepared`; only the optional field changes.
+  return requested === undefined ? rest : { ...rest, requestedPath: requested };
 }
 
 /** Path relative to `cwd` when inside it, else the absolute path. */

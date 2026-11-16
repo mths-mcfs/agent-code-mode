@@ -87,9 +87,10 @@ export interface ClaudePolicy {
    */
   readonly runApprovedByAllowRule: boolean;
   /**
-   * Whether a Read deny rule covers a real absolute path. The tool runtime
-   * must drop such files from grep and glob results: a recursive search
-   * otherwise returns what `read` would refuse.
+   * Whether a Read deny or ask rule covers a real absolute path. Exposed to
+   * the tool runtime as `PolicySnapshot.readFilter`, which drops such files
+   * from grep and glob results: a recursive search otherwise returns what
+   * `read` would refuse.
    */
   readonly isReadDenied: (absPath: string) => boolean;
 }
@@ -118,19 +119,30 @@ function governs(rule: Rule, tool: NativeToolName): boolean {
   return false;
 }
 
-/** Paths a file call touches: the path as given in args (may be the requested path) and the real path of the effect. */
-function callPaths(prepared: PreparedCall): string[] {
+/**
+ * Paths a file call touches: the path as the script wrote it (resolved
+ * lexically against the cwd, `~` expanded, symlinks not followed), the
+ * normalized path in args, and the real path of the effect.
+ */
+function callPaths(prepared: PreparedCall, cwd: string, home: string): string[] {
+  const written = prepared.requestedPath === undefined ? [] : [resolveWritten(prepared.requestedPath, cwd, home)];
   switch (prepared.tool) {
     case 'read':
     case 'write':
     case 'edit':
-      return [...new Set([prepared.args.path, prepared.effect.absPath])];
+      return [...new Set([...written, prepared.args.path, prepared.effect.absPath])];
     case 'grep':
     case 'glob':
-      return [...new Set([...(prepared.args.path === undefined ? [] : [prepared.args.path]), prepared.effect.absRoot])];
+      return [...new Set([...written, ...(prepared.args.path === undefined ? [] : [prepared.args.path]), prepared.effect.absRoot])];
     case 'bash':
       return [];
   }
+}
+
+function resolveWritten(p: string, cwd: string, home: string): string {
+  if (p === '~') return home;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(home, p.slice(2));
+  return path.resolve(cwd, p);
 }
 
 type Verdict = 'match' | 'maybe' | 'no';
@@ -138,6 +150,8 @@ type Verdict = 'match' | 'maybe' | 'no';
 interface CallView {
   readonly prepared: PreparedCall;
   readonly native: NativeCall;
+  /** `callPaths` of the call. */
+  readonly paths: readonly string[];
   readonly analysis: BashAnalysis | undefined;
   /** Resolved file targets of a bash command; undefined path = only known at run time. */
   readonly bashFiles: readonly { readonly access: 'read' | 'write'; readonly path: string | undefined }[];
@@ -189,7 +203,7 @@ function restrictVerdict(rule: Rule, view: CallView): Verdict {
     case 'param':
       return matchesParamValue(m.value, native.toolInput[m.name]) ? 'match' : 'no';
     case 'path':
-      return pathRuleVerdict(m.patterns, callPaths(prepared), rule.kind);
+      return pathRuleVerdict(m.patterns, view.paths, rule.kind);
     case 'bash':
       return 'no';
   }
@@ -218,7 +232,7 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
     const filesInside = view.bashFiles.every((f) => f.path !== undefined && policy.workingDirs.some((d) => isInsidePath(f.path ?? '', d)));
     return everyCommand && filesInside;
   }
-  const paths = callPaths(prepared);
+  const paths = view.paths;
   return applicable.some((r) => {
     if (!governs(r, native.toolName) || r.kind !== 'allow') return false;
     if (r.matcher.type === 'all') return true;
@@ -234,7 +248,7 @@ function modeDecision(view: CallView, policy: ClaudePolicy): Decision {
   const tool = NATIVE_TOOL[prepared.tool];
   const isRead = prepared.tool === 'read' || prepared.tool === 'grep' || prepared.tool === 'glob';
   const isEdit = prepared.tool === 'write' || prepared.tool === 'edit';
-  const inside = isRead || isEdit ? insideWorkingDirs(callPaths(prepared), policy.workingDirs) : false;
+  const inside = isRead || isEdit ? insideWorkingDirs(view.paths, policy.workingDirs) : false;
   if (mode === 'bypassPermissions') return { kind: 'allow' };
   if (mode === 'auto') {
     // The classifier reviewed the whole script once, unless an allow rule approved `run` before it.
@@ -429,9 +443,14 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
 
     // Working directories.
     const workingDirs = new Set<string>([projectRoot, ctx.cwd, ...ctx.roots]);
+    const additionalRoots = new Set<string>();
     for (const doc of docs) {
       if (holdsCapability(doc)) continue;
-      for (const dir of doc.data.permissions?.additionalDirectories ?? []) workingDirs.add(resolveDir(dir, projectRoot, home));
+      for (const dir of doc.data.permissions?.additionalDirectories ?? []) {
+        const resolved = resolveDir(dir, projectRoot, home);
+        workingDirs.add(resolved);
+        additionalRoots.add(resolved);
+      }
     }
 
     // Permission mode: the live mode from the companion hook, else the CLI flag, else settings, else default.
@@ -507,10 +526,17 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       ]),
     ];
 
+    // Read rules that refuse a path: deny, and ask (an ask is a deny here).
+    const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
+    const isReadDenied = (absPath: string): boolean =>
+      readRestrictions.some((r) => r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)));
+
     return {
       host: 'claude',
       bashContainment,
       protectedPaths,
+      additionalRoots: [...additionalRoots],
+      readFilter: (realAbsPath: string): boolean => !isReadDenied(realAbsPath),
       payload: {
         projectRoot,
         cwd: ctx.cwd,
@@ -523,15 +549,15 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         postHooks: post,
         hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
         runApprovedByAllowRule: rules.allow.some((r) => r.matcher.type !== 'never' && (r.tool === serverRule || r.tool === '*' || matchesToolName(r.tool, runTool))),
-        isReadDenied: (absPath: string): boolean =>
-          rules.deny.some((r) => governs(r, 'Read') && (r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)))),
+        isReadDenied,
       },
     };
   }
 
   #view(prepared: PreparedCall, policy: ClaudePolicy): CallView {
     const native = nativeCall(prepared);
-    if (prepared.tool !== 'bash') return { prepared, native, analysis: undefined, bashFiles: [] };
+    const paths = callPaths(prepared, policy.cwd, policy.home);
+    if (prepared.tool !== 'bash') return { prepared, native, paths, analysis: undefined, bashFiles: [] };
     const analysis = BashAnalyzer.analyze(prepared.effect.command);
     const bashFiles = analysis.files.map((f) => {
       if (f.path === undefined) return { access: f.access, path: undefined };
@@ -540,7 +566,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       if (relative && analysis.changesDirectory) return { access: f.access, path: undefined };
       return { access: f.access, path: resolveCommandPath(f.path, prepared.effect.cwd, policy.home) };
     });
-    return { prepared, native, analysis, bashFiles };
+    return { prepared, native, paths, analysis, bashFiles };
   }
 
   /** Deny and ask rules. Undefined when none decides. */
@@ -612,7 +638,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         (cmd) => cmd.denyForms.some((f) => matchesBashSpec(m.spec, f)) || (cmd.dynamic && (specific || cmd.staticPrefixes.some((prefix) => bashSpecMayMatchDynamic(m.spec, prefix)))),
       );
     }
-    if (m.type === 'path') return pathRuleVerdict(m.patterns, callPaths(view.prepared), 'deny') === 'match';
+    if (m.type === 'path') return pathRuleVerdict(m.patterns, view.paths, 'deny') === 'match';
     if (m.type === 'param') return matchesParamValue(m.value, view.native.toolInput[m.name]);
     return true;
   }
