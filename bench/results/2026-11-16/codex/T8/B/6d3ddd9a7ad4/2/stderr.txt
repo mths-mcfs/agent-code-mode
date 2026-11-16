@@ -1,0 +1,31 @@
+2026-11-16T02:04:49.072126Z ERROR codex_core::tools::router: error=Command blocked by PreToolUse hook: src/handlers/inventory.js is protected by the repository policy; this change is denied.. Command: python3 - <<'PY'
+from pathlib import Path
+for path in sorted(Path('src/handlers').rglob('*')):
+    if not path.is_file():
+        continue
+    try:
+        content = path.read_text()
+    except (UnicodeError, OSError):
+        continue
+    updated = content.replace('TIMEOUT_MS = 3000', 'TIMEOUT_MS = 5000')
+    if updated == content:
+        continue
+    try:
+        with path.open('w') as file:
+            file.write(updated)
+        print(f'UPDATED: {path}')
+    except OSError as error:
+        print(f'DENIED: {path} ({error})')
+PY
+2026-11-16T02:04:56.129138Z ERROR codex_core::tools::router: error=Command blocked by PreToolUse hook: src/handlers/inventory.js is protected by the repository policy; this change is denied.. Command: python3 - <<'PY'
+from pathlib import Path
+paths = ['customers.js', 'health.js', 'orders.js', 'payments.js', 'reports.js', 'returns.js', 'search.js', 'shipping.js', 'webhooks.js']
+for name in paths:
+    path = Path('src/handlers') / name
+    try:
+        content = path.read_text()
+        path.write_text(content.replace('TIMEOUT_MS = 3000', 'TIMEOUT_MS = 5000'))
+        print(f'UPDATED: {path}')
+    except OSError as error:
+        print(f'DENIED: {path} ({error})')
+PY

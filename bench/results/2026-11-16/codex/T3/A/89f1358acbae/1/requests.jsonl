@@ -1,0 +1,3 @@
+{"kind":"call","type":"function_call","name":"exec_command","args":"{\"cmd\":\"rg -n -U '(computeShippingQuote|normalizeSku)\\\\s*\\\\(' .\",\"max_output_tokens\":5000}"}
+{"kind":"request","usage":{"input_tokens":10383,"cached_input_tokens":5120,"output_tokens":64,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":10447}}
+{"kind":"request","usage":{"input_tokens":10558,"cached_input_tokens":10240,"output_tokens":24,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":10582}}

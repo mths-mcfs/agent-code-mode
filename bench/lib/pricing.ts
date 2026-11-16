@@ -7,6 +7,8 @@ const PriceSchema = z.object({
   input: z.number().nonnegative(),
   cachedInput: z.number().nonnegative(),
   cacheWrite5m: z.number().nonnegative().optional(),
+  /** Cache writes with the 1-hour TTL, which Claude Code uses for its prompt cache. */
+  cacheWrite1h: z.number().nonnegative().optional(),
   output: z.number().nonnegative(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   source: z.string().url(),

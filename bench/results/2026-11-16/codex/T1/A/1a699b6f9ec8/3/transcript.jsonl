@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1e21f-3c46-7a72-bb43-723d4654fa1d"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled."}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I’ll read the configuration file and report the value."}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/usr/bin/bash -lc 'cat config/app.json'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/usr/bin/bash -lc 'cat config/app.json'","aggregated_output":"{\"service\":{\"name\":\"acme-orders\",\"port\":6993,\"retryLimit\":7,\"timeoutMs\":2000},\"features\":{\"refunds\":true,\"giftCards\":true,\"loyalty\":true},\"logging\":{\"level\":\"info\",\"retainDays\":65}}","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"`service.retryLimit` is 7.\n\nANSWER: 7"}}
+{"type":"turn.completed","usage":{"input_tokens":20914,"cached_input_tokens":15360,"cache_write_input_tokens":0,"output_tokens":63,"reasoning_output_tokens":0}}

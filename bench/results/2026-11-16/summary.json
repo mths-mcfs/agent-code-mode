@@ -1,0 +1,3307 @@
+{
+  "generatedAt": "2026-11-16T02:16:00.689Z",
+  "dryRun": false,
+  "environment": {
+    "invocations": [
+      {
+        "startedAt": "2026-11-16T01:46:30.710Z",
+        "dryRun": false,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "runsPerArm": 3,
+        "tasks": [
+          "T1",
+          "T2",
+          "T3",
+          "T4",
+          "T5",
+          "T6",
+          "T7",
+          "T8"
+        ],
+        "arms": [
+          "A",
+          "B"
+        ],
+        "timeoutMin": 15,
+        "hosts": {
+          "claude": {
+            "version": "2.1.325 (Claude Code)",
+            "model": "claude-sonnet-5-5",
+            "effort": "medium",
+            "maxTurns": 60,
+            "isolation": "--setting-sources project; --strict-mcp-config; CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1; temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)"
+          }
+        },
+        "os": "linux 7.2 x64",
+        "node": "v26.13.0",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "surfaces": {
+          "observed": {
+            "claude/A": [
+              "Bash",
+              "Edit",
+              "Glob",
+              "Grep",
+              "Read",
+              "Write"
+            ],
+            "claude/B": [
+              "mcp__agent-code-mode__run"
+            ]
+          },
+          "required": {
+            "claude": {
+              "A": [
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep"
+              ],
+              "B": [
+                "mcp__agent-code-mode__run"
+              ]
+            },
+            "codexNonFileTools": [
+              "list_mcp_resource_templates",
+              "list_mcp_resources",
+              "read_mcp_resource",
+              "request_user_input"
+            ],
+            "codexFeaturesOff": [
+              "apps",
+              "view_image",
+              "image_generation",
+              "goals",
+              "multi_agent",
+              "sleep_tool"
+            ]
+          }
+        }
+      },
+      {
+        "startedAt": "2026-11-16T01:54:01.827Z",
+        "dryRun": false,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "runsPerArm": 3,
+        "tasks": [
+          "T1",
+          "T2",
+          "T3",
+          "T4",
+          "T5",
+          "T6",
+          "T7",
+          "T8"
+        ],
+        "arms": [
+          "A",
+          "B",
+          "C"
+        ],
+        "timeoutMin": 15,
+        "hosts": {
+          "codex": {
+            "version": "codex-cli 0.169.0",
+            "model": "gpt-6.1-terra",
+            "effort": "medium",
+            "maxTurns": null,
+            "catalogSha256": "6fa0775ebcaa7e78ae147765ccd5d5b77e7991f42b55ae75a3daa704ab6dfbd8"
+          }
+        },
+        "os": "linux 7.2 x64",
+        "node": "v26.13.0",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "surfaces": {
+          "observed": {
+            "codex/A": [
+              "functions.apply_patch",
+              "functions.exec_command",
+              "functions.list_mcp_resource_templates",
+              "functions.list_mcp_resources",
+              "functions.read_mcp_resource",
+              "functions.request_user_input",
+              "functions.write_stdin"
+            ],
+            "codex/B": [
+              "exec.apply_patch",
+              "exec.exec_command",
+              "exec.list_mcp_resource_templates",
+              "exec.list_mcp_resources",
+              "exec.read_mcp_resource",
+              "exec.write_stdin",
+              "functions.exec",
+              "functions.request_user_input",
+              "functions.wait"
+            ],
+            "codex/C": [
+              "functions.list_mcp_resource_templates",
+              "functions.list_mcp_resources",
+              "functions.read_mcp_resource",
+              "functions.request_user_input",
+              "mcp__agent_code_mode.run"
+            ]
+          },
+          "required": {
+            "claude": {
+              "A": [
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep"
+              ],
+              "B": [
+                "mcp__agent-code-mode__run"
+              ]
+            },
+            "codexNonFileTools": [
+              "list_mcp_resource_templates",
+              "list_mcp_resources",
+              "read_mcp_resource",
+              "request_user_input"
+            ],
+            "codexFeaturesOff": [
+              "apps",
+              "view_image",
+              "image_generation",
+              "goals",
+              "multi_agent",
+              "sleep_tool"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "groups": [
+    {
+      "host": "claude",
+      "task": "T1",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "f777bc679f76",
+      "config": {
+        "host": "claude",
+        "task": "T1",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 168,
+        "min": 168,
+        "max": 168,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 664,
+        "min": 664,
+        "max": 664,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 13701,
+        "min": 13701,
+        "max": 13701,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0057141,
+        "min": 0.0057141,
+        "max": 0.0057141,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 4157,
+        "min": 4115,
+        "max": 4291,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T1-A-r1",
+        "claude-T1-A-r2",
+        "claude-T1-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T1",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "83d190b8f21a",
+      "config": {
+        "host": "claude",
+        "task": "T1",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 118,
+        "min": 118,
+        "max": 118,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 1153,
+        "min": 1153,
+        "max": 1153,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 5947,
+        "min": 5947,
+        "max": 5947,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0063947,
+        "min": 0.0063947,
+        "max": 0.0063947,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 4279,
+        "min": 4200,
+        "max": 4518,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T1-B-r1",
+        "claude-T1-B-r2",
+        "claude-T1-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T2",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "af3ac3e7b6d4",
+      "config": {
+        "host": "claude",
+        "task": "T2",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 5,
+        "min": 5,
+        "max": 6,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 10,
+        "min": 10,
+        "max": 10,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 441,
+        "min": 433,
+        "max": 712,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 2161,
+        "min": 1789,
+        "max": 2397,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 38094,
+        "min": 37486,
+        "max": 38155,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.017766600000000004,
+        "min": 0.015315400000000002,
+        "max": 0.019599500000000002,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 10556,
+        "min": 10162,
+        "max": 12001,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T2-A-r1",
+        "claude-T2-A-r2",
+        "claude-T2-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T2",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "dc97b8efeda3",
+      "config": {
+        "host": "claude",
+        "task": "T2",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 505,
+        "min": 502,
+        "max": 522,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 4391,
+        "min": 4248,
+        "max": 4648,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 18020,
+        "min": 17624,
+        "max": 18174,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0244174,
+        "min": 0.02386,
+        "max": 0.0255904,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 9221,
+        "min": 8922,
+        "max": 9331,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T2-B-r1",
+        "claude-T2-B-r2",
+        "claude-T2-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T3",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "62be676d39da",
+      "config": {
+        "host": "claude",
+        "task": "T3",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "94869f5f425fdb2f93bf1986a37e15c42bd6754f5ff50a05bd9b3bad4d284f95",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 267,
+        "min": 187,
+        "max": 280,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 623,
+        "min": 592,
+        "max": 1254,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 13769,
+        "min": 13123,
+        "max": 13769,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0064229000000000005,
+        "min": 0.0057469,
+        "max": 0.0091363,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 4666,
+        "min": 4501,
+        "max": 5633,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T3-A-r1",
+        "claude-T3-A-r2",
+        "claude-T3-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T3",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "92a1a28eba89",
+      "config": {
+        "host": "claude",
+        "task": "T3",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "94869f5f425fdb2f93bf1986a37e15c42bd6754f5ff50a05bd9b3bad4d284f95",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 218,
+        "min": 217,
+        "max": 225,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 1430,
+        "min": 1288,
+        "max": 1833,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 6015,
+        "min": 5579,
+        "max": 6015,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0085095,
+        "min": 0.008011500000000001,
+        "max": 0.0100679,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 4864,
+        "min": 4814,
+        "max": 4931,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T3-B-r1",
+        "claude-T3-B-r2",
+        "claude-T3-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T4",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "1b9e3901d6c8",
+      "config": {
+        "host": "claude",
+        "task": "T4",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 632,
+        "min": 623,
+        "max": 634,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 1360,
+        "min": 1340,
+        "max": 2041,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 29103,
+        "min": 28487,
+        "max": 29163,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.014706300000000002,
+        "min": 0.0146123,
+        "max": 0.0172587,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 7989,
+        "min": 7782,
+        "max": 8067,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T4-A-r1",
+        "claude-T4-A-r2",
+        "claude-T4-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T4",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "7dc1a71e6840",
+      "config": {
+        "host": "claude",
+        "task": "T4",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 804,
+        "min": 791,
+        "max": 845,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 5637,
+        "min": 5361,
+        "max": 5983,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 15026,
+        "min": 14744,
+        "max": 15035,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0321066,
+        "min": 0.0314135,
+        "max": 0.0333324,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 9885,
+        "min": 9884,
+        "max": 10596,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T4-B-r1",
+        "claude-T4-B-r2",
+        "claude-T4-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T5",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "d2d7c0c1808a",
+      "config": {
+        "host": "claude",
+        "task": "T5",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "7df2fc36f67874c416206f1dd7637601d898098a579618112a520c4ed3a11a09",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 3,
+        "min": 3,
+        "max": 3,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 6,
+        "min": 6,
+        "max": 6,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 410,
+        "min": 380,
+        "max": 420,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 3234,
+        "min": 3201,
+        "max": 3880,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 23327,
+        "min": 22698,
+        "max": 23329,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0193489,
+        "min": 0.019080700000000003,
+        "max": 0.0219018,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 6425,
+        "min": 6298,
+        "max": 6859,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T5-A-r1",
+        "claude-T5-A-r2",
+        "claude-T5-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T5",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "5fc658748f82",
+      "config": {
+        "host": "claude",
+        "task": "T5",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "7df2fc36f67874c416206f1dd7637601d898098a579618112a520c4ed3a11a09",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 3,
+        "min": 3,
+        "max": 3,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 6,
+        "min": 6,
+        "max": 6,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 456,
+        "min": 442,
+        "max": 461,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 9566,
+        "min": 9521,
+        "max": 9978,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 17551,
+        "min": 17144,
+        "max": 17565,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.044642499999999995,
+        "min": 0.0442711,
+        "max": 0.0461984,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 7141,
+        "min": 7022,
+        "max": 7858,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T5-B-r1",
+        "claude-T5-B-r2",
+        "claude-T5-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T6",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "706fd7c486de",
+      "config": {
+        "host": "claude",
+        "task": "T6",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 920,
+        "min": 809,
+        "max": 1292,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 2252,
+        "min": 1532,
+        "max": 2541,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 28914,
+        "min": 28717,
+        "max": 29566,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0222517,
+        "min": 0.0171254,
+        "max": 0.024900599999999995,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 10462,
+        "min": 10352,
+        "max": 12291,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T6-A-r1",
+        "claude-T6-A-r2",
+        "claude-T6-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T6",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "e79301f51090",
+      "config": {
+        "host": "claude",
+        "task": "T6",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 6,
+        "min": 5,
+        "max": 6,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 10,
+        "min": 10,
+        "max": 10,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 1382,
+        "min": 1310,
+        "max": 1396,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 29075,
+        "min": 28865,
+        "max": 29949,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 62561,
+        "min": 60998,
+        "max": 64712,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.1365361,
+        "min": 0.13467980000000002,
+        "max": 0.1401072,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 16069,
+        "min": 15769,
+        "max": 16474,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T6-B-r1",
+        "claude-T6-B-r2",
+        "claude-T6-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T7",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "a8cf9f4b9f45",
+      "config": {
+        "host": "claude",
+        "task": "T7",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5680770c8e7d70635b40396c99e8b0f96ef4768e223ca6b12c4eb04e45a490a0",
+        "armDefinitionSha256": "3295aa622a0a201ac2c6e6a4768dfe4e3450a879fec940e81e34cef18da57be3",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 579,
+        "min": 574,
+        "max": 629,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 3906,
+        "min": 3812,
+        "max": 4055,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 32394,
+        "min": 31681,
+        "max": 32503,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0247934,
+        "min": 0.024630299999999997,
+        "max": 0.025194099999999997,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 8267,
+        "min": 7809,
+        "max": 9288,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T7-A-r1",
+        "claude-T7-A-r2",
+        "claude-T7-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T7",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "d54ecb42629a",
+      "config": {
+        "host": "claude",
+        "task": "T7",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5680770c8e7d70635b40396c99e8b0f96ef4768e223ca6b12c4eb04e45a490a0",
+        "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 916,
+        "min": 901,
+        "max": 919,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 4675,
+        "min": 4665,
+        "max": 5093,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 15813,
+        "min": 15472,
+        "max": 15874,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.029487299999999998,
+        "min": 0.029273400000000005,
+        "max": 0.0310952,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 10396,
+        "min": 10278,
+        "max": 10808,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T7-B-r1",
+        "claude-T7-B-r2",
+        "claude-T7-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T8",
+      "arm": "A",
+      "armLabel": "native tools",
+      "configHash": "5ebcfee5a1a2",
+      "config": {
+        "host": "claude",
+        "task": "T8",
+        "arm": "A",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "60a7eeda3f6d3949fdfc26d9ab5aacc799e99f77436fb20a0df7ef95ed820085",
+        "armDefinitionSha256": "6e3e3fcce91ae64ac550f470676bc4581943c12f07b2e67a1d9192c2f4dcfb4a",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 22,
+        "min": 22,
+        "max": 22,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 3912,
+        "min": 3886,
+        "max": 3920,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 6886,
+        "min": 6884,
+        "max": 7595,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 32245,
+        "min": 31600,
+        "max": 32247,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.06998470000000001,
+        "min": 0.0696365,
+        "max": 0.07267599999999999,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 21395,
+        "min": 21025,
+        "max": 21688,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T8-A-r1",
+        "claude-T8-A-r2",
+        "claude-T8-A-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T8",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "729e93cfb0c8",
+      "config": {
+        "host": "claude",
+        "task": "T8",
+        "arm": "B",
+        "hostVersion": "2.1.325 (Claude Code)",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "60a7eeda3f6d3949fdfc26d9ab5aacc799e99f77436fb20a0df7ef95ed820085",
+        "armDefinitionSha256": "d54bbc96639caf896f9e4fd6de2f90e1e3ac362bb0458a89d5d62661c8a4f602",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 3,
+        "min": 3,
+        "max": 3,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 6,
+        "min": 6,
+        "max": 6,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 484,
+        "min": 483,
+        "max": 498,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 6017,
+        "min": 6008,
+        "max": 6513,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 12386,
+        "min": 11918,
+        "max": 12386,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0302626,
+        "min": 0.030148599999999998,
+        "max": 0.0320958,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 8437,
+        "min": 8024,
+        "max": 8745,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T8-B-r1",
+        "claude-T8-B-r2",
+        "claude-T8-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T1",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "1a699b6f9ec8",
+      "config": {
+        "host": "codex",
+        "task": "T1",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 5613,
+        "min": 5554,
+        "max": 10673,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 63,
+        "min": 53,
+        "max": 112,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 15360,
+        "min": 10240,
+        "max": 15360,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.006941,
+        "min": 0.006637,
+        "max": 0.01145,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 6316,
+        "min": 6126,
+        "max": 6837,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T1-A-r1",
+        "codex-T1-A-r2",
+        "codex-T1-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T1",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "167d8ff9ba82",
+      "config": {
+        "host": "codex",
+        "task": "T1",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 5556,
+        "min": 5556,
+        "max": 12341,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 61,
+        "min": 61,
+        "max": 62,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 18688,
+        "min": 11904,
+        "max": 18688,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0067954,
+        "min": 0.0067954,
+        "max": 0.013246200000000001,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 7541,
+        "min": 7120,
+        "max": 8051,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T1-B-r1",
+        "codex-T1-B-r2",
+        "codex-T1-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T1",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "5faef56921d7",
+      "config": {
+        "host": "codex",
+        "task": "T1",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 10539,
+        "min": 5675,
+        "max": 10791,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 66,
+        "min": 62,
+        "max": 66,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 9984,
+        "min": 9728,
+        "max": 14848,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0113682,
+        "min": 0.0067474,
+        "max": 0.0115874,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 6031,
+        "min": 5514,
+        "max": 6169,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T1-C-r1",
+        "codex-T1-C-r2",
+        "codex-T1-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T2",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "9420f03f441e",
+      "config": {
+        "host": "codex",
+        "task": "T2",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 8,
+        "min": 7,
+        "max": 8,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 17951,
+        "min": 8766,
+        "max": 28546,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 570,
+        "min": 398,
+        "max": 630,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 93440,
+        "min": 73472,
+        "max": 104832,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0260426,
+        "min": 0.0144296,
+        "max": 0.036368,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 20731,
+        "min": 18051,
+        "max": 24307,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T2-A-r1",
+        "codex-T2-A-r2",
+        "codex-T2-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T2",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "ae9e6a4913bf",
+      "config": {
+        "host": "codex",
+        "task": "T2",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 6,
+        "min": 5,
+        "max": 6,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 31731,
+        "min": 23724,
+        "max": 39442,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 817,
+        "min": 777,
+        "max": 867,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 78848,
+        "min": 50176,
+        "max": 89600,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0400084,
+        "min": 0.032089,
+        "max": 0.0460358,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 23105,
+        "min": 21620,
+        "max": 24731,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T2-B-r1",
+        "codex-T2-B-r2",
+        "codex-T2-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T2",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "7d43bb737337",
+      "config": {
+        "host": "codex",
+        "task": "T2",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 5,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 17378,
+        "min": 9496,
+        "max": 29568,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 645,
+        "min": 576,
+        "max": 863,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 39296,
+        "min": 39040,
+        "max": 52224,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0232142,
+        "min": 0.014328,
+        "max": 0.035847800000000006,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 21500,
+        "min": 20024,
+        "max": 23869,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T2-C-r1",
+        "codex-T2-C-r2",
+        "codex-T2-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T3",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "89f1358acbae",
+      "config": {
+        "host": "codex",
+        "task": "T3",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "94869f5f425fdb2f93bf1986a37e15c42bd6754f5ff50a05bd9b3bad4d284f95",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 5492,
+        "min": 5491,
+        "max": 5581,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 127,
+        "min": 88,
+        "max": 127,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 15488,
+        "min": 15360,
+        "max": 15488,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.006900399999999999,
+        "min": 0.006789,
+        "max": 0.006901399999999999,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 7711,
+        "min": 6526,
+        "max": 8044,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T3-A-r1",
+        "codex-T3-A-r2",
+        "codex-T3-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T3",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "058298631841",
+      "config": {
+        "host": "codex",
+        "task": "T3",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "94869f5f425fdb2f93bf1986a37e15c42bd6754f5ff50a05bd9b3bad4d284f95",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 2,
+        "min": 2,
+        "max": 2,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 6988,
+        "min": 5582,
+        "max": 12376,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 106,
+        "min": 96,
+        "max": 153,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 18688,
+        "min": 11904,
+        "max": 18816,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0086938,
+        "min": 0.0069964,
+        "max": 0.013501200000000001,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 6903,
+        "min": 6743,
+        "max": 7754,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T3-B-r1",
+        "codex-T3-B-r2",
+        "codex-T3-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T3",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "7eb9f9e293ce",
+      "config": {
+        "host": "codex",
+        "task": "T3",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "94869f5f425fdb2f93bf1986a37e15c42bd6754f5ff50a05bd9b3bad4d284f95",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 3,
+        "min": 3,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 7999,
+        "min": 6435,
+        "max": 11000,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 226,
+        "min": 170,
+        "max": 265,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 25600,
+        "min": 20608,
+        "max": 36096,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.010604,
+        "min": 0.0093698,
+        "max": 0.0128804,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 10195,
+        "min": 9411,
+        "max": 10496,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T3-C-r1",
+        "codex-T3-C-r2",
+        "codex-T3-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T4",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "48f36a4339f5",
+      "config": {
+        "host": "codex",
+        "task": "T4",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 11665,
+        "min": 7984,
+        "max": 13275,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 269,
+        "min": 244,
+        "max": 284,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 35200,
+        "min": 32000,
+        "max": 40192,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.014485,
+        "min": 0.0113386,
+        "max": 0.016455,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 12447,
+        "min": 11699,
+        "max": 12496,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T4-A-r1",
+        "codex-T4-A-r2",
+        "codex-T4-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T4",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "3758fe742a37",
+      "config": {
+        "host": "codex",
+        "task": "T4",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 14590,
+        "min": 6736,
+        "max": 14769,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 312,
+        "min": 296,
+        "max": 371,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 40192,
+        "min": 40192,
+        "max": 43904,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.018079599999999998,
+        "min": 0.010491200000000001,
+        "max": 0.0186336,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 13345,
+        "min": 13013,
+        "max": 14748,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T4-B-r1",
+        "codex-T4-B-r2",
+        "codex-T4-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T4",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "b2aefa120e2b",
+      "config": {
+        "host": "codex",
+        "task": "T4",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 6,
+        "min": 6,
+        "max": 6,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 13513,
+        "min": 10166,
+        "max": 14799,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 455,
+        "min": 435,
+        "max": 471,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 54656,
+        "min": 54144,
+        "max": 61824,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0185752,
+        "min": 0.0154322,
+        "max": 0.0198068,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 18905,
+        "min": 16420,
+        "max": 20077,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T4-C-r1",
+        "codex-T4-C-r2",
+        "codex-T4-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T5",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "15474b1e7171",
+      "config": {
+        "host": "codex",
+        "task": "T5",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "7df2fc36f67874c416206f1dd7637601d898098a579618112a520c4ed3a11a09",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 16169,
+        "min": 14907,
+        "max": 23788,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 323,
+        "min": 298,
+        "max": 328,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 37888,
+        "min": 29056,
+        "max": 50176,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0203178,
+        "min": 0.018291400000000003,
+        "max": 0.0268558,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 13600,
+        "min": 11966,
+        "max": 15254,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T5-A-r1",
+        "codex-T5-A-r2",
+        "codex-T5-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T5",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "e04b4b8817b5",
+      "config": {
+        "host": "codex",
+        "task": "T5",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "7df2fc36f67874c416206f1dd7637601d898098a579618112a520c4ed3a11a09",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 16553,
+        "min": 9794,
+        "max": 25492,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 390,
+        "min": 385,
+        "max": 558,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 43008,
+        "min": 38272,
+        "max": 49664,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0206284,
+        "min": 0.0142272,
+        "max": 0.0301956,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 16682,
+        "min": 12808,
+        "max": 17835,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T5-B-r1",
+        "codex-T5-B-r2",
+        "codex-T5-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T5",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "ae004a1c70d6",
+      "config": {
+        "host": "codex",
+        "task": "T5",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "7df2fc36f67874c416206f1dd7637601d898098a579618112a520c4ed3a11a09",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 3,
+        "min": 3,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 10292,
+        "min": 10165,
+        "max": 18225,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 300,
+        "min": 292,
+        "max": 461,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 28928,
+        "min": 28800,
+        "max": 34560,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.013238399999999999,
+        "min": 0.013065,
+        "max": 0.022258,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 13806,
+        "min": 12339,
+        "max": 18926,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T5-C-r1",
+        "codex-T5-C-r2",
+        "codex-T5-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T6",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "95992ee41313",
+      "config": {
+        "host": "codex",
+        "task": "T6",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 5,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 10229,
+        "min": 9661,
+        "max": 17107,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 643,
+        "min": 565,
+        "max": 784,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 53888,
+        "min": 38144,
+        "max": 54784,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0163202,
+        "min": 0.0157484,
+        "max": 0.0222292,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 21062,
+        "min": 20826,
+        "max": 24859,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T6-A-r1",
+        "codex-T6-A-r2",
+        "codex-T6-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T6",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "bf75de8d3d31",
+      "config": {
+        "host": "codex",
+        "task": "T6",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 3,
+        "max": 5,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 17258,
+        "min": 12265,
+        "max": 18332,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 684,
+        "min": 661,
+        "max": 707,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 41216,
+        "min": 29312,
+        "max": 66048,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0220286,
+        "min": 0.019102400000000002,
+        "max": 0.0238128,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 19989,
+        "min": 19655,
+        "max": 25323,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T6-B-r1",
+        "codex-T6-B-r2",
+        "codex-T6-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T6",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "ef53bd175140",
+      "config": {
+        "host": "codex",
+        "task": "T6",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 6,
+        "min": 5,
+        "max": 7,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 11766,
+        "min": 10124,
+        "max": 16149,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 1260,
+        "min": 868,
+        "max": 1594,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 70912,
+        "min": 48640,
+        "max": 84736,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.022921,
+        "min": 0.019969599999999997,
+        "max": 0.0239728,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 35487,
+        "min": 27536,
+        "max": 40810,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T6-C-r1",
+        "codex-T6-C-r2",
+        "codex-T6-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T7",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "f2509ca681b6",
+      "config": {
+        "host": "codex",
+        "task": "T7",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5680770c8e7d70635b40396c99e8b0f96ef4768e223ca6b12c4eb04e45a490a0",
+        "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 8,
+        "min": 7,
+        "max": 10,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 19849,
+        "min": 15562,
+        "max": 35347,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 780,
+        "min": 762,
+        "max": 812,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 124416,
+        "min": 99456,
+        "max": 131840,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.029879799999999998,
+        "min": 0.0244348,
+        "max": 0.045999,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 25928,
+        "min": 25136,
+        "max": 30456,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T7-A-r1",
+        "codex-T7-A-r2",
+        "codex-T7-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T7",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "202f49d5f824",
+      "config": {
+        "host": "codex",
+        "task": "T7",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5680770c8e7d70635b40396c99e8b0f96ef4768e223ca6b12c4eb04e45a490a0",
+        "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 5,
+        "min": 5,
+        "max": 5,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 17528,
+        "min": 16836,
+        "max": 23434,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 854,
+        "min": 799,
+        "max": 915,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 77952,
+        "min": 74240,
+        "max": 79616,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.025778799999999998,
+        "min": 0.0247286,
+        "max": 0.031721,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 25214,
+        "min": 24186,
+        "max": 25843,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T7-B-r1",
+        "codex-T7-B-r2",
+        "codex-T7-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T7",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "efdd16ace6e0",
+      "config": {
+        "host": "codex",
+        "task": "T7",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "5680770c8e7d70635b40396c99e8b0f96ef4768e223ca6b12c4eb04e45a490a0",
+        "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 19178,
+        "min": 12715,
+        "max": 19879,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 718,
+        "min": 566,
+        "max": 733,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 41856,
+        "min": 41216,
+        "max": 43264,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.024935799999999998,
+        "min": 0.0177082,
+        "max": 0.0255298,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 21574,
+        "min": 18455,
+        "max": 21648,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T7-C-r1",
+        "codex-T7-C-r2",
+        "codex-T7-C-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T8",
+      "arm": "A",
+      "armLabel": "native tools (direct)",
+      "configHash": "253baf6a0d99",
+      "config": {
+        "host": "codex",
+        "task": "T8",
+        "arm": "A",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "60a7eeda3f6d3949fdfc26d9ab5aacc799e99f77436fb20a0df7ef95ed820085",
+        "armDefinitionSha256": "c093c47d4b87a913d1de0d9deb937f43ba0592bbbdeaa7d520e761d72bce2009",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 5,
+        "min": 5,
+        "max": 6,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 13083,
+        "min": 9586,
+        "max": 13359,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 695,
+        "min": 695,
+        "max": 927,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 45440,
+        "min": 44672,
+        "max": 62848,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0187916,
+        "min": 0.0173634,
+        "max": 0.019106,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 24057,
+        "min": 21326,
+        "max": 27722,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T8-A-r1",
+        "codex-T8-A-r2",
+        "codex-T8-A-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T8",
+      "arm": "B",
+      "armLabel": "Codex code mode",
+      "configHash": "6d3ddd9a7ad4",
+      "config": {
+        "host": "codex",
+        "task": "T8",
+        "arm": "B",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "60a7eeda3f6d3949fdfc26d9ab5aacc799e99f77436fb20a0df7ef95ed820085",
+        "armDefinitionSha256": "1b138a851405808aaa920f29e48854648538777f5e3a4fe52a5611af44dfc22a",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 5,
+        "min": 5,
+        "max": 6,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 12634,
+        "min": 10813,
+        "max": 13289,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 644,
+        "min": 631,
+        "max": 871,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 66432,
+        "min": 66304,
+        "max": 85888,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.019830599999999997,
+        "min": 0.017283200000000002,
+        "max": 0.0212834,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 23093,
+        "min": 20020,
+        "max": 34550,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T8-B-r1",
+        "codex-T8-B-r2",
+        "codex-T8-B-r3"
+      ]
+    },
+    {
+      "host": "codex",
+      "task": "T8",
+      "arm": "C",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "962e4d579e34",
+      "config": {
+        "host": "codex",
+        "task": "T8",
+        "arm": "C",
+        "hostVersion": "codex-cli 0.169.0",
+        "model": "gpt-6.1-terra",
+        "effort": "medium",
+        "maxTurns": null,
+        "timeoutMin": 15,
+        "seed": 20261115,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "promptSha256": "60a7eeda3f6d3949fdfc26d9ab5aacc799e99f77436fb20a0df7ef95ed820085",
+        "armDefinitionSha256": "a9f5530b2a6431b5e31d7944ce7b5f667dcf24da27e06c4154e592d4ffa94a59",
+        "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+        "agentCodeModeDirty": false,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 3,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 9908,
+        "min": 8429,
+        "max": 19257,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 372,
+        "min": 334,
+        "max": 408,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 38400,
+        "min": 14976,
+        "max": 38912,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.013688,
+        "min": 0.0124146,
+        "max": 0.0216758,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 14327,
+        "min": 14028,
+        "max": 14654,
+        "n": 3
+      },
+      "runIds": [
+        "codex-T8-C-r1",
+        "codex-T8-C-r2",
+        "codex-T8-C-r3"
+      ]
+    }
+  ]
+}

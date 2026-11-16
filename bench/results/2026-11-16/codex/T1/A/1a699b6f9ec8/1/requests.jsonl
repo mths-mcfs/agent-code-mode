@@ -1,0 +1,3 @@
+{"kind":"call","type":"function_call","name":"exec_command","args":"{\"cmd\":\"cat config/app.json\",\"max_output_tokens\":3000}"}
+{"kind":"request","usage":{"input_tokens":10365,"cached_input_tokens":0,"output_tokens":45,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":10410}}
+{"kind":"request","usage":{"input_tokens":10548,"cached_input_tokens":10240,"output_tokens":8,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":10556}}

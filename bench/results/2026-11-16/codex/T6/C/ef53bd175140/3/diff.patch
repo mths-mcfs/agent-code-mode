@@ -1,0 +1,521 @@
+ M data/orders/ord-001.json
+ M data/orders/ord-002.json
+ M data/orders/ord-003.json
+ M data/orders/ord-005.json
+ M data/orders/ord-006.json
+ M data/orders/ord-007.json
+ M data/orders/ord-008.json
+ M data/orders/ord-009.json
+ M data/orders/ord-010.json
+ M data/orders/ord-011.json
+ M data/orders/ord-012.json
+ M data/orders/ord-013.json
+ M data/orders/ord-015.json
+ M data/orders/ord-016.json
+ M data/orders/ord-017.json
+ M data/orders/ord-018.json
+ M data/orders/ord-019.json
+ M data/orders/ord-020.json
+ M data/orders/ord-023.json
+ M data/orders/ord-024.json
+ M data/orders/ord-025.json
+ M data/orders/ord-026.json
+ M data/orders/ord-027.json
+ M data/orders/ord-028.json
+ M data/orders/ord-029.json
+ M data/orders/ord-030.json
+ M data/orders/ord-031.json
+ M data/orders/ord-032.json
+ M data/orders/ord-033.json
+ M data/orders/ord-034.json
+ M data/orders/ord-035.json
+ M data/orders/ord-036.json
+ M data/orders/ord-037.json
+ M data/orders/ord-039.json
+ M data/orders/ord-040.json
+ M data/orders/ord-041.json
+ M data/orders/ord-044.json
+ M data/orders/ord-047.json
+ M data/orders/ord-049.json
+ M data/orders/ord-050.json
+
+diff --git a/data/orders/ord-001.json b/data/orders/ord-001.json
+index 0bd8685..216f561 100644
+--- a/data/orders/ord-001.json
++++ b/data/orders/ord-001.json
+@@ -9,5 +9,6 @@
+       "qty": 6,
+       "unitPriceCents": 8405
+     }
+-  ]
++  ],
++  "itemCount": 6
+ }
+diff --git a/data/orders/ord-002.json b/data/orders/ord-002.json
+index 2fc3222..2858c99 100644
+--- a/data/orders/ord-002.json
++++ b/data/orders/ord-002.json
+@@ -19,5 +19,6 @@
+       "qty": 2,
+       "unitPriceCents": 9657
+     }
+-  ]
++  ],
++  "itemCount": 11
+ }
+diff --git a/data/orders/ord-003.json b/data/orders/ord-003.json
+index 5bf543a..a7b75c9 100644
+--- a/data/orders/ord-003.json
++++ b/data/orders/ord-003.json
+@@ -19,5 +19,6 @@
+       "qty": 4,
+       "unitPriceCents": 2312
+     }
+-  ]
++  ],
++  "itemCount": 8
+ }
+diff --git a/data/orders/ord-005.json b/data/orders/ord-005.json
+index c1e4bbd..456b4a3 100644
+--- a/data/orders/ord-005.json
++++ b/data/orders/ord-005.json
+@@ -19,5 +19,6 @@
+       "qty": 1,
+       "unitPriceCents": 1943
+     }
+-  ]
++  ],
++  "itemCount": 7
+ }
+diff --git a/data/orders/ord-006.json b/data/orders/ord-006.json
+index 94d0418..9e63bfa 100644
+--- a/data/orders/ord-006.json
++++ b/data/orders/ord-006.json
+@@ -19,5 +19,6 @@
+       "qty": 7,
+       "unitPriceCents": 8827
+     }
+-  ]
++  ],
++  "itemCount": 15
+ }
+diff --git a/data/orders/ord-007.json b/data/orders/ord-007.json
+index df75e2f..fc2f103 100644
+--- a/data/orders/ord-007.json
++++ b/data/orders/ord-007.json
+@@ -9,5 +9,6 @@
+       "qty": 2,
+       "unitPriceCents": 5622
+     }
+-  ]
++  ],
++  "itemCount": 2
+ }
+diff --git a/data/orders/ord-008.json b/data/orders/ord-008.json
+index bf871f6..ce7dbe2 100644
+--- a/data/orders/ord-008.json
++++ b/data/orders/ord-008.json
+@@ -9,5 +9,6 @@
+       "qty": 6,
+       "unitPriceCents": 8662
+     }
+-  ]
++  ],
++  "itemCount": 6
+ }
+diff --git a/data/orders/ord-009.json b/data/orders/ord-009.json
+index aaeee0a..ed16a10 100644
+--- a/data/orders/ord-009.json
++++ b/data/orders/ord-009.json
+@@ -24,5 +24,6 @@
+       "qty": 7,
+       "unitPriceCents": 3156
+     }
+-  ]
++  ],
++  "itemCount": 25
+ }
+diff --git a/data/orders/ord-010.json b/data/orders/ord-010.json
+index f43d522..611e903 100644
+--- a/data/orders/ord-010.json
++++ b/data/orders/ord-010.json
+@@ -9,5 +9,6 @@
+       "qty": 9,
+       "unitPriceCents": 5122
+     }
+-  ]
++  ],
++  "itemCount": 9
+ }
+diff --git a/data/orders/ord-011.json b/data/orders/ord-011.json
+index a5350b4..584a77b 100644
+--- a/data/orders/ord-011.json
++++ b/data/orders/ord-011.json
+@@ -14,5 +14,6 @@
+       "qty": 9,
+       "unitPriceCents": 488
+     }
+-  ]
++  ],
++  "itemCount": 16
+ }
+diff --git a/data/orders/ord-012.json b/data/orders/ord-012.json
+index c807d3d..13506a7 100644
+--- a/data/orders/ord-012.json
++++ b/data/orders/ord-012.json
+@@ -24,5 +24,6 @@
+       "qty": 6,
+       "unitPriceCents": 9869
+     }
+-  ]
++  ],
++  "itemCount": 11
+ }
+diff --git a/data/orders/ord-013.json b/data/orders/ord-013.json
+index dfa7828..d0861ed 100644
+--- a/data/orders/ord-013.json
++++ b/data/orders/ord-013.json
+@@ -9,5 +9,6 @@
+       "qty": 3,
+       "unitPriceCents": 1701
+     }
+-  ]
++  ],
++  "itemCount": 3
+ }
+diff --git a/data/orders/ord-015.json b/data/orders/ord-015.json
+index f2f79ff..151e2b5 100644
+--- a/data/orders/ord-015.json
++++ b/data/orders/ord-015.json
+@@ -24,5 +24,6 @@
+       "qty": 2,
+       "unitPriceCents": 3239
+     }
+-  ]
++  ],
++  "itemCount": 15
+ }
+diff --git a/data/orders/ord-016.json b/data/orders/ord-016.json
+index b77dbc8..12a9484 100644
+--- a/data/orders/ord-016.json
++++ b/data/orders/ord-016.json
+@@ -14,5 +14,6 @@
+       "qty": 3,
+       "unitPriceCents": 9120
+     }
+-  ]
++  ],
++  "itemCount": 5
+ }
+diff --git a/data/orders/ord-017.json b/data/orders/ord-017.json
+index 2fe2633..83249b2 100644
+--- a/data/orders/ord-017.json
++++ b/data/orders/ord-017.json
+@@ -14,5 +14,6 @@
+       "qty": 7,
+       "unitPriceCents": 7611
+     }
+-  ]
++  ],
++  "itemCount": 14
+ }
+diff --git a/data/orders/ord-018.json b/data/orders/ord-018.json
+index 655264f..8068f54 100644
+--- a/data/orders/ord-018.json
++++ b/data/orders/ord-018.json
+@@ -9,5 +9,6 @@
+       "qty": 9,
+       "unitPriceCents": 1106
+     }
+-  ]
++  ],
++  "itemCount": 9
+ }
+diff --git a/data/orders/ord-019.json b/data/orders/ord-019.json
+index 413c626..53d88c5 100644
+--- a/data/orders/ord-019.json
++++ b/data/orders/ord-019.json
+@@ -9,5 +9,6 @@
+       "qty": 7,
+       "unitPriceCents": 8687
+     }
+-  ]
++  ],
++  "itemCount": 7
+ }
+diff --git a/data/orders/ord-020.json b/data/orders/ord-020.json
+index ad1842d..bb534bd 100644
+--- a/data/orders/ord-020.json
++++ b/data/orders/ord-020.json
+@@ -24,5 +24,6 @@
+       "qty": 3,
+       "unitPriceCents": 7612
+     }
+-  ]
++  ],
++  "itemCount": 18
+ }
+diff --git a/data/orders/ord-023.json b/data/orders/ord-023.json
+index f6f898f..570244c 100644
+--- a/data/orders/ord-023.json
++++ b/data/orders/ord-023.json
+@@ -19,5 +19,6 @@
+       "qty": 3,
+       "unitPriceCents": 7443
+     }
+-  ]
++  ],
++  "itemCount": 17
+ }
+diff --git a/data/orders/ord-024.json b/data/orders/ord-024.json
+index 2e606d4..b7b7644 100644
+--- a/data/orders/ord-024.json
++++ b/data/orders/ord-024.json
+@@ -14,5 +14,6 @@
+       "qty": 5,
+       "unitPriceCents": 4540
+     }
+-  ]
++  ],
++  "itemCount": 8
+ }
+diff --git a/data/orders/ord-025.json b/data/orders/ord-025.json
+index 2ca7923..34e1fa5 100644
+--- a/data/orders/ord-025.json
++++ b/data/orders/ord-025.json
+@@ -14,5 +14,6 @@
+       "qty": 4,
+       "unitPriceCents": 4376
+     }
+-  ]
++  ],
++  "itemCount": 11
+ }
+diff --git a/data/orders/ord-026.json b/data/orders/ord-026.json
+index 0ca30c1..dfbcca6 100644
+--- a/data/orders/ord-026.json
++++ b/data/orders/ord-026.json
+@@ -14,5 +14,6 @@
+       "qty": 5,
+       "unitPriceCents": 3113
+     }
+-  ]
++  ],
++  "itemCount": 14
+ }
+diff --git a/data/orders/ord-027.json b/data/orders/ord-027.json
+index fd39518..30a4dcd 100644
+--- a/data/orders/ord-027.json
++++ b/data/orders/ord-027.json
+@@ -9,5 +9,6 @@
+       "qty": 5,
+       "unitPriceCents": 4625
+     }
+-  ]
++  ],
++  "itemCount": 5
+ }
+diff --git a/data/orders/ord-028.json b/data/orders/ord-028.json
+index 1830e98..7c943c5 100644
+--- a/data/orders/ord-028.json
++++ b/data/orders/ord-028.json
+@@ -9,5 +9,6 @@
+       "qty": 3,
+       "unitPriceCents": 3184
+     }
+-  ]
++  ],
++  "itemCount": 3
+ }
+diff --git a/data/orders/ord-029.json b/data/orders/ord-029.json
+index 44496b1..ee978d3 100644
+--- a/data/orders/ord-029.json
++++ b/data/orders/ord-029.json
+@@ -14,5 +14,6 @@
+       "qty": 2,
+       "unitPriceCents": 1323
+     }
+-  ]
++  ],
++  "itemCount": 11
+ }
+diff --git a/data/orders/ord-030.json b/data/orders/ord-030.json
+index a576f31..02ba3b8 100644
+--- a/data/orders/ord-030.json
++++ b/data/orders/ord-030.json
+@@ -19,5 +19,6 @@
+       "qty": 7,
+       "unitPriceCents": 8285
+     }
+-  ]
++  ],
++  "itemCount": 13
+ }
+diff --git a/data/orders/ord-031.json b/data/orders/ord-031.json
+index af8f0e2..5978cd7 100644
+--- a/data/orders/ord-031.json
++++ b/data/orders/ord-031.json
+@@ -9,5 +9,6 @@
+       "qty": 4,
+       "unitPriceCents": 3007
+     }
+-  ]
++  ],
++  "itemCount": 4
+ }
+diff --git a/data/orders/ord-032.json b/data/orders/ord-032.json
+index c6f4bec..df22987 100644
+--- a/data/orders/ord-032.json
++++ b/data/orders/ord-032.json
+@@ -19,5 +19,6 @@
+       "qty": 3,
+       "unitPriceCents": 5155
+     }
+-  ]
++  ],
++  "itemCount": 16
+ }
+diff --git a/data/orders/ord-033.json b/data/orders/ord-033.json
+index 0b20c8b..c44313a 100644
+--- a/data/orders/ord-033.json
++++ b/data/orders/ord-033.json
+@@ -14,5 +14,6 @@
+       "qty": 8,
+       "unitPriceCents": 8137
+     }
+-  ]
++  ],
++  "itemCount": 17
+ }
+diff --git a/data/orders/ord-034.json b/data/orders/ord-034.json
+index 2f5de38..9d452d7 100644
+--- a/data/orders/ord-034.json
++++ b/data/orders/ord-034.json
+@@ -24,5 +24,6 @@
+       "qty": 7,
+       "unitPriceCents": 2544
+     }
+-  ]
++  ],
++  "itemCount": 27
+ }
+diff --git a/data/orders/ord-035.json b/data/orders/ord-035.json
+index 51a87ff..10b50a9 100644
+--- a/data/orders/ord-035.json
++++ b/data/orders/ord-035.json
+@@ -14,5 +14,6 @@
+       "qty": 9,
+       "unitPriceCents": 3835
+     }
+-  ]
++  ],
++  "itemCount": 16
+ }
+diff --git a/data/orders/ord-036.json b/data/orders/ord-036.json
+index 6006257..d27b74e 100644
+--- a/data/orders/ord-036.json
++++ b/data/orders/ord-036.json
+@@ -9,5 +9,6 @@
+       "qty": 6,
+       "unitPriceCents": 1107
+     }
+-  ]
++  ],
++  "itemCount": 6
+ }
+diff --git a/data/orders/ord-037.json b/data/orders/ord-037.json
+index ba8177a..f519100 100644
+--- a/data/orders/ord-037.json
++++ b/data/orders/ord-037.json
+@@ -14,5 +14,6 @@
+       "qty": 4,
+       "unitPriceCents": 3143
+     }
+-  ]
++  ],
++  "itemCount": 10
+ }
+diff --git a/data/orders/ord-039.json b/data/orders/ord-039.json
+index 59c4578..f0581b7 100644
+--- a/data/orders/ord-039.json
++++ b/data/orders/ord-039.json
+@@ -14,5 +14,6 @@
+       "qty": 2,
+       "unitPriceCents": 9053
+     }
+-  ]
++  ],
++  "itemCount": 7
+ }
+diff --git a/data/orders/ord-040.json b/data/orders/ord-040.json
+index 40891bc..6f72e24 100644
+--- a/data/orders/ord-040.json
++++ b/data/orders/ord-040.json
+@@ -24,5 +24,6 @@
+       "qty": 4,
+       "unitPriceCents": 3094
+     }
+-  ]
++  ],
++  "itemCount": 13
+ }
+diff --git a/data/orders/ord-041.json b/data/orders/ord-041.json
+index 6f9225f..4f8e221 100644
+--- a/data/orders/ord-041.json
++++ b/data/orders/ord-041.json
+@@ -19,5 +19,6 @@
+       "qty": 9,
+       "unitPriceCents": 782
+     }
+-  ]
++  ],
++  "itemCount": 18
+ }
+diff --git a/data/orders/ord-044.json b/data/orders/ord-044.json
+index 5d07281..eb0f429 100644
+--- a/data/orders/ord-044.json
++++ b/data/orders/ord-044.json
+@@ -19,5 +19,6 @@
+       "qty": 4,
+       "unitPriceCents": 6643
+     }
+-  ]
++  ],
++  "itemCount": 17
+ }
+diff --git a/data/orders/ord-047.json b/data/orders/ord-047.json
+index af979e0..1b9dbe7 100644
+--- a/data/orders/ord-047.json
++++ b/data/orders/ord-047.json
+@@ -9,5 +9,6 @@
+       "qty": 9,
+       "unitPriceCents": 5179
+     }
+-  ]
++  ],
++  "itemCount": 9
+ }
+diff --git a/data/orders/ord-049.json b/data/orders/ord-049.json
+index 68ec5f9..d7491ee 100644
+--- a/data/orders/ord-049.json
++++ b/data/orders/ord-049.json
+@@ -9,5 +9,6 @@
+       "qty": 3,
+       "unitPriceCents": 4774
+     }
+-  ]
++  ],
++  "itemCount": 3
+ }
+diff --git a/data/orders/ord-050.json b/data/orders/ord-050.json
+index 2ba9274..9279bbf 100644
+--- a/data/orders/ord-050.json
++++ b/data/orders/ord-050.json
+@@ -9,5 +9,6 @@
+       "qty": 4,
+       "unitPriceCents": 2901
+     }
+-  ]
++  ],
++  "itemCount": 4
+ }

@@ -14,7 +14,7 @@ import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
 import { ARM_LABELS, checkArm, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, HOST_ARMS, RunRecordSchema, type ArmId, type ParsedRun, type RunRecord } from './lib/record.ts';
 import { Rng } from './lib/rng.ts';
-import { defaultSanitizeContext, sanitize, type SanitizeContext } from './lib/sanitize.ts';
+import { defaultSanitizeContext, sanitize, sanitizeTree, writeSanitized, type SanitizeContext } from './lib/sanitize.ts';
 import { claudeProjectSettings, CODEX_HOOK_MATCHER, createWorkspace, hookCommand, workspaceDiff, type HostId } from './lib/workspace.ts';
 import { writeReport } from './report.ts';
 import { TASKS } from './tasks/index.ts';
@@ -485,7 +485,7 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     files,
   });
   // record.json last: its presence marks the run as done (resume skips it).
-  await writeFile(path.join(outDir, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
+  await writeSanitized(path.join(outDir, 'record.json'), JSON.stringify(record), sctx);
   return record;
 }
 
@@ -524,7 +524,7 @@ async function recordSurfaces(resultsDir: string, observed: Record<string, strin
     ...invocations[last],
     surfaces: { observed, required: { claude: CLAUDE_ARM_SURFACE, codexNonFileTools: CODEX_COMMON_NON_FILE, codexFeaturesOff: CODEX_FEATURES_OFF } },
   };
-  await writeFile(file, `${JSON.stringify({ ...parsed.data, invocations }, null, 2)}\n`);
+  await writeSanitized(file, JSON.stringify({ ...parsed.data, invocations }), defaultSanitizeContext([{ path: REPO_ROOT, label: '<repo>' }]));
 }
 
 async function appendEnvironment(resultsDir: string, invocation: Record<string, unknown>): Promise<void> {
@@ -537,7 +537,7 @@ async function appendEnvironment(resultsDir: string, invocation: Record<string, 
     // first invocation for this date
   }
   const sctx = defaultSanitizeContext([{ path: REPO_ROOT, label: '<repo>' }]);
-  await writeFile(file, sanitize(`${JSON.stringify({ invocations: [...invocations, invocation] }, null, 2)}\n`, sctx));
+  await writeSanitized(file, JSON.stringify({ invocations: [...invocations, invocation] }), sctx);
 }
 
 function line(r: RunRecord): string {
@@ -660,6 +660,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   if (surfaces.size > 0) await recordSurfaces(resultsDir, Object.fromEntries(surfaces));
   const { markdown } = await writeReport(resultsDir);
+  // Final pass over everything written for commit, whatever wrote it.
+  await sanitizeTree(resultsDir, defaultSanitizeContext([{ path: ctx.opts.workDir, label: '<work>' }, { path: REPO_ROOT, label: '<repo>' }, { path: process.execPath, label: 'node' }]));
   process.stdout.write(`\n${markdown}`);
   return failures === 0 ? 0 : 1;
 }

@@ -1,0 +1,3 @@
+{"kind":"call","type":"custom_tool_call","name":"exec","args":"const r = await tools.exec_command({cmd:\"rg -n -U '(computeShippingQuote|normalizeSku)\\\\s*\\\\(' .\",\"max_output_tokens\":4000}); text(r.output);\n"}
+{"kind":"request","usage":{"input_tokens":12055,"cached_input_tokens":6784,"output_tokens":72,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":12127}}
+{"kind":"request","usage":{"input_tokens":12215,"cached_input_tokens":11904,"output_tokens":24,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":12239}}

@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "id": "codex-T3-B-r2",
+  "configHash": "058298631841",
+  "config": {
+    "host": "codex",
+    "task": "T3",
+    "arm": "B",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "94869f5f425fdb2f93bf1986a37e15c42bd6754f5ff50a05bd9b3bad4d284f95",
+    "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "B",
+  "armLabel": "Codex code mode",
+  "task": "T3",
+  "run": 2,
+  "round": 2,
+  "orderIndex": 41,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:06:36.038Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 7754,
+  "parsed": {
+    "turns": 2,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 6988,
+      "output": 153,
+      "cacheCreation": 0,
+      "cacheRead": 18816,
+      "reasoning": 0
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "ANSWER:\ncomputeShippingQuote(order, zone, options = {})\nnormalizeSku(raw, strict = false)",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 1,
+      "other": 0,
+      "byName": {
+        "exec": 1
+      }
+    },
+    "innerCalls": {
+      "total": 2,
+      "byTool": {
+        "command_execution": 2
+      }
+    },
+    "availableTools": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "exec.apply_patch",
+      "exec.exec_command",
+      "exec.list_mcp_resource_templates",
+      "exec.list_mcp_resources",
+      "exec.read_mcp_resource",
+      "exec.write_stdin"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        11
+      ],
+      "agentMessage": [
+        10
+      ],
+      "innerItems": [
+        7,
+        9
+      ],
+      "requests": [
+        2,
+        3
+      ],
+      "calls": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0086938,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER:` block",
+      "ok answer contains computeShippingQuote(order, zone, options = {})",
+      "ok answer contains normalizeSku(raw, strict = false)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

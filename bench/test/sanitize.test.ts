@@ -62,3 +62,51 @@ describe('environment os label', () => {
     expect(osLabel('win32', 'weird', 'x64')).toBe('win32 unknown x64');
   });
 });
+
+describe('every file the harness writes is sanitized', () => {
+  const denial = 'PreToolUse:Edit hook error: [node "/home/alice/work/agent-code-mode/bench/hooks/protect-file.mjs" "src/handlers/inventory.js"]: src/handlers/inventory.js is protected';
+  const record = { schema: 1, host: 'claude', parsed: { denials: [denial], usage: { input: 3, cacheRead: 10 } }, files: { 'auth.txt': 'auth.txt' } };
+
+  it('writes record.json with hook-path denials cleaned and the numbers and shape kept', async () => {
+    const { mkdtemp, readFile } = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { writeSanitized } = await import('../lib/sanitize.ts');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'bench-sanitize-'));
+    const file = path.join(dir, 'record.json');
+    await writeSanitized(file, JSON.stringify(record), ctx);
+    const text = await readFile(file, 'utf8');
+    expect(text).not.toMatch(/\/home\/|alice/);
+    const parsed: unknown = JSON.parse(text);
+    expect(parsed).toEqual({ ...record, parsed: { ...record.parsed, denials: [expect.stringContaining('<repo>/bench/hooks/protect-file.mjs')] } });
+  });
+
+  it('cleans an existing results tree in place (record.json, env.json, summary, stderr, transcripts) and leaves .gz alone', async () => {
+    const { mkdtemp, mkdir, readFile, writeFile, readdir } = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { sanitizeTree } = await import('../lib/sanitize.ts');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'bench-tree-'));
+    const run = path.join(dir, 'claude', 'T8', 'A', 'h', '1');
+    await mkdir(run, { recursive: true });
+    await writeFile(path.join(run, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
+    await writeFile(path.join(run, 'stderr.txt'), `warning on alice-laptop: /home/alice/x\n`);
+    await writeFile(path.join(run, 'transcript.jsonl'), `${JSON.stringify({ cwd: '/home/alice/work/agent-code-mode' })}\n`);
+    await writeFile(path.join(dir, 'env.json'), JSON.stringify({ invocations: [{ cwd: '/home/alice/work/agent-code-mode' }] }));
+    await writeFile(path.join(dir, 'summary.md'), '| alice | /home/alice |\n');
+    await writeFile(path.join(run, 'transcript.jsonl.gz'), 'binary /home/alice');
+    const changed = await sanitizeTree(dir, ctx);
+    expect(changed).toHaveLength(5);
+    const all: string[] = [];
+    const walk = async (d: string): Promise<void> => {
+      for (const e of await readdir(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) await walk(p);
+        else if (!p.endsWith('.gz')) all.push(await readFile(p, 'utf8'));
+      }
+    };
+    await walk(dir);
+    for (const text of all) expect(text).not.toMatch(/\/home\/|alice/);
+    expect(await sanitizeTree(dir, ctx)).toEqual([]);
+  });
+});
