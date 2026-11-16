@@ -55,6 +55,8 @@ export const ParsedRunSchema = z.object({
    * logs, as short texts. Null when the log cannot show denials (Codex without its rollout).
    */
   denials: z.array(z.string()).nullable().default(null),
+  /** Claude: agents, plugin sources and auto memory from the init event (isolation proof). Null for Codex. */
+  hostContext: z.object({ agents: z.array(z.string()), plugins: z.array(z.string()), memory: z.boolean() }).nullable().default(null),
   /** Host-reported error, e.g. a Claude result with `is_error`. */
   hostError: z.string().nullable(),
   /** Where the numbers came from: transcript line numbers (1-based) of the source events. */
@@ -145,5 +147,8 @@ export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readon
   if (arm === 'A' && (exec || !has('exec_command'))) reasons.push('native arm is not in direct tool mode');
   if (arm === 'B' && (!exec || native.length > 0)) reasons.push('Codex code-mode arm is not in code_mode_only');
   if (arm === 'C' && (exec || native.length > 0)) reasons.push(`agent-code-mode arm sees native or code-mode tools: ${[...native, ...(exec ? ['exec'] : [])].join(', ')}`);
+  if (arm === 'C' && !tools.some((t) => /^mcp__agent[-_]code[-_]mode(__|\.)run$/.test(t))) reasons.push('agent-code-mode arm does not see the run tool directly (deferred behind tool_search, or server not configured)');
+  const apps = tools.filter((t) => t.startsWith('mcp__codex_apps__'));
+  if (apps.length > 0) reasons.push(`Codex account apps are exposed (${apps.length} tools): the run is not isolated`);
   return reasons;
 }

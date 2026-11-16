@@ -42,7 +42,10 @@ export function codexConfigToml(o: CodexHomeOptions): string {
     'suppress_unstable_features_warning = true',
   ];
   if (o.catalogFile !== null) lines.push(`model_catalog_json = ${tomlString(o.catalogFile)}`);
-  lines.push('', '[features]', 'hooks = true');
+  // `apps = false`: otherwise Codex exposes the apps connected to the user's ChatGPT account (mail,
+  // calendar, drive, repos...) as MCP tools in every run: a privacy leak and extra tokens the arms
+  // would not share equally (deferred in A, direct in C).
+  lines.push('', '[features]', 'hooks = true', 'apps = false');
   if (o.arm === 'B') lines.push('code_mode = true');
   if (o.arm === 'C') {
     lines.push('shell_tool = false');
@@ -66,7 +69,11 @@ const CatalogSchema = z.object({ models: z.array(z.object({ slug: z.string() }).
 export function catalogForArm(arm: ArmId, rawCatalog: string): string | null {
   if (arm === 'B') return null;
   const catalog = CatalogSchema.parse(JSON.parse(rawCatalog));
-  const models = catalog.models.map((m) => ({ ...m, tool_mode: 'direct', ...(arm === 'C' ? { apply_patch_tool_type: null } : {}) }));
+  // Arm C also turns off `supports_search_tool`: with it, Codex 0.169 defers MCP tools behind
+  // `tool_search` (core/src/tools/spec_plan.rs, exposure planning), and in direct mode the model calls
+  // that search as a plain function (`tool_search.tool_search_tool`), which the router rejects as an
+  // unsupported call, so `run` was never reachable. Without it, MCP tools are exposed directly.
+  const models = catalog.models.map((m) => ({ ...m, tool_mode: 'direct', ...(arm === 'C' ? { apply_patch_tool_type: null, supports_search_tool: false } : {}) }));
   return `${JSON.stringify({ ...catalog, models })}\n`;
 }
 
@@ -319,6 +326,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     toolCalls: calls,
     innerCalls,
     availableTools: null,
+    hostContext: null,
     denials,
     hostError,
     evidence,

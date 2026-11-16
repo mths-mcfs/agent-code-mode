@@ -164,11 +164,23 @@ export async function writeReport(resultsDir: string, now: Date = new Date()): P
   return { summary, markdown };
 }
 
-// `node bench/report.ts <resultsDir>`
+/** The newest `YYYY-MM-DD` directory under `root`, or undefined. */
+export async function latestResultsDir(root: string): Promise<string | undefined> {
+  let names: string[] = [];
+  try {
+    names = (await readdir(root, { withFileTypes: true })).filter((e) => e.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(e.name)).map((e) => e.name);
+  } catch {
+    return undefined;
+  }
+  const last = names.sort().at(-1);
+  return last === undefined ? undefined : path.join(root, last);
+}
+
+// `npm run bench:report [-- <results/date dir>]`: without a dir, the newest date under bench/results.
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === import.meta.filename) {
-  const dir = process.argv[2];
+  const dir = process.argv[2] ?? (await latestResultsDir(path.join(import.meta.dirname, 'results')));
   if (dir === undefined) {
-    process.stderr.write('usage: node bench/report.ts <results/date dir>\n');
+    process.stderr.write('usage: npm run bench:report -- <bench/results/YYYY-MM-DD> (no results found under bench/results)\n');
     process.exitCode = 2;
   } else {
     const { markdown } = await writeReport(path.resolve(dir));

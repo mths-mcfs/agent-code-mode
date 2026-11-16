@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseClaudeTranscript } from '../lib/claude.ts';
+import { claudeIsolationIssues, parseClaudeTranscript } from '../lib/claude.ts';
 import { classifyCodexTool, codexToolSurface, extractCodexRequests, parseCodexTranscript } from '../lib/codex.ts';
 import { costFromUsage, loadPricing } from '../lib/pricing.ts';
 import { checkArm, checkSurface } from '../lib/record.ts';
@@ -61,6 +61,17 @@ describe('Claude transcript parser', () => {
       'edit edit src/handlers/reports.js: blocked by hook',
     ]);
     expect(parseClaudeTranscript(read('claude-A.jsonl')).denials).toEqual([]);
+  });
+
+  it('reads the isolation proof from the init event', () => {
+    const p = parseClaudeTranscript(read('claude-A.jsonl'));
+    expect(p.hostContext).not.toBeNull();
+    expect(claudeIsolationIssues(p.hostContext ?? { agents: [], plugins: [], memory: true })).toEqual([]);
+    expect(claudeIsolationIssues({ agents: ['claude', 'explorador'], plugins: ['cc-plugin-telemetry@builtin', 'my-plugin@my-marketplace'], memory: true })).toEqual([
+      'user agents loaded: explorador',
+      'user plugins loaded: my-plugin@my-marketplace',
+      'auto memory is on',
+    ]);
   });
 
   it('rejects a transcript without a result event', () => {
@@ -185,6 +196,10 @@ describe('Codex transcript parser', () => {
     expect(checkSurface('codex', 'C', surfaces.A).length).toBeGreaterThan(0);
     expect(checkSurface('codex', 'A', surfaces.B).length).toBeGreaterThan(0);
     expect(checkSurface('codex', 'B', surfaces.C).length).toBeGreaterThan(0);
+    // Arm C sees run directly (not behind tool_search) and no account apps.
+    expect(surfaces.C).toContain('mcp__agent_code_mode.run');
+    expect(checkSurface('codex', 'C', surfaces.C.filter((t: string) => !t.includes('agent_code_mode')))).toContain('agent-code-mode arm does not see the run tool directly (deferred behind tool_search, or server not configured)');
+    expect(checkSurface('codex', 'A', [...surfaces.A, 'mcp__codex_apps__mail._send']).join()).toMatch(/account apps/);
   });
 
   it('reads the tool names out of prompt-input output', () => {

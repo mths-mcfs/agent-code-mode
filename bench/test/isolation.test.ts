@@ -224,6 +224,26 @@ describe('syncBack rule', () => {
     return { root, real, home };
   }
 
+  it('applies the same rule to the Claude credentials file in a temp CLAUDE_CONFIG_DIR', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'acm-claude-cfg-'));
+    try {
+      await mkdir(path.join(root, 'user'));
+      const real = path.join(root, 'user', '.credentials.json');
+      await writeFile(real, ORIGINAL, { mode: 0o600 });
+      const cfg = path.join(root, 'cfg');
+      createCodexHome(cfg, path.join(root, 'user'), '.credentials.json');
+      expect(await readFile(path.join(cfg, '.credentials.json'), 'utf8')).toBe(ORIGINAL);
+      // Claude rewrites its config dir freely; only the credentials file is synced back.
+      await writeFile(path.join(cfg, '.credentials.json'), REFRESHED);
+      await writeFile(path.join(cfg, '.claude.json'), '{}');
+      expect(removeCodexHome(cfg)).toBe('written-back');
+      expect(await readFile(real, 'utf8')).toBe(REFRESHED);
+      expect((await readdir(path.join(root, 'user'))).sort()).toEqual(['.credentials.json']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('copies (never links) with mode 0600', async () => {
     const { root, home } = await setup();
     try {

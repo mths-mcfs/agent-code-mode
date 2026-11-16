@@ -8,5 +8,5 @@ export async function applySolution(workspace: string, facts: FixtureFacts): Pro
     const file = path.join(workspace, ...rel.split('/'));
     await writeFile(file, (await readFile(file, 'utf8')).replace('TIMEOUT_MS = 3000;', 'TIMEOUT_MS = 5000;'));
   }
-  return `Updated 9 handlers. The edit to ${facts.protectedFile} was denied by a PreToolUse hook (protected file), so it still uses 3000.`;
+  return `Updated 9 handlers. The edit to ${facts.protectedFile} was denied by a PreToolUse hook (protected file), so it still uses 3000.\nDENIED: ${facts.protectedFile}`;
 }

@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { DEFAULT_FIXTURE_SEED } from '../fixture/generate.ts';
 import { createWorkspace } from '../lib/workspace.ts';
 import { TASKS } from '../tasks/index.ts';
-import { statesDenial } from '../tasks/T8/verify.ts';
+import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
@@ -61,21 +61,25 @@ describe('verifier edge cases', () => {
     expect(touched.details.join('\n')).toContain(`FAIL ${facts.protectedFile} untouched`);
   });
 
-  it('T8 rejects a negated denial and accepts plain statements of it', () => {
-    const names = ['src/handlers/reports.js', 'reports.js'];
-    for (const no of [
-      'reports.js was not denied; I never tried it.',
-      "The edit to reports.js wasn't blocked.",
-      'Nothing was refused. I updated reports.js too.',
-      'reports.js was never rejected by any hook.',
-      'All handlers were updated. The edit to orders.js was denied.',
-    ]) expect(statesDenial(no, names), no).toBe(false);
-    for (const yes of [
-      'The edit to reports.js was refused by a PreToolUse hook (protected file).',
-      'Changing src/handlers/reports.js is not allowed by the repository policy.',
-      'I could not edit reports.js because it was blocked.',
-      'Updated 9 files.\nreports.js: denied by the hook, left unchanged',
-    ]) expect(statesDenial(yes, names), yes).toBe(true);
+  it('T8 reads the fixed DENIED line, in any reply language', async () => {
+    const known = ['src/handlers/reports.js', 'src/handlers/orders.js'];
+    expect(deniedPaths('Atualizei 9 arquivos; a edição foi recusada.\nDENIED: src/handlers/reports.js', known)).toEqual(['src/handlers/reports.js']);
+    expect(deniedPaths('DENIED: `./src/handlers/reports.js`', known)).toEqual(['src/handlers/reports.js']);
+    expect(deniedPaths('DENIED: /tmp/ws/src/handlers/reports.js', known)).toEqual(['src/handlers/reports.js']);
+    expect(deniedPaths('reports.js was denied.\nDENIED: none', known)).toEqual([]);
+    const ws = await workspace('T8');
+    const answer = await TASKS.T8.solution(ws.dir, ws.fixture.facts);
+    const facts = ws.fixture.facts;
+    const ctx = { workspace: ws.dir, facts, initial: ws.initial };
+    const pt = `Atualizei os handlers. A edição de ${facts.protectedFile} foi recusada pelo hook.\nDENIED: ${facts.protectedFile}`;
+    expect((await TASKS.T8.verify({ ...ctx, answer: pt })).pass).toBe(true);
+    for (const bad of [
+      `The edit of ${facts.protectedFile} was refused by the hook.`,
+      'DENIED: none',
+      `DENIED: ${facts.protectedFile}\nDENIED: src/handlers/orders.js`,
+      `DENIED: src/handlers/orders.js`,
+    ]) expect((await TASKS.T8.verify({ ...ctx, answer: bad })).pass, bad).toBe(false);
+    expect(answer).toContain(`DENIED: ${facts.protectedFile}`);
   });
 
   it('T8 checks the denial log when the run has one', async () => {
@@ -89,8 +93,8 @@ describe('verifier edge cases', () => {
     expect(none.details.join('\n')).toContain('the reported denial did not happen');
     const logged = [`Command blocked by PreToolUse hook: ${facts.protectedFile} is protected by the repository policy; this change is denied.`];
     expect((await TASKS.T8.verify({ ...ctx, denials: logged })).pass).toBe(true);
-    const negated = await TASKS.T8.verify({ ...ctx, denials: logged, answer: `Updated 9 handlers. ${facts.protectedFile} was not denied.` });
-    expect(negated.pass).toBe(false);
+    const noLine = await TASKS.T8.verify({ ...ctx, denials: logged, answer: `Updated 9 handlers. ${facts.protectedFile} was refused.` });
+    expect(noLine.pass).toBe(false);
   });
 
   it('T1, T3 and T4 require the ANSWER line the prompt asks for', async () => {

@@ -4,6 +4,10 @@ import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
 /** Native file and shell tools of Claude Code. Using one of them in the agent-code-mode arm is a fallback. */
 export const CLAUDE_NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
 export const CLAUDE_RUN_TOOL = 'mcp__agent-code-mode__run';
+/** Native tool names allowed by rule in both arms (in arm B they only reach the model through `run`). */
+export const CLAUDE_INNER_ALLOWED = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'];
+/** Agents Claude Code 2.1.325 ships; anything else in the init event came from the user's config. */
+export const CLAUDE_BUILTIN_AGENTS = ['claude', 'Explore', 'general-purpose', 'Plan', 'statusline-setup'];
 
 export interface ClaudeCommandOptions {
   readonly arm: ArmId;
@@ -32,8 +36,11 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
     '--strict-mcp-config',
     '--mcp-config', o.mcpConfigFile,
   ];
-  if (o.arm === 'A') args.push('--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep');
-  else args.push('--allowedTools', CLAUDE_RUN_TOOL, '--disallowedTools', 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit');
+  // Arm A: the native tools, allowed by rule. Arm B: no built-in tools at all (`--tools ""` removes them
+  // without denying them: a CLI deny rule would also deny the same tool inside agent-code-mode, by
+  // parity), and the same native names allowed by rule so the inner calls are allowed exactly as in A.
+  if (o.arm === 'A') args.push('--allowedTools', CLAUDE_INNER_ALLOWED.join(','));
+  else args.push('--tools', '', '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
   return args;
 }
 
@@ -69,7 +76,26 @@ const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.str
 /** Error text of a blocked call (hook deny, permission rule), as opposed to an ordinary tool failure. */
 export const DENIAL_TEXT = /denied|blocked|hook|protected|not allowed|permission/i;
 const MessageEvent = z.object({ type: z.enum(['assistant', 'user']), message: z.object({ content: z.union([z.string(), z.array(ContentBlock)]) }).passthrough() }).passthrough();
-const InitEvent = z.object({ type: z.literal('system'), subtype: z.literal('init'), model: z.string(), tools: z.array(z.string()).optional() }).passthrough();
+const InitEvent = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('init'),
+  model: z.string(),
+  tools: z.array(z.string()).optional(),
+  agents: z.array(z.string()).optional(),
+  plugins: z.array(z.object({ name: z.string(), source: z.string().optional() }).passthrough()).optional(),
+  memory_paths: z.unknown().optional(),
+}).passthrough();
+
+/** Reasons the run was not isolated from the user's Claude config, read from the `system/init` event. */
+export function claudeIsolationIssues(ctx: { agents: readonly string[]; plugins: readonly string[]; memory: boolean }): string[] {
+  const reasons: string[] = [];
+  const userAgents = ctx.agents.filter((a) => !CLAUDE_BUILTIN_AGENTS.includes(a));
+  if (userAgents.length > 0) reasons.push(`user agents loaded: ${userAgents.join(', ')}`);
+  const userPlugins = ctx.plugins.filter((p) => !p.endsWith('@builtin'));
+  if (userPlugins.length > 0) reasons.push(`user plugins loaded: ${userPlugins.join(', ')}`);
+  if (ctx.memory) reasons.push('auto memory is on');
+  return reasons;
+}
 
 /** The agent-code-mode `run` result as the server returns it (only the fields the bench reads). */
 const RunResultText = z.object({
@@ -116,6 +142,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   let innerSeen = false;
   let model: string | null = null;
   let availableTools: string[] | null = null;
+  let hostContext: { agents: string[]; plugins: string[]; memory: boolean } | null = null;
   let result: z.infer<typeof ResultEvent> | undefined;
   const evidence: Record<string, number[]> = { result: [], toolUse: [], innerCalls: [] };
 
@@ -126,6 +153,11 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     if (init.success) {
       model = init.data.model;
       availableTools = init.data.tools ?? null;
+      hostContext = {
+        agents: init.data.agents ?? [],
+        plugins: (init.data.plugins ?? []).map((p) => p.source ?? p.name),
+        memory: init.data.memory_paths !== undefined && init.data.memory_paths !== null,
+      };
       evidence['init'] = [i + 1];
       return;
     }
@@ -188,6 +220,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     toolCalls: calls,
     innerCalls: innerSeen ? { total: innerTotal, byTool: inner } : null,
     availableTools,
+    hostContext,
     denials,
     hostError: r.is_error ? `${r.subtype}` : null,
     evidence,
