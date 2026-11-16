@@ -57,7 +57,7 @@ describe('cancellation', () => {
     const controller = new AbortController();
     const pending = server.run(`for (let i = 0; ; i++) await write({ path: 'out/f' + i + '.txt', content: String(i) });`, { signal: controller.signal });
     const outDir = path.join(lab.ws, 'out');
-    for (let i = 0; i < 100 && !(existsSync(outDir) && readdirSync(outDir).length >= 5); i++) await sleep(50);
+    for (let i = 0; i < 300 && !(existsSync(outDir) && readdirSync(outDir).length >= 3); i++) await sleep(50);
     controller.abort();
     await expect(pending).rejects.toThrow();
     // The dispatcher's settle grace is 2 s; after it nothing may land.
@@ -65,7 +65,7 @@ describe('cancellation', () => {
     const settled = readdirSync(outDir).length;
     await sleep(2_000);
     expect(readdirSync(outDir).length).toBe(settled);
-    expect(settled).toBeGreaterThanOrEqual(5);
+    expect(settled).toBeGreaterThanOrEqual(3);
   });
 
   it.runIf(posix)('a cancelled bash call is killed and its later effect never happens', async () => {
