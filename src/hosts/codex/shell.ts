@@ -47,6 +47,47 @@ interface Word {
   dynamic: boolean;
   /** Any part of it was quoted. */
   quoted: boolean;
+  /** Each character of `text` and whether quoting made it literal (substitutions count as quoted). */
+  chars: { c: string; quoted: boolean }[];
+}
+
+function add(word: Word, text: string, quoted: boolean): void {
+  word.text += text;
+  for (const c of text) word.chars.push({ c, quoted });
+}
+
+/**
+ * Marks a word bash may hand the command in another form than its text:
+ * `INEXACT` + text. Rules never match such a word exactly; the adapter treats
+ * a rule that could match it as "may match".
+ */
+export const INEXACT = '\0';
+
+/** Whether bash would brace-expand the characters (`{a,b}`, `{1..3}`); `{}` and `a{b}c` stay as written. */
+function hasBraceExpansion(chars: readonly { c: string; quoted: boolean }[]): boolean {
+  // Any unquoted `{`, then a `,` or `..`, then a `}`: a superset of what bash expands (its pairing rules are subtle).
+  let stage = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (!ch || ch.quoted) continue;
+    if (stage === 0 && ch.c === '{') stage = 1;
+    else if (stage === 1 && (ch.c === ',' || (ch.c === '.' && chars[i + 1]?.c === '.' && chars[i + 1]?.quoted === false))) stage = 2;
+    else if (stage === 2 && ch.c === '}') return true;
+  }
+  return false;
+}
+
+/** Whether bash would tilde-expand part of the word: a leading `~`, or `~` after `=`/`:` in an assignment-like word. */
+function hasTilde(chars: readonly { c: string; quoted: boolean }[]): boolean {
+  if (chars[0]?.c === '~' && !chars[0].quoted) return true;
+  const eq = chars.findIndex((c) => c.c === '=');
+  if (eq <= 0 || chars.slice(0, eq + 1).some((c) => c.quoted) || !/^[A-Za-z_][A-Za-z0-9_]*=$/.test(chars.slice(0, eq + 1).map((c) => c.c).join(''))) return false;
+  return chars.some((c, i) => i > eq && c.c === '~' && !c.quoted && (i === eq + 1 || (chars[i - 1]?.c === ':' && chars[i - 1]?.quoted === false)));
+}
+
+/** True when bash may change the word before the command sees it (expansion, substitution, glob, braces, tilde). */
+function isInexact(word: Word): boolean {
+  return word.dynamic || word.chars.some((c) => !c.quoted && '*?['.includes(c.c)) || hasBraceExpansion(word.chars) || hasTilde(word.chars);
 }
 
 type Token =
@@ -200,7 +241,7 @@ class Tokenizer {
 
   #readWord(): void {
     const s = this.src;
-    const word: Word = { text: '', dynamic: false, quoted: false };
+    const word: Word = { text: '', dynamic: false, quoted: false, chars: [] };
     while (this.#i < s.length) {
       const ch = s[this.#i] ?? '';
       if (ch === ' ' || ch === '\t' || ch === '\n') break;
@@ -209,7 +250,7 @@ class Tokenizer {
         if ((ch === '<' || ch === '>') && s[this.#i + 1] === '(') {
           const end = matchParen(s, this.#i + 2);
           this.nested.push(s.slice(this.#i + 2, end));
-          word.text += s.slice(this.#i, end + 1);
+          add(word, s.slice(this.#i, end + 1), true);
           word.dynamic = true;
           this.plain = false;
           this.#i = end + 1;
@@ -226,7 +267,7 @@ class Tokenizer {
         const next = s[this.#i + 1];
         if (next === undefined) throw new ShellParseError('trailing backslash');
         this.plain = false;
-        if (next !== '\n') word.text += next;
+        if (next !== '\n') add(word, next, true);
         word.quoted = true;
         this.#i += 2;
         continue;
@@ -234,7 +275,7 @@ class Tokenizer {
       if (ch === "'") {
         const end = s.indexOf("'", this.#i + 1);
         if (end < 0) throw new ShellParseError('unterminated single quote');
-        word.text += s.slice(this.#i + 1, end);
+        add(word, s.slice(this.#i + 1, end), true);
         word.quoted = true;
         this.#i = end + 1;
         continue;
@@ -242,7 +283,7 @@ class Tokenizer {
       if (ch === '$' && s[this.#i + 1] === "'") {
         // ANSI-C quoting: keep the raw text; it is not a plain word for Codex.
         const end = findAnsiCEnd(s, this.#i + 2);
-        word.text += s.slice(this.#i + 2, end);
+        add(word, s.slice(this.#i + 2, end), true);
         word.quoted = true;
         word.dynamic = true;
         this.plain = false;
@@ -253,6 +294,14 @@ class Tokenizer {
         this.#readDoubleQuoted(word);
         continue;
       }
+      if (ch === '$' && s[this.#i + 1] === '"') {
+        // Locale translation `$"..."`: bash may hand the command another text.
+        this.#i++;
+        this.#readDoubleQuoted(word);
+        word.dynamic = true;
+        this.plain = false;
+        continue;
+      }
       if (ch === '$' || ch === '`') {
         this.#readExpansion(word);
         continue;
@@ -260,7 +309,7 @@ class Tokenizer {
       // Codex `is_literal_word_or_number`: these characters (or a leading `=`)
       // mean the word may expand, so the script is not plain.
       if ('{}*?[]~^#'.includes(ch) || (word.text === '' && !word.quoted && ch === '=')) this.plain = false;
-      word.text += ch;
+      add(word, ch, false);
       this.#i++;
     }
     if (word.text === '' && !word.quoted && !word.dynamic) return;
@@ -282,8 +331,8 @@ class Tokenizer {
         const next = s[this.#i + 1];
         if (next === undefined) throw new ShellParseError('unterminated double quote');
         this.plain = false;
-        if ('$`"\\'.includes(next)) word.text += next;
-        else if (next !== '\n') word.text += `\\${next}`;
+        if ('$`"\\'.includes(next)) add(word, next, true);
+        else if (next !== '\n') add(word, `\\${next}`, true);
         this.#i += 2;
         continue;
       }
@@ -291,7 +340,7 @@ class Tokenizer {
         this.#readExpansion(word);
         continue;
       }
-      word.text += ch;
+      add(word, ch, true);
       this.#i++;
     }
   }
@@ -320,11 +369,11 @@ class Tokenizer {
       }
     } else {
       // A lone `$` is literal.
-      word.text += '$';
+      add(word, '$', true);
       this.#i++;
       return;
     }
-    word.text += s.slice(start, this.#i);
+    add(word, s.slice(start, this.#i), true);
     word.dynamic = true;
     this.plain = false;
   }
@@ -456,7 +505,7 @@ function buildCommands(tokens: readonly Token[], plainSoFar: boolean): { command
         }
         break;
       }
-      if (words.length > 0) commands.push(words.map((w) => w.text));
+      if (words.length > 0) commands.push(words.map((w) => (isInexact(w) ? INEXACT + w.text : w.text)));
     }
     current = [];
     skipRest = false;
@@ -660,7 +709,11 @@ function addCommand(argv: readonly string[], depth: number, st: SplitState): boo
   for (const u of unwrap(argv)) {
     plain = false;
     if (u.kind === 'argv') addCommand(u.argv, depth + 1, st);
-    else if (u.kind === 'script') splitInto(u.script, depth + 1, st);
+    else if (u.kind === 'script') {
+      // A script made of words bash changes at run time: its commands cannot be known.
+      if (u.script.includes(INEXACT)) st.unsure.push(`a script only known at run time (${u.script.replaceAll(INEXACT, '')})`);
+      splitInto(u.script.replaceAll(INEXACT, ''), depth + 1, st);
+    }
     else st.unsure.push(u.reason);
   }
   return plain;

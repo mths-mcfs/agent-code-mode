@@ -130,6 +130,12 @@ export interface BashResult {
   readonly truncated: boolean;
   /** True when the command hit its timeout and was killed. */
   readonly timedOut: boolean;
+  /**
+   * The command that ran, present only when it is not the one the script
+   * passed: its globs were expanded to the literal list of files before it was
+   * authorized (see `BashEffect.expansion`).
+   */
+  readonly command?: string;
 }
 
 /** Result of `read`. */
@@ -272,7 +278,62 @@ export interface BashEffect {
   readonly timeoutMs: number;
   /** Containment the tool runtime will enforce; must equal the policy's `bashContainment`. */
   readonly containment: BashContainment;
+  /**
+   * Present when globs of the command were expanded at prepare (see
+   * `PolicySnapshot.planBashExpansion`): `command` then names every file
+   * literally, and commit refuses to run it unless each entry still has the
+   * identity recorded here.
+   */
+  readonly expansion?: BashExpansion;
 }
+
+/** What a glob expansion of a `bash` command replaced and the entries it named. */
+export interface BashExpansion {
+  /** The command as it would have run without the expansion. */
+  readonly original: string;
+  /** Every file or directory the globs expanded to, in command order. */
+  readonly entries: readonly BashExpandedEntry[];
+}
+
+/** One expanded entry and its identity at prepare. */
+export interface BashExpandedEntry {
+  /** Absolute path as named in the command (its last component not resolved). */
+  readonly path: string;
+  /** `dev:ino:type` of the entry itself (lstat, a symbolic link is not followed). */
+  readonly identity: string;
+  /** `dev:ino:type` of what the command opens (stat, symbolic links followed). */
+  readonly targetIdentity: string;
+}
+
+/**
+ * Where a host can expand the globs of a `bash` command (built by the host
+ * adapter, which owns the shell parser; the tool runtime does the I/O).
+ * `globs` lists each glob word to expand; `render` returns the command with
+ * the i-th glob replaced by `matches[i]` (paths relative to the command's cwd,
+ * in the order given).
+ */
+export interface BashGlobPlan {
+  readonly globs: readonly BashGlob[];
+  render(matches: readonly (readonly string[])[]): string;
+}
+
+/** One glob word of a `bash` command, split at `/`. */
+export interface BashGlob {
+  /** The word as written. */
+  readonly raw: string;
+  readonly segments: readonly BashGlobSegment[];
+  /** Whether a match may be a directory (`ls`); otherwise only regular files. */
+  readonly directories: boolean;
+}
+
+/** A path segment of a glob: literal text, or a name pattern. */
+export type BashGlobSegment =
+  | { readonly kind: 'literal'; readonly text: string }
+  | {
+      readonly kind: 'pattern';
+      /** Whether the name matches the pattern (bash glob semantics, C locale). */
+      readonly matches: (name: string) => boolean;
+    };
 
 /** Effect of a `read` call. */
 export interface ReadEffect {
@@ -460,6 +521,13 @@ export interface PolicySnapshot<P = unknown> {
    * path inside the workspace is readable.
    */
   readonly readFilter?: (realAbsPath: string) => boolean;
+  /**
+   * Plans the expansion of globs in a `bash` command (relative patterns read
+   * by a known pure reader such as `cat` or `wc`). Undefined, or a result of
+   * undefined, leaves the command as written. The tool runtime expands the
+   * plan at prepare against the command's cwd and validates every match.
+   */
+  readonly planBashExpansion?: (command: string) => BashGlobPlan | undefined;
   readonly payload: P;
 }
 

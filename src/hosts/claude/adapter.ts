@@ -14,6 +14,7 @@ import type {
   ToolResult,
 } from '../../core/types.js';
 import { BashAnalyzer, type BashAnalysis } from './bash.js';
+import { planGlobExpansion } from './expand.js';
 import {
   NATIVE_TOOL,
   combineOutcomes,
@@ -154,7 +155,14 @@ interface CallView {
   readonly paths: readonly string[];
   readonly analysis: BashAnalysis | undefined;
   /** Resolved file targets of a bash command; undefined path = only known at run time. */
-  readonly bashFiles: readonly { readonly access: 'read' | 'write'; readonly path: string | undefined }[];
+  readonly bashFiles: readonly BashFile[];
+}
+
+interface BashFile {
+  readonly access: 'read' | 'write';
+  readonly path: string | undefined;
+  /** For a glob target: the glob as written, before expansion. */
+  readonly pattern?: string;
 }
 
 function pathRuleVerdict(patterns: readonly PathPattern[], paths: readonly string[], kind: RuleKind): Verdict {
@@ -192,7 +200,7 @@ function restrictVerdict(rule: Rule, view: CallView): Verdict {
     let verdict: Verdict = fileVerdict;
     for (const cmd of view.analysis.commands) {
       if (cmd.denyForms.some((form) => matchesBashSpec(spec, form))) return 'match';
-      if (cmd.dynamic && cmd.staticPrefixes.some((prefix) => bashSpecMayMatchDynamic(spec, prefix))) verdict = 'maybe';
+      if ((cmd.dynamic || cmd.globbed) && cmd.staticPrefixes.some((prefix) => bashSpecMayMatchDynamic(spec, prefix))) verdict = 'maybe';
     }
     return verdict;
   }
@@ -244,6 +252,31 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
 /** Why no allow rule approved a bash command that names files by glob, variable or substitution. */
 export const RUNTIME_FILES_HINT =
   'the command names files only known at run time (a glob, variable or substitution), which no allow rule covers; name each file literally, or find and read files with glob(), read() and grep()';
+
+/**
+ * Whether the allow rules would approve the command if each glob it names
+ * were written as the files it matches: every subcommand has an approved
+ * allow form, every literal file is inside the working directories, and so is
+ * the literal directory each glob starts from. A file named by a variable or
+ * a substitution has no such directory, so this is false then.
+ */
+function literalFormAllowed(view: CallView, policy: ClaudePolicy): boolean {
+  if (view.prepared.tool !== 'bash' || !view.analysis) return false;
+  const files: BashFile[] = [];
+  for (const f of view.bashFiles) {
+    if (f.path !== undefined) {
+      files.push(f);
+      continue;
+    }
+    if (f.pattern === undefined || view.analysis.changesDirectory) return false;
+    const segments = f.pattern.split('/');
+    if (segments.includes('..')) return false;
+    const at = segments.findIndex((seg) => /[*?[]/.test(seg));
+    const dir = at === 0 ? '.' : segments.slice(0, at).join('/') || '/';
+    files.push({ access: f.access, path: resolveCommandPath(dir, view.prepared.effect.cwd, policy.home) });
+  }
+  return allowedByRule({ ...view, bashFiles: files }, policy.rules.allow, policy);
+}
 
 /** What the permission mode does with a call that no rule decided. */
 function modeDecision(view: CallView, policy: ClaudePolicy): Decision {
@@ -541,6 +574,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       protectedPaths,
       additionalRoots: [...additionalRoots],
       readFilter: (realAbsPath: string): boolean => !isReadDenied(realAbsPath),
+      planBashExpansion: planGlobExpansion,
       payload: {
         projectRoot,
         cwd: ctx.cwd,
@@ -562,15 +596,39 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const native = nativeCall(prepared);
     const paths = callPaths(prepared, policy.cwd, policy.home);
     if (prepared.tool !== 'bash') return { prepared, native, paths, analysis: undefined, bashFiles: [] };
-    const analysis = BashAnalyzer.analyze(prepared.effect.command);
-    const bashFiles = analysis.files.map((f) => {
-      if (f.path === undefined) return { access: f.access, path: undefined };
+    const analysis = BashAnalyzer.analyze(prepared.effect.command, { home: policy.home });
+    const bashFiles = analysis.files.map((f): BashFile => {
+      if (f.path === undefined) return { access: f.access, path: undefined, ...(f.pattern === undefined ? {} : { pattern: f.pattern }) };
       const relative = !(f.path.startsWith('/') || f.path.startsWith('~') || path.isAbsolute(f.path));
       // After a `cd`, a relative target cannot be resolved statically.
       if (relative && analysis.changesDirectory) return { access: f.access, path: undefined };
       return { access: f.access, path: resolveCommandPath(f.path, prepared.effect.cwd, policy.home) };
     });
     return { prepared, native, paths, analysis, bashFiles };
+  }
+
+  /**
+   * Bash deny and ask rules against the command as the script wrote it, before
+   * its globs were expanded: a rule written against the glob form still
+   * applies. File rules are left to the expanded command, which names every
+   * file literally. Undefined when no expansion took place or no rule decides.
+   */
+  #originalRestrictions(prepared: PreparedCall, policy: ClaudePolicy): Decision | undefined {
+    if (prepared.tool !== 'bash' || prepared.effect.expansion === undefined) return undefined;
+    const command = prepared.effect.expansion.original;
+    const original: PreparedCall = { ...prepared, args: { ...prepared.args, command }, effect: { ...prepared.effect, command } };
+    // Only a rule that matches the glob form itself: what the globs may match is checked, literally, on the expanded command.
+    const view = { ...this.#view(original, policy), bashFiles: [] };
+    for (const rule of policy.rules.deny) {
+      if (restrictVerdict(rule, view) === 'match') return { kind: 'deny', source: 'rule', reason: `denied by ${describe(rule)}` };
+    }
+    for (const rule of policy.rules.ask) {
+      if (restrictVerdict(rule, view) === 'match') {
+        const reason = `${describe(rule)} matches`;
+        return policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
+      }
+    }
+    return undefined;
   }
 
   /** Deny and ask rules. Undefined when none decides. */
@@ -597,7 +655,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const view = this.#view(prepared, policy);
     const askOrDeny = (reason: string): Decision =>
       policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
-    const restricted = this.#restrictions(view, policy);
+    const restricted = this.#restrictions(view, policy) ?? this.#originalRestrictions(prepared, policy);
     if (restricted) return restricted;
     if (view.analysis && view.analysis.uncertain.length > 0) {
       return askOrDeny(`the command cannot be checked statically (${view.analysis.uncertain.join('; ')})`);
@@ -606,8 +664,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     if (critical !== undefined) return askOrDeny(`${critical}; no rule or mode approves it`);
     if (allowedByRule(view, policy.rules.allow, policy)) return { kind: 'allow' };
     const decision = modeDecision(view, policy);
-    // Same decision, with the cause the script can act on: allow rules never cover files named at run time.
-    if (decision.kind !== 'allow' && view.bashFiles.some((f) => f.path === undefined)) {
+    // Same decision, with the cause the script can act on, when acting on it would get the command approved.
+    if (decision.kind !== 'allow' && view.bashFiles.some((f) => f.path === undefined) && literalFormAllowed(view, policy)) {
       return { ...decision, reason: `${decision.reason}: ${RUNTIME_FILES_HINT}` };
     }
     return decision;

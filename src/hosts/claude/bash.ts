@@ -45,6 +45,10 @@ export interface SimpleCommand {
   readonly staticPrefixes: readonly string[];
   /** True when some word's value is only known at run time. */
   readonly dynamic: boolean;
+  /** True when some word is an unquoted glob, so bash may hand the command other words. */
+  readonly globbed: boolean;
+  /** The command's words as matching sees them (value undefined: only known at run time). */
+  readonly words: readonly Operand[];
 }
 
 /** A file a command reads or writes by name (redirection or `tee`). */
@@ -52,6 +56,8 @@ export interface FileTarget {
   readonly access: 'read' | 'write';
   /** The path as written, or undefined when it is only known at run time. */
   readonly path: string | undefined;
+  /** For a glob (path undefined): the pattern as bash sees it, before expansion. */
+  readonly pattern?: string;
 }
 
 export interface BashAnalysis {
@@ -211,15 +217,142 @@ function partsValue(parts: readonly WordPart[], quoted: boolean): { value: strin
   return { value, glob };
 }
 
+/** Source being analyzed. sh-syntax positions are byte offsets into its UTF-8 form. */
+interface Ctx {
+  readonly source: string;
+  readonly bytes: Buffer;
+  readonly depth: number;
+}
+
+/** One character of a static word and whether quoting (or a backslash) made it literal. */
+interface WordChar {
+  readonly c: string;
+  readonly quoted: boolean;
+}
+
+/**
+ * The characters of a word, or undefined when part of it is only known at
+ * run time. `opaque` parts (substitutions) are kept as a placeholder so brace
+ * detection still sees the unquoted text around them.
+ */
+function wordChars(parts: readonly WordPart[]): { chars: WordChar[]; static: boolean } {
+  const chars: WordChar[] = [];
+  let isStatic = true;
+  const push = (text: string, quoted: boolean): void => {
+    for (const c of text) chars.push({ c, quoted });
+  };
+  for (const part of parts) {
+    switch (part.type) {
+      case 'Lit': {
+        const lit = part.value;
+        for (let i = 0; i < lit.length; i++) {
+          const c = lit[i] ?? '';
+          if (c === '\\' && i + 1 < lit.length) {
+            const next = lit[i + 1] ?? '';
+            i++;
+            if (next !== '\n') chars.push({ c: next, quoted: true });
+            continue;
+          }
+          chars.push({ c, quoted: false });
+        }
+        break;
+      }
+      case 'SglQuoted': {
+        const v = part.dollar ? decodeAnsi(part.value) : part.value;
+        if (v === undefined) {
+          isStatic = false;
+          chars.push({ c: '\0', quoted: true });
+        } else push(v, true);
+        break;
+      }
+      case 'DblQuoted': {
+        const inner = part.dollar ? undefined : partsValue(part.parts, true).value;
+        if (inner === undefined) {
+          isStatic = false;
+          chars.push({ c: '\0', quoted: true });
+        } else push(inner, true);
+        break;
+      }
+      default:
+        isStatic = false;
+        chars.push({ c: '\0', quoted: true });
+    }
+  }
+  return { chars, static: isStatic };
+}
+
+/** Whether bash may brace-expand the word (`{a,b}`, `{1..3}`, `x{,}`); `{}` and `a{b}c` stay as written. */
+function hasBraceExpansion(chars: readonly WordChar[]): boolean {
+  // Any unquoted `{`, then a `,` or `..`, then a `}`: a superset of what bash expands (its pairing rules are subtle).
+  let stage = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (!ch || ch.quoted) continue;
+    if (stage === 0 && ch.c === '{') stage = 1;
+    else if (stage === 1 && (ch.c === ',' || (ch.c === '.' && chars[i + 1]?.c === '.' && chars[i + 1]?.quoted === false))) stage = 2;
+    else if (stage === 2 && ch.c === '}') return true;
+  }
+  return false;
+}
+
+const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Applies bash's tilde expansion to a static word: a leading unquoted `~`,
+ * and in a word that looks like an assignment (`a=~/x`, `PATH=a:~/b`) a `~`
+ * after the `=` or an unquoted `:`. `~` and `~/...` become `home`; any other
+ * tilde prefix (`~user`, `~+`, `~-`, `~1`) is reported as unknown.
+ */
+function expandTilde(chars: readonly WordChar[], home: string | undefined): { value: string } | { unknown: string } | undefined {
+  const starts: number[] = [];
+  if (chars[0]?.c === '~' && !chars[0].quoted) starts.push(0);
+  const unquotedHead = chars.slice(0, chars.findIndex((c) => c.c === '=') + 1);
+  const assignment = unquotedHead.length > 0 && unquotedHead.every((c) => !c.quoted) && ASSIGNMENT_LIKE.test(unquotedHead.map((c) => c.c).join(''));
+  if (assignment) {
+    for (let i = unquotedHead.length - 1; i < chars.length; i++) {
+      const ch = chars[i];
+      if (ch && !ch.quoted && (ch.c === '=' ? i === unquotedHead.length - 1 : ch.c === ':') && chars[i + 1]?.c === '~' && chars[i + 1]?.quoted === false) starts.push(i + 1);
+    }
+  }
+  if (starts.length === 0) return undefined;
+  let out = '';
+  let from = 0;
+  for (const at of starts) {
+    let end = at + 1;
+    while (end < chars.length) {
+      const ch = chars[end];
+      if (!ch || (!ch.quoted && (ch.c === '/' || (assignment && ch.c === ':')))) break;
+      end++;
+    }
+    const prefix = chars.slice(at + 1, end);
+    if (prefix.some((c) => c.quoted)) continue; // a quoted tilde-prefix is not expanded
+    if (prefix.length > 0) return { unknown: `~${prefix.map((c) => c.c).join('')}` };
+    if (home === undefined) return { unknown: '~' };
+    out += chars.slice(from, at).map((c) => c.c).join('') + home;
+    from = at + 1;
+  }
+  return { value: out + chars.slice(from).map((c) => c.c).join('') };
+}
+
+export interface AnalyzeOptions {
+  /** Home directory bash expands `~` to; without it a `~` word is uncertain. */
+  readonly home?: string;
+}
+
 export class BashAnalyzer {
   readonly #commands: SimpleCommand[] = [];
+  readonly #home: string | undefined;
   readonly #files: FileTarget[] = [];
   readonly #uncertain: string[] = [];
   #changesDirectory = false;
   readonly #removals: Removal[] = [];
 
-  static analyze(command: string): BashAnalysis {
-    const analyzer = new BashAnalyzer();
+  private constructor(home: string | undefined) {
+    this.#home = home;
+  }
+
+  static analyze(command: string, opts: AnalyzeOptions = {}): BashAnalysis {
+    const analyzer = new BashAnalyzer(opts.home);
     analyzer.#analyzeSource(command, 0);
     return {
       commands: analyzer.#commands,
@@ -246,7 +379,7 @@ export class BashAnalyzer {
       this.#uncertain.push(`command could not be parsed: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    const ctx = { source, depth };
+    const ctx: Ctx = { source, bytes: Buffer.from(source, 'utf8'), depth };
     walk(file, (node) => {
       switch (node.type) {
         case 'CallExpr':
@@ -270,24 +403,40 @@ export class BashAnalyzer {
     });
   }
 
-  #text(node: Node, ctx: { source: string }): string {
-    return ctx.source.slice(node.start, node.end);
+  #text(node: Node, ctx: Ctx): string {
+    return ctx.bytes.subarray(node.start, node.end).toString('utf8');
   }
 
-  #word(word: Word, ctx: { source: string }): WordValue {
-    const { value, glob } = partsValue(word.parts, false);
-    return { value, raw: this.#text(word, ctx), glob };
+  /**
+   * The word as the command receives it. Expansions bash applies to text
+   * that looks static are resolved exactly (backslashes, quotes, `~` and
+   * `~/` with the known home) or reported as uncertain (brace expansion,
+   * `~user`, `~+`, `~-`): the rules must never check a word bash would change.
+   */
+  #word(word: Word, ctx: Ctx): WordValue {
+    const parsed = partsValue(word.parts, false);
+    const raw = this.#text(word, ctx);
+    const { chars, static: isStatic } = wordChars(word.parts);
+    if (hasBraceExpansion(chars)) this.#uncertain.push(`${JSON.stringify(raw)} uses brace expansion, which turns one word into several`);
+    if (!isStatic || parsed.value === undefined) return { value: parsed.value, raw, glob: parsed.glob };
+    const tilde = expandTilde(chars, this.#home);
+    if (tilde === undefined) return { value: parsed.value, raw, glob: parsed.glob };
+    if ('unknown' in tilde) {
+      this.#uncertain.push(`${JSON.stringify(raw)} uses the tilde expansion ${tilde.unknown}, only known at run time`);
+      return { value: undefined, raw, glob: parsed.glob };
+    }
+    return { value: tilde.value, raw, glob: parsed.glob };
   }
 
-  #declClause(decl: DeclClause, ctx: { source: string; depth: number }): void {
+  #declClause(decl: DeclClause, ctx: Ctx): void {
     // `export`, `declare`, `local`, `readonly`, `typeset`, `nameref`: their own
     // words are assignments; nested substitutions are walked generically.
     const name = decl.variant?.value ?? 'declare';
     const raw = this.#text(decl, ctx);
-    this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefixes: [name], dynamic: true });
+    this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefixes: [name], dynamic: true, globbed: false, words: [] });
   }
 
-  #redirect(redir: Redirect, ctx: { source: string; depth: number }): void {
+  #redirect(redir: Redirect, ctx: Ctx): void {
     if (REDIR_HDOC.has(redir.op)) {
       const body = redir.hdoc;
       if (body && body.parts.some((p) => p.type !== 'Lit')) {
@@ -299,16 +448,17 @@ export class BashAnalyzer {
     const target = this.#word(redir.word, ctx);
     const path = target.value !== undefined && !target.glob ? target.value : undefined;
     if (path === '/dev/null' || path === '/dev/stdout' || path === '/dev/stderr') return;
-    if (REDIR_OUT.has(redir.op)) this.#files.push({ access: 'write', path });
-    else if (REDIR_IN.has(redir.op)) this.#files.push({ access: 'read', path });
+    const pattern = target.glob && target.value !== undefined ? { pattern: target.value } : {};
+    if (REDIR_OUT.has(redir.op)) this.#files.push({ access: 'write', path, ...pattern });
+    else if (REDIR_IN.has(redir.op)) this.#files.push({ access: 'read', path, ...pattern });
     else if (REDIR_INOUT.has(redir.op)) {
-      this.#files.push({ access: 'read', path });
-      this.#files.push({ access: 'write', path });
+      this.#files.push({ access: 'read', path, ...pattern });
+      this.#files.push({ access: 'write', path, ...pattern });
     }
     // Here-strings (`<<<`) carry no file.
   }
 
-  #callExpr(call: CallExpr, ctx: { source: string; depth: number }): void {
+  #callExpr(call: CallExpr, ctx: Ctx): void {
     const raw = this.#text(call, ctx);
     const words = call.args.map((w) => this.#word(w, ctx));
     if (words.length === 0) return; // pure assignment, e.g. `A=$(rm x)`: nested commands are walked
@@ -320,12 +470,18 @@ export class BashAnalyzer {
     let writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base);
     if (base === 'sed' && operands.some((o) => o.value !== undefined && (o.value === '-i' || o.value.startsWith('--in-place') || /^-[a-zA-Z]*i/.test(o.value)))) writes = true;
     if (!reads && !writes) return;
+    let endOfOptions = false;
     for (let k = 0; k < operands.length; k++) {
       const operand = operands[k];
       if (!operand) continue;
       if (operand.raw.startsWith('<(') || operand.raw.startsWith('>(')) continue;
       let value = operand.value;
-      if (value !== undefined && value.startsWith('-')) {
+      if (!endOfOptions && value === '--') {
+        // Every later word is an operand, even `-n` or `5`.
+        endOfOptions = true;
+        continue;
+      }
+      if (!endOfOptions && value !== undefined && value.startsWith('-')) {
         // `-n 5`: skip a numeric option value; `--file=x`, `-fX`: the value may be a file.
         const next = operands[k + 1]?.value;
         if (next !== undefined && /^\d+$/.test(next)) k++;
@@ -339,22 +495,28 @@ export class BashAnalyzer {
         value = m[2];
       }
       const path = value !== undefined && !operand.glob ? value : undefined;
-      if (reads) this.#files.push({ access: 'read', path });
-      if (writes) this.#files.push({ access: 'write', path });
+      const pattern = operand.glob && value !== undefined ? { pattern: value } : {};
+      if (reads) this.#files.push({ access: 'read', path, ...pattern });
+      if (writes) this.#files.push({ access: 'write', path, ...pattern });
     }
   }
 
-  #addCommand(raw: string, words: readonly WordValue[], hasAssigns: boolean, ctx: { source: string; depth: number }): void {
+  #addCommand(raw: string, words: readonly WordValue[], hasAssigns: boolean, ctx: Ctx): void {
     const denyForms = new Set<string>([raw]);
     const staticPrefixes = new Set<string>();
     const dynamic = words.some((w) => w.value === undefined);
+    const globbed = words.some((w) => w.glob);
     const text = (ws: readonly WordValue[]): string => ws.map((w) => w.value ?? w.raw).join(' ');
+    // Words before the first one bash may change at run time (a substitution or a glob).
     const prefix = (ws: readonly WordValue[]): string => {
-      const i = ws.findIndex((w) => w.value === undefined);
+      const i = ws.findIndex((w) => w.value === undefined || w.glob);
       return (i === -1 ? ws : ws.slice(0, i)).map((w) => w.value ?? '').join(' ');
     };
     const addForm = (ws: readonly WordValue[]): void => {
       denyForms.add(text(ws));
+      // `cat -- x` is matched as `cat x` too (deny/ask only: the marker does not change what is read).
+      const marker = ws.findIndex((w, i) => i > 0 && w.value === '--');
+      if (marker !== -1) denyForms.add(text([...ws.slice(0, marker), ...ws.slice(marker + 1)]));
       staticPrefixes.add(prefix(ws));
       const head = ws[0];
       if (head?.value !== undefined) {
@@ -390,6 +552,7 @@ export class BashAnalyzer {
       const operands = current.slice(1);
       if (base === 'cd' || base === 'pushd' || base === 'popd') this.#changesDirectory = true;
       if (CODE_EVALUATORS.has(base)) this.#uncertain.push(`\`${base}\` runs code that is only known at run time`);
+      if (base === 'shopt') this.#uncertain.push('`shopt` changes how bash expands later words (extglob, globstar, dotglob ...)');
       if (NAME_REBINDERS.has(base) && operands.length > 0) this.#uncertain.push(`\`${base}\` rebinds command names, so later commands cannot be matched by name`);
       this.#fileOperands(base, operands);
       if (base === 'rm' || base === 'rmdir') {
@@ -423,14 +586,14 @@ export class BashAnalyzer {
     }
 
     const allowForm = allowStripped !== undefined && !dynamic ? text(allowStripped) : undefined;
-    this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefixes: [...staticPrefixes], dynamic });
+    this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefixes: [...staticPrefixes], dynamic, globbed, words });
   }
 
   /**
    * `env -S 'cmd args'` / `env --split-string=...`: the string is split into a
    * command line. Returns true when the invocation had one (it was analyzed).
    */
-  #envSplitString(words: readonly WordValue[], ctx: { source: string; depth: number }): boolean {
+  #envSplitString(words: readonly WordValue[], ctx: Ctx): boolean {
     for (let i = 1; i < words.length; i++) {
       const w = words[i];
       if (!w) break;
@@ -465,7 +628,7 @@ export class BashAnalyzer {
     return false;
   }
 
-  #shell(words: readonly WordValue[], ctx: { source: string; depth: number }): void {
+  #shell(words: readonly WordValue[], ctx: Ctx): void {
     // Find `-c <script>` (flags may be combined, e.g. `-ec`, `-lc`).
     let script: WordValue | undefined;
     let sawScript = false;
@@ -489,6 +652,10 @@ export class BashAnalyzer {
         break;
       }
       if (w.value === '-s' || w.value === '-i') break;
+      if (w.value === '-O' || w.value === '+O') {
+        this.#uncertain.push('a shell started with `-O` changes how bash expands words');
+        return;
+      }
       if (w.value.startsWith('-') || w.value.startsWith('+')) {
         // Options that take an operand: skip it so it is not taken for a script file.
         if (SHELL_OPTIONS_WITH_OPERAND.has(w.value)) i++;
@@ -515,7 +682,7 @@ export class BashAnalyzer {
     }
   }
 
-  #findExec(words: readonly WordValue[], ctx: { source: string; depth: number }): void {
+  #findExec(words: readonly WordValue[], ctx: Ctx): void {
     for (let i = 1; i < words.length; i++) {
       const v = words[i]?.value;
       if (v === '-exec' || v === '-execdir' || v === '-ok' || v === '-okdir') {

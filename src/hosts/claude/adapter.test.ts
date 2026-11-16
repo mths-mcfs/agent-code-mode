@@ -178,13 +178,28 @@ describe('Bash rules', () => {
   it('says why an allow-all Bash rule did not approve a command that names files at run time', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
     expect(check(s, bash('wc -l src/a.ts', s.project))).toBe('allow');
-    for (const command of ['wc -l src/*', 'head -c 9 src/$(ls src | head -1)']) {
+    // A glob the rules would approve once its files are named literally gets the hint.
+    for (const command of ['wc -l src/*', 'sort src/*.ts']) {
       const decision = s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy);
       expect(decision).toMatchObject({ kind: 'ask', reason: `Bash needs approval in default mode: ${RUNTIME_FILES_HINT}` });
+    }
+    // A substitution or a glob outside the working directories: naming the files would not help, so no hint.
+    for (const command of ['head -c 9 src/$(ls src | head -1)', 'cat /etc/*.conf', 'cat ../*']) {
+      const decision = s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy);
+      expect(decision.kind).not.toBe('allow');
+      expect('reason' in decision ? decision.reason : '').not.toContain('name each file literally');
     }
     // Without files named at run time the reason stays as it was.
     const none = await setup({});
     expect(none.adapter.checkStatic(bash('wc -l src/a.ts', none.project), none.ctx, none.policy)).toEqual({ kind: 'ask', reason: 'Bash needs approval in default mode' });
+    // No rule covers the command: the hint would not help either.
+    expect(none.adapter.checkStatic(bash('cat src/*', none.project), none.ctx, none.policy)).toEqual({ kind: 'ask', reason: 'Bash needs approval in default mode' });
+    // One subcommand no rule covers: naming the files leaves it denied.
+    const catOnly = await setup({ user: { permissions: { allow: ['Bash(cat:*)'] } } });
+    const mixed = catOnly.adapter.checkStatic(bash('cat src/* && node -v', catOnly.project), catOnly.ctx, catOnly.policy);
+    expect('reason' in mixed ? mixed.reason : '').not.toContain('name each file literally');
+    const catGlob = catOnly.adapter.checkStatic(bash('cat src/*', catOnly.project), catOnly.ctx, catOnly.policy);
+    expect('reason' in catGlob ? catGlob.reason : '').toContain('name each file literally');
   });
 
   it('checks redirect and file-reader targets against Read/Edit rules', async () => {
@@ -198,6 +213,27 @@ describe('Bash rules', () => {
     expect(check(s, bash('cd sub && cat .env', s.project))).toBe('ask');
     expect(check(s, bash('echo x > notes.txt', s.project))).toBe('allow');
     expect(check(s, bash('cat README.md 2>/dev/null', s.project))).toBe('allow');
+  });
+
+  it('treats every word after `--` as a file, even one that looks like an option or a count', async () => {
+    const s = await setup({ user: { permissions: { deny: ['Read(./5)', 'Read(./-n)'] } }, mode: 'bypassPermissions' });
+    expect(check(s, bash("head -n 5 a.txt", s.project))).toBe('allow'); // `5` is the count here
+    expect(check(s, bash("cat -- '5'", s.project))).toBe('deny');
+    expect(check(s, bash("wc -l -- a.txt '-n'", s.project))).toBe('deny');
+  });
+
+  it('matches Bash deny rules against the command as written and without the inserted `--`', async () => {
+    const s = await setup({ user: { permissions: { deny: ['Bash(cat secret*)', 'Bash(wc -l [ab].log)'] } }, mode: 'bypassPermissions' });
+    expect(check(s, bash("cat -- 'secret.txt'", s.project))).toBe('deny');
+    // An expanded call: the expanded form escapes the rule written against the glob, the original does not.
+    const expanded: PreparedCall = {
+      id: 'c1',
+      tool: 'bash',
+      args: { command: "wc -l -- 'a.log'", timeoutMs: 120_000 },
+      effect: { command: "wc -l -- 'a.log'", cwd: s.project, timeoutMs: 120_000, containment, expansion: { original: 'wc -l [ab].log', entries: [] } },
+    };
+    expect(check(s, expanded)).toBe('deny');
+    expect(check(s, bash("wc -l -- 'a.log'", s.project))).toBe('allow');
   });
 });
 
