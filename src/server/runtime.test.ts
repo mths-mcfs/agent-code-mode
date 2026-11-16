@@ -54,7 +54,7 @@ describe('generic host policy', () => {
       },
     );
     expect(result.ok).toBe(true);
-    expect(result.result).toMatchObject({ r: 'hello', b: 'PermissionDenied' });
+    expect(result.result).toMatchObject({ r: 'hello\n', b: 'PermissionDenied' });
     expect(JSON.stringify(result.result)).toContain(GENERIC_ASK_REASON);
     expect(result.calls.map((c) => c.decision)).toEqual(['allowed', 'denied', 'denied']);
   });

@@ -158,12 +158,13 @@ describe('recursive grep and glob', () => {
     const grep = await dispatcher.dispatch('grep', { pattern: 'SECRET', path: '.' });
     const glob = await dispatcher.dispatch('glob', { pattern: '**/*', path: '.' });
     if (!grep.ok || !glob.ok) throw new Error('search failed');
-    const keep = (file: string): boolean => !s.policy.payload.isReadDenied(file);
+    // The script sees paths relative to the session cwd.
+    const keep = (file: string): boolean => !s.policy.payload.isReadDenied(path.resolve(s.project, file));
     const grepFiles = ('matches' in grep.value ? (grep.value as GrepResult).matches : []).map((m) => m.file);
     const globFiles = 'files' in glob.value ? (glob.value as GlobResult).files : [];
-    expect(grepFiles).toContain(path.join(s.project, '.env')); // unfiltered, the secret leaks
-    expect(grepFiles.filter(keep)).toEqual([path.join(s.project, 'a.txt')]);
-    expect(globFiles.filter(keep)).not.toContain(path.join(s.project, '.env'));
+    expect(grepFiles).toContain('.env'); // unfiltered, the secret leaks
+    expect(grepFiles.filter(keep)).toEqual(['a.txt']);
+    expect(globFiles.filter(keep)).not.toContain('.env');
     expect(s.policy.payload.isReadDenied(path.join(s.project, 'sub', '.env'))).toBe(false);
   });
 });

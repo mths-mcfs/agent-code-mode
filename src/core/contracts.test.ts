@@ -116,10 +116,10 @@ describe('PolicySnapshot.readFilter and additionalRoots', () => {
     };
     const d = dispatcherFor(ctx, policy);
     const grep = value<GrepResult>(await d.dispatch('grep', { pattern: 'token' }));
-    expect(grep.matches.map((m) => path.relative(ws, m.file))).toEqual([path.join('src', 'a.ts')]);
+    expect(grep.matches.map((m) => m.file)).toEqual(['src/a.ts']);
     expect(grep.filtered).toBe(2);
     const glob = value<GlobResult>(await d.dispatch('glob', { pattern: '**/*' }));
-    expect(glob.files.map((f) => path.relative(ws, f))).toEqual([path.join('src', 'a.ts')]);
+    expect(glob.files).toEqual(['src/a.ts']);
     expect(glob.filtered).toBe(2);
   });
 
@@ -142,7 +142,7 @@ describe('PolicySnapshot.readFilter and additionalRoots', () => {
     expect(denied.ok ? undefined : denied.error.code).toBe('outside-workspace');
     const withRoot: PolicySnapshot<null> = { ...without, additionalRoots: [extra] };
     const d = dispatcherFor(ctx, withRoot);
-    expect(value<{ content: string }>(await d.dispatch('read', { path: path.join(extra, 'x.txt') })).content).toBe('x');
+    expect(value<{ content: string }>(await d.dispatch('read', { path: path.join(extra, 'x.txt') })).content).toBe('x\n');
     const stillOut = await d.dispatch('read', { path: path.join(base, 'outside.txt') });
     expect(stillOut.ok ? undefined : stillOut.error.code).toBe('outside-workspace');
   });
@@ -196,7 +196,7 @@ describe('Claude policy wiring', () => {
     expect(policy.readFilter?.(path.join(project, 'private', 'p.txt'))).toBe(false);
     expect(policy.readFilter?.(path.join(project, 'src', 'ok.txt'))).toBe(true);
     const grep = value<GrepResult>(await d.dispatch('grep', { pattern: 'key' }));
-    expect(grep.matches.map((m) => path.relative(project, m.file))).toEqual([path.join('src', 'ok.txt')]);
+    expect(grep.matches.map((m) => m.file)).toEqual(['src/ok.txt']);
     expect(grep.filtered).toBe(2);
   });
 

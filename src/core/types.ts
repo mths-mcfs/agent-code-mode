@@ -134,9 +134,9 @@ export interface BashResult {
 
 /** Result of `read`. */
 export interface ReadResult {
-  /** Absolute real path that was read. */
+  /** Real path that was read; the script sees it relative to the session cwd when inside it. */
   readonly path: string;
-  /** The returned lines, joined with `\n`. */
+  /** Exact text of the returned lines: each keeps its newline, except a last line the file leaves unterminated. */
   readonly content: string;
   /** 1-based line number of the first returned line. */
   readonly startLine: number;
@@ -148,7 +148,7 @@ export interface ReadResult {
 
 /** Result of `write`. */
 export interface WriteResult {
-  /** Absolute real path that was written. */
+  /** Real path that was written; the script sees it relative to the session cwd when inside it. */
   readonly path: string;
   /** True when the file did not exist before. */
   readonly created: boolean;
@@ -168,7 +168,7 @@ export type MatchStrategy = 'exact' | 'line-endings' | 'line-numbers' | 'trailin
 
 /** Result of `edit`. */
 export interface EditResult {
-  /** Absolute real path that was edited. */
+  /** Real path that was edited; the script sees it relative to the session cwd when inside it. */
   readonly path: string;
   /** Number of occurrences replaced. */
   readonly replacements: number;
@@ -179,7 +179,7 @@ export interface EditResult {
 
 /** One `grep` match. */
 export interface GrepMatch {
-  /** Absolute real path of the file. */
+  /** Real path of the file; the script sees it relative to the session cwd when inside it. */
   readonly file: string;
   /** 1-based line number. */
   readonly line: number;
@@ -198,7 +198,7 @@ export interface GrepResult {
 
 /** Result of `glob`. */
 export interface GlobResult {
-  /** Absolute real paths. */
+  /** Real paths; the script sees them relative to the session cwd when inside it. */
   readonly files: readonly string[];
   /** True when more files existed than were returned. */
   readonly truncated: boolean;

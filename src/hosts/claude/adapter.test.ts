@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { Dispatcher } from '../../core/dispatcher.js';
 import type { Decision, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
 import { MemoryToolRuntime, makeContext } from '../../testing/index.js';
-import { ClaudeHostAdapter, type ClaudePolicy } from './adapter.js';
+import { ClaudeHostAdapter, type ClaudePolicy, RUNTIME_FILES_HINT } from './adapter.js';
 
 const posix = process.platform !== 'win32';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -173,6 +173,18 @@ describe('Bash rules', () => {
     expect(check(s, bash('npm install', s.project))).toBe('ask');
     expect(check(s, bash('npm run build > /tmp/out.log', s.project))).toBe('ask');
     expect(check(s, bash('npm run build > out.log', s.project))).toBe('allow');
+  });
+
+  it('says why an allow-all Bash rule did not approve a command that names files at run time', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    expect(check(s, bash('wc -l src/a.ts', s.project))).toBe('allow');
+    for (const command of ['wc -l src/*', 'head -c 9 src/$(ls src | head -1)']) {
+      const decision = s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy);
+      expect(decision).toMatchObject({ kind: 'ask', reason: `Bash needs approval in default mode: ${RUNTIME_FILES_HINT}` });
+    }
+    // Without files named at run time the reason stays as it was.
+    const none = await setup({});
+    expect(none.adapter.checkStatic(bash('wc -l src/a.ts', none.project), none.ctx, none.policy)).toEqual({ kind: 'ask', reason: 'Bash needs approval in default mode' });
   });
 
   it('checks redirect and file-reader targets against Read/Edit rules', async () => {

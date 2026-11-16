@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
+import { runInnerCalls } from './run-result.ts';
 
 /**
  * Codex CLI 0.169 facts the arms depend on (checked with `codex debug prompt-input`, no model calls):
@@ -190,9 +191,6 @@ const Failure = z.object({ type: z.enum(['turn.failed', 'error']), error: z.obje
 const RequestLine = z.object({ kind: z.literal('request'), usage: TokenRecord.shape.usage });
 const CallLine = z.object({ kind: z.literal('call'), type: z.string(), name: z.string(), namespace: z.string().optional() });
 const DenialLine = z.object({ kind: z.literal('denial'), text: z.string() });
-const RunResultText = z.object({
-  calls: z.array(z.object({ tool: z.string(), decision: z.string().optional(), summary: z.string().optional(), reason: z.string().optional() }).passthrough()),
-}).passthrough();
 const McpResult = z.object({ content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()) }).passthrough();
 
 export function classifyCodexTool(name: string, namespace?: string): 'native' | 'run' | 'codeMode' | 'other' {
@@ -275,14 +273,12 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
       const result = McpResult.safeParse(mcp.data.result);
       if (kind === 'run' && result.success) {
         const text = result.data.content.map((c) => c.text ?? '').join('');
-        const log = RunResultText.safeParse(parseJson(text));
-        if (log.success) {
+        const innerCalls = runInnerCalls(text);
+        if (innerCalls !== null) {
           runInnerSeen = true;
-          for (const c of log.data.calls) {
-            runInnerTotal += 1;
-            runInner[c.tool] = (runInner[c.tool] ?? 0) + 1;
-            if (c.decision === 'denied') runDenials.push(`${c.tool} ${c.summary ?? ''}: ${c.reason ?? 'denied'}`.slice(0, 500));
-          }
+          runInnerTotal += innerCalls.total;
+          for (const [tool, n] of Object.entries(innerCalls.byTool)) runInner[tool] = (runInner[tool] ?? 0) + n;
+          runDenials.push(...innerCalls.denials);
         }
       }
     } else if (type === 'command_execution' || type === 'file_change') {

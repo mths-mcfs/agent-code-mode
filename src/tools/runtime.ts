@@ -382,7 +382,10 @@ export class NodeToolRuntime implements ToolRuntime {
       bytes += size;
     }
     if (offset - 1 + window.length < lines.length) truncated = true;
-    return { path: absPath, content: window.join('\n'), startLine: offset, totalLines: lines.length, truncated };
+    // Exact text of the window: every line keeps its newline, except a last line the file leaves unterminated.
+    const unterminated = offset - 1 + window.length >= lines.length && !text.endsWith('\n');
+    const content = window.length === 0 ? '' : `${window.join('\n')}${unterminated ? '' : '\n'}`;
+    return { path: absPath, content, startLine: offset, totalLines: lines.length, truncated };
   }
 
   async #commitWrite(

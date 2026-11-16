@@ -105,7 +105,7 @@ export function snapshot(dir: string): Record<string, string> {
 }
 
 export interface Server {
-  /** Calls `run` and returns the parsed result. */
+  /** Calls `run` with `verbose: true` and returns the parsed result (full call log and diff). */
   run(code: string, opts?: { transaction?: boolean; timeoutMs?: number; signal?: AbortSignal }): Promise<RunOutput>;
   /** Calls `run` and returns the raw text of the response. */
   runText(code: string): Promise<string>;
@@ -134,7 +134,8 @@ async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, 
   return {
     async run(code, opts = {}) {
       const text = await call(
-        { code, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
+        // verbose: the attack tests assert on the entry of every call, which the compact view reduces to counts.
+        { code, verbose: true, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
         opts.signal,
       );
       return RunOutputSchema.parse(JSON.parse(text));

@@ -128,7 +128,7 @@ describe('grep and glob never return a file the Read rules deny', () => {
     expect(out.ok).toBe(true);
     const text = JSON.stringify(out.result);
     expect(text).not.toContain('secret');
-    expect(out.result).toMatchObject({ matches: [{ file: path.join(lab.ws, 'src', 'app.ts') }], filtered: 2 });
+    expect(out.result).toMatchObject({ matches: [{ file: 'src/app.ts' }], filtered: 2 });
   });
 
   it('glob over the root drops the denied entries', async () => {

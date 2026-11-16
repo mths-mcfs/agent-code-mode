@@ -2,9 +2,9 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ERROR_CAP_CHARS, SUCCESS_CAP_CHARS, formatRunResult, truncateStructurally } from './output.js';
+import { CHANGED_FILES_SHOWN, DIFF_INLINE_CHARS, DIFF_SAMPLE_CHARS, ERROR_CAP_CHARS, FAILED_CALLS_SHOWN, SUCCESS_CAP_CHARS, compactRunResult, formatRunResult, truncateStructurally } from './output.js';
 import { stateDirPath } from './state-dir.js';
-import type { RunResult } from './types.js';
+import type { CallLogEntry, RunResult } from './types.js';
 
 const base: RunResult = { ok: true, result: null, logs: [], calls: [], changedFiles: [], diff: '', warnings: [] };
 const dirs: string[] = [];
@@ -17,7 +17,83 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
+const allowed = (i: number, tool = 'read'): CallLogEntry => ({ id: `c${i}`, tool, summary: `${tool} f${i}.txt`, decision: 'allowed', durationMs: 2 });
+
+describe('compactRunResult', () => {
+  it('turns the call log into counts and keeps denied and failed calls in full, without durations', () => {
+    const calls: CallLogEntry[] = [
+      allowed(1),
+      allowed(2, 'write'),
+      { id: 'c3', tool: 'bash', summary: 'bash rm x', decision: 'denied', reason: 'rule: rm is not allowed', durationMs: 9 },
+      { id: 'c4', tool: 'read', summary: 'read gone.txt', decision: 'error', reason: 'gone.txt does not exist', durationMs: 1 },
+      allowed(5),
+    ];
+    expect(compactRunResult({ ...base, calls }).view['calls']).toEqual({
+      total: 5,
+      byTool: { read: 3, write: 1, bash: 1 },
+      denied: [{ id: 'c3', tool: 'bash', summary: 'bash rm x', reason: 'rule: rm is not allowed' }],
+      errors: [{ id: 'c4', tool: 'read', summary: 'read gone.txt', reason: 'gone.txt does not exist' }],
+    });
+  });
+
+  it('does not grow with the number of allowed calls and caps the list of failed ones', () => {
+    const few = JSON.stringify(compactRunResult({ ...base, calls: Array.from({ length: 3 }, (_, i) => allowed(i)) }).view);
+    const many = JSON.stringify(compactRunResult({ ...base, calls: Array.from({ length: 3_000 }, (_, i) => allowed(i)) }).view);
+    expect(many.length).toBeLessThan(few.length + 10);
+    const denied = Array.from({ length: FAILED_CALLS_SHOWN + 7 }, (_, i): CallLogEntry => ({ ...allowed(i, 'bash'), decision: 'denied', reason: 'no' }));
+    const shown = (compactRunResult({ ...base, calls: denied }).view['calls'] as { denied: unknown[] }).denied;
+    expect(shown).toHaveLength(FAILED_CALLS_SHOWN + 1);
+    expect(shown.at(-1)).toBe('…[7 more]');
+  });
+
+  it('leaves out empty fields and keeps the result, error, logs, warnings and rollback report', () => {
+    expect(Object.keys(compactRunResult({ ...base, result: 1 }).view).sort()).toEqual(['calls', 'ok', 'result']);
+    const rolledBack = { restored: ['a.txt'], skipped: [] };
+    const failed: RunResult = { ...base, ok: false, error: { kind: 'denied', name: 'PermissionDenied', message: 'm' }, logs: ['l'], warnings: ['w'], rolledBack };
+    expect(compactRunResult(failed).view).toEqual({ ok: false, result: null, error: failed.error, logs: ['l'], calls: { total: 0, byTool: {} }, warnings: ['w'], rolledBack });
+  });
+
+  it('returns a small diff whole and cuts a large one at a line end', () => {
+    const small = 'x'.repeat(DIFF_INLINE_CHARS - 1) + '\n';
+    expect(compactRunResult({ ...base, diff: small })).toMatchObject({ diffClipped: false, view: { diff: small } });
+    const line = '+0123456789\n';
+    const large = line.repeat(Math.ceil((DIFF_INLINE_CHARS + 1) / line.length));
+    const { view, diffClipped } = compactRunResult({ ...base, diff: large });
+    const shown = String(view['diff']);
+    expect(diffClipped).toBe(true);
+    const kept = shown.slice(0, shown.indexOf('…['));
+    expect(kept.length).toBeLessThanOrEqual(DIFF_SAMPLE_CHARS);
+    expect(kept.endsWith(line)).toBe(true);
+    expect(large.startsWith(kept)).toBe(true);
+    expect(shown).toContain(`…[${large.length - kept.length} more chars; overflowPath has the whole result]`);
+  });
+
+  it('caps a long list of changed files', () => {
+    const changedFiles = Array.from({ length: CHANGED_FILES_SHOWN + 5 }, (_, i) => `f${i}.txt`);
+    const shown = compactRunResult({ ...base, changedFiles }).view['changedFiles'] as string[];
+    expect(shown).toEqual([...changedFiles.slice(0, CHANGED_FILES_SHOWN), '…[5 more]']);
+  });
+});
+
 describe('formatRunResult', () => {
+  it('returns the whole result when verbose', async () => {
+    const result: RunResult = { ...base, calls: [allowed(1), allowed(2)], diff: 'd'.repeat(DIFF_INLINE_CHARS + 1) };
+    const out = await formatRunResult(result, { stateDir: await tmp(), verbose: true });
+    expect(JSON.parse(out.content[0]?.text ?? '')).toEqual(result);
+  });
+
+  it('saves the whole result when the compact view cut the diff, and points to the file', async () => {
+    const stateDir = await tmp();
+    const result: RunResult = { ...base, result: 'done', calls: [allowed(1, 'write')], changedFiles: ['a.txt'], diff: '+line\n'.repeat(2_000) };
+    const out = await formatRunResult(result, { stateDir });
+    const shown = JSON.parse(out.content[0]?.text ?? '') as { diff: string; overflowPath: string; truncated?: boolean };
+    expect(shown.truncated).toBeUndefined();
+    expect(shown.diff.length).toBeLessThan(DIFF_SAMPLE_CHARS + 90);
+    expect(shown.diff).toContain('overflowPath');
+    expect(JSON.parse(await readFile(shown.overflowPath, 'utf8'))).toEqual(result);
+  });
+
+
   it('returns compact JSON and isError', async () => {
     const ok = await formatRunResult({ ...base, result: { a: 1 } }, { stateDir: await tmp() });
     expect(ok.isError).toBe(false);

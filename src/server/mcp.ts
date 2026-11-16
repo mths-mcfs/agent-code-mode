@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { errorMessage } from '../core/errors.js';
-import { formatRunResult, type McpToolResponse } from '../core/output.js';
+import { DIFF_INLINE_CHARS, formatRunResult, type McpToolResponse } from '../core/output.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
@@ -15,8 +15,15 @@ import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 
 export const SERVER_NAME = 'agent-code-mode';
 
-export const SERVER_INSTRUCTIONS = `Prefer the run tool when a step needs several tool calls: batch many reads, searches, edits and commands into one script instead of calling tools one by one.
-The script is the body of an async JavaScript function; return a value to get it back. Globals (all async, all subject to your normal permission rules and hooks):
+/**
+ * Everything the model needs to write a script. It lives in the tool
+ * description, not in the server `instructions`: Claude Code puts server
+ * instructions in the per-session environment message, where they are written
+ * to the prompt cache again in every session, while tool definitions sit in
+ * the prefix that sessions share.
+ */
+export const RUN_DESCRIPTION = `Run a JavaScript script that calls the host's tools. Prefer it when a step needs several tool calls: batch many reads, searches, edits and commands into one script instead of calling tools one by one. A script can look, decide and change things in the same call, so finish the step in one script when you can (each extra call is another model round trip), and return only what you need: filter and aggregate in the script.
+The script is the body of an async function; return a value to get it back. Globals (all async, each call subject to the host permission rules and hooks):
   bash({command, cwd?, timeoutMs?}) -> {exitCode, signal, stdout, stderr, truncated, timedOut}
   read({path, offset?, limit?}) -> {path, content, startLine, totalLines, truncated}
   write({path, content}) -> {path, created, diff}
@@ -24,13 +31,16 @@ The script is the body of an async JavaScript function; return a value to get it
   grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {matches: [{file, line, text}], truncated, filtered}
   glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
   console.log/info/warn/error
-A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError. Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).`;
+read's content is the exact text of the file, final newline included. Paths in results are relative to the working directory.
+A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError.
+In bash, name every file literally: a glob (src/*), a variable or $(...) as a file argument gets the whole command denied when nobody can approve it. Find, read and loop over files with glob, read, grep and JavaScript instead.
+Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).
+Returns JSON: {ok, result | error, logs, calls: {total, byTool, denied, errors}, changedFiles, diff, warnings}; empty fields are left out, and a long list of changed files and a diff above ${DIFF_INLINE_CHARS} chars are cut (verbose: true returns every call and the whole diff).`;
 
 export const RUN_TOOL: Tool = {
   name: 'run',
   title: 'Run a code-mode script',
-  description:
-    'Run a JavaScript script that calls bash, read, write, edit, grep and glob. Every call goes through the host permission rules and hooks. Returns the script result, logs, a call log, changed files and the diff.',
+  description: RUN_DESCRIPTION,
   inputSchema: RUN_INPUT_JSON_SCHEMA,
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   _meta: { 'anthropic/alwaysLoad': true },
@@ -117,7 +127,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return runtime;
   };
 
-  const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
+  const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} } });
 
   const listRoots = async (): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
@@ -132,10 +142,12 @@ export function createMcpServer(opts: McpServerOptions): Server {
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [RUN_TOOL] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
-    const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir });
+    let verbose = false;
+    const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir, verbose });
     if (request.params.name !== RUN_TOOL.name) return respond(errorResult(`unknown tool ${JSON.stringify(request.params.name)}`));
     const args = parseRunArgs(request.params.arguments);
     if (!args.ok) return respond(errorResult(`invalid run arguments: ${args.message}`));
+    verbose = args.value.verbose ?? false;
     try {
       const meta: unknown = request.params._meta;
       const host = detectHost({ flag: opts.host, env, meta });
