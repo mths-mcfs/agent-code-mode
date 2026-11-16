@@ -14,7 +14,7 @@ const posix = process.platform !== 'win32';
 let base: string;
 
 beforeEach(() => {
-  base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'acm-contracts-')));
+  base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-contracts-')));
 });
 
 afterEach(() => {

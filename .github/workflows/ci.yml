@@ -28,6 +28,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y bubblewrap socat ripgrep
           # Ubuntu 24.04 restricts unprivileged user namespaces, which bubblewrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net true && echo "bubblewrap works"
           echo "ACM_REQUIRE_CONTAINMENT=1" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm run verify

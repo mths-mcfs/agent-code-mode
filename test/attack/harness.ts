@@ -55,7 +55,7 @@ export interface Lab {
 
 /** Creates the temp layout. `files` are written under the workspace. */
 export function makeLab(files: Record<string, string> = {}): Lab {
-  const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'acm-attack-')));
+  const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-attack-')));
   const ws = path.join(base, 'ws');
   const outside = path.join(base, 'outside');
   const home = path.join(base, 'home');
