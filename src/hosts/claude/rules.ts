@@ -94,6 +94,24 @@ export function splitRule(raw: string): { tool: string; spec: string | undefined
   return { tool, spec: text.slice(open + 1, -1) };
 }
 
+const TOOL_NAME = /^[A-Za-z0-9_]+$/;
+/** `mcp__server`, `mcp__server__tool`, `mcp__server__*` (server and tool names may contain `-`). */
+const MCP_RULE = /^mcp__[A-Za-z0-9_-]+(?:__(?:[A-Za-z0-9_-]+|\*))?$/;
+
+/**
+ * Whether a rule string has a form this adapter understands: `Tool`,
+ * `Tool(specifier)` with a `[A-Za-z0-9_]+` tool name, or one of the MCP forms
+ * without a specifier. Anything else would be silently ignored, so callers
+ * refuse it instead.
+ */
+export function isValidRuleSyntax(raw: string): boolean {
+  const split = splitRule(raw);
+  if (!split) return false;
+  // MCP rules take no specifier (Claude Code skips `mcp__…(…)` in settings files).
+  if (split.tool.startsWith('mcp__')) return split.spec === undefined && MCP_RULE.test(split.tool);
+  return TOOL_NAME.test(split.tool);
+}
+
 /** Compiles a gitignore-style Read/Edit specifier into absolute patterns. */
 export function compilePathSpec(spec: string, kind: RuleKind, anchors: RuleAnchors): RuleMatcher {
   const s = spec.trim();

@@ -31,6 +31,7 @@ import { parseClaudeFlags, readParentClaudeProcess, type ClaudeCliFlags, type Pa
 import {
   bashSpecMayMatchDynamic,
   isInsidePath,
+  isValidRuleSyntax,
   matchesBashSpec,
   matchesParamValue,
   matchesPath,
@@ -404,14 +405,24 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const ruleDocs = managedOnly ? docs.filter((d) => d.source === 'managed') : docs;
     const holdsCapability = (doc: SettingsDoc): boolean => (doc.source === 'project' || doc.source === 'local') && !settings.projectTrusted;
     const rules: { deny: Rule[]; ask: Rule[]; allow: Rule[] } = { deny: [], ask: [], allow: [] };
+    // A malformed rule would match nothing; refuse the whole policy instead of failing open.
+    for (const doc of docs) {
+      for (const kind of ['deny', 'ask', 'allow'] as const) {
+        for (const raw of doc.data.permissions?.[kind] ?? []) {
+          if (!isValidRuleSyntax(raw)) {
+            throw new Error(`${kind} rule ${JSON.stringify(raw)} in ${doc.file ?? `${doc.source} settings`} is not a valid \`Tool\` or \`Tool(specifier)\` rule`);
+          }
+        }
+      }
+    }
     for (const doc of ruleDocs) {
       const anchors = { cwd: ctx.cwd, sourceDir: doc.anchorDir, home };
       for (const kind of ['deny', 'ask', 'allow'] as const) {
         if (kind === 'allow' && holdsCapability(doc)) continue;
         for (const raw of doc.data.permissions?.[kind] ?? []) {
           const rule = parseRule(raw, kind, doc.source, anchors);
-          if (rule) rules[kind].push(await withRealAnchors(rule));
-          else if (kind !== 'allow') throw new Error(`${kind} rule ${JSON.stringify(raw)} in ${doc.file ?? doc.source} cannot be parsed`);
+          if (!rule) throw new Error(`${kind} rule ${JSON.stringify(raw)} in ${doc.file ?? doc.source} cannot be parsed`);
+          rules[kind].push(await withRealAnchors(rule));
         }
       }
     }

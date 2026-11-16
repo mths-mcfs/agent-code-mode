@@ -189,3 +189,41 @@ describe('context records', () => {
     }
   });
 });
+
+describe('malformed permission rules fail the policy load', () => {
+  it.each([
+    ['deny', 'Bash[rm]'],
+    ['deny', 'Read[./.env]'],
+    ['deny', 'Bash(rm'],
+    ['deny', 'B*'],
+    ['ask', 'Bash rm'],
+    ['allow', 'Read[x]'],
+    ['deny', 'mcp__srv__tool(arg)'],
+  ])('%s %j → every call denied unsupported-config, naming the rule and file', async (kind, raw) => {
+    const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'acm-regress-')));
+    const home = path.join(base, 'home');
+    const settingsFile = path.join(home, '.claude', 'settings.json');
+    await mkdir(path.dirname(settingsFile), { recursive: true });
+    await writeFile(settingsFile, JSON.stringify({ permissions: { [kind]: [raw] } }));
+    const adapter = new ClaudeHostAdapter({ env: {}, home, managedDir: null, stateDir: path.join(base, 'state'), readParent: async () => undefined });
+    const ctx = makeContext(path.join(base, 'project'), { host: 'claude' });
+    const policy = await adapter.loadPolicy(ctx);
+    expect('error' in policy && policy.error).toContain(JSON.stringify(raw));
+    expect('error' in policy && policy.error).toContain(settingsFile);
+    const tools = new MemoryToolRuntime({ root: ctx.cwd, files: { 'a.txt': 'x' } });
+    const reply = await new Dispatcher({ adapter, tools, ctx, policy }).dispatch('read', { path: 'a.txt' });
+    expect(reply).toMatchObject({ ok: false, error: { name: 'PermissionDenied', source: 'unsupported-config' } });
+  });
+
+  it('a malformed rule from the parent --disallowedTools fails the load too', async () => {
+    const s = setup({}, 'default', ['--disallowedTools', 'Bash[rm]']);
+    await expect(s).rejects.toThrow(/Bash\[rm\].*cli settings/);
+  });
+
+  it.each(['mcp__agent-code-mode', 'mcp__srv__*', 'mcp__srv__tool_name', 'Bash(rm:*)', 'Read(./x (1).txt)', 'WebFetch(domain:example.com)', 'NotebookEdit'])(
+    '%j is a valid rule',
+    async (raw) => {
+      await expect(setup({ permissions: { deny: [raw] } }, 'default')).resolves.toBeDefined();
+    },
+  );
+});
