@@ -1,25 +1,58 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { CHANGED_FILES_SHOWN, DIFF_INLINE_CHARS, DIFF_SAMPLE_CHARS, ERROR_CAP_CHARS, FAILED_CALLS_SHOWN, SUCCESS_CAP_CHARS, compactRunResult, formatRunResult, truncateStructurally } from './output.js';
+import { describe, expect, it } from 'vitest';
+import { OverflowStore } from './overflow.js';
+import {
+  DIFF_INLINE_CHARS,
+  DIFF_STAT_FILES,
+  ERROR_CAP_CHARS,
+  RESULT_IN_NEXT_BLOCK,
+  SUCCESS_CAP_CHARS,
+  diffStat,
+  formatRunResult,
+  runResultView,
+  summarizeCalls,
+  type McpToolResponse,
+  type OverflowSink,
+} from './output.js';
 import { stateDirPath } from './state-dir.js';
 import type { CallLogEntry, RunResult } from './types.js';
 
 const base: RunResult = { ok: true, result: null, logs: [], calls: [], changedFiles: [], diff: '', warnings: [] };
-const dirs: string[] = [];
-async function tmp(): Promise<string> {
-  const d = await mkdtemp(path.join(os.tmpdir(), 'acm-out-'));
-  dirs.push(d);
-  return path.join(d, 'state');
-}
-afterEach(async () => {
-  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
-});
 
 const allowed = (i: number, tool = 'read'): CallLogEntry => ({ id: `c${i}`, tool, summary: `${tool} f${i}.txt`, decision: 'allowed', durationMs: 2 });
+const deniedCall = (i: number, reason = 'rule: Read(./secret-*) denied'): CallLogEntry => ({ id: `c${i}`, tool: 'read', summary: `read secret-${i}.txt`, decision: 'denied', reason, durationMs: 1 });
 
-describe('compactRunResult', () => {
+/** A unified diff of `files` files, each changing `lines` lines, in the tool runtime's format. */
+function fileDiffs(files: number, lines: number): string {
+  let out = '';
+  for (let f = 0; f < files; f++) {
+    out += `--- a/src/f${f}.ts\n+++ b/src/f${f}.ts\n@@ -1,${lines} +1,${lines} @@\n`;
+    for (let i = 0; i < lines; i++) out += `-old line ${i} of file ${f}\n`;
+    for (let i = 0; i < lines; i++) out += `+new line ${i} of file ${f}\n`;
+  }
+  return out;
+}
+
+const json = (r: McpToolResponse): Record<string, unknown> => {
+  const parsed: unknown = JSON.parse(r.content[0]?.text ?? '');
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+  return Object.fromEntries(Object.entries(parsed));
+};
+const all = (r: McpToolResponse): string => r.content.map((c) => c.text).join('');
+const total = (r: McpToolResponse): number => r.content.reduce((n, c) => n + c.text.length, 0);
+
+/** The whole result kept for `readOverflow`, read back through the binding. */
+function kept(store: OverflowStore, r: McpToolResponse): unknown {
+  const overflow = json(r)['overflow'];
+  if (overflow === null || typeof overflow !== 'object' || !('id' in overflow)) throw new Error('no overflow id');
+  const reply = store.read({ id: overflow.id, limit: 1_000_000 });
+  if (!reply.ok || !('totalChars' in reply.value)) throw new Error('overflow not readable');
+  return JSON.parse(reply.value.text);
+}
+
+const failingSink: OverflowSink = { put: () => undefined };
+
+describe('summarizeCalls', () => {
   it('turns the call log into counts and keeps denied and failed calls in full, without durations', () => {
     const calls: CallLogEntry[] = [
       allowed(1),
@@ -28,7 +61,7 @@ describe('compactRunResult', () => {
       { id: 'c4', tool: 'read', summary: 'read gone.txt', decision: 'error', reason: 'gone.txt does not exist', durationMs: 1 },
       allowed(5),
     ];
-    expect(compactRunResult({ ...base, calls }).view['calls']).toEqual({
+    expect(summarizeCalls(calls)).toEqual({
       total: 5,
       byTool: { read: 3, write: 1, bash: 1 },
       denied: [{ id: 'c3', tool: 'bash', summary: 'bash rm x', reason: 'rule: rm is not allowed' }],
@@ -36,130 +69,184 @@ describe('compactRunResult', () => {
     });
   });
 
-  it('does not grow with the number of allowed calls and caps the list of failed ones', () => {
-    const few = JSON.stringify(compactRunResult({ ...base, calls: Array.from({ length: 3 }, (_, i) => allowed(i)) }).view);
-    const many = JSON.stringify(compactRunResult({ ...base, calls: Array.from({ length: 3_000 }, (_, i) => allowed(i)) }).view);
-    expect(many.length).toBeLessThan(few.length + 10);
-    const denied = Array.from({ length: FAILED_CALLS_SHOWN + 7 }, (_, i): CallLogEntry => ({ ...allowed(i, 'bash'), decision: 'denied', reason: 'no' }));
-    const shown = (compactRunResult({ ...base, calls: denied }).view['calls'] as { denied: unknown[] }).denied;
-    expect(shown).toHaveLength(FAILED_CALLS_SHOWN + 1);
-    expect(shown.at(-1)).toBe('…[7 more]');
+  it('D1: lists every denied call, however many', () => {
+    const out = formatRunResult({ ...base, result: 'caught all', calls: Array.from({ length: 25 }, (_, i) => deniedCall(i + 1)) });
+    const calls = json(out)['calls'];
+    expect(calls).toMatchObject({ total: 25 });
+    expect((calls as { denied: unknown[] }).denied).toEqual(Array.from({ length: 25 }, (_, i) => ({ id: `c${i + 1}`, tool: 'read', summary: `read secret-${i + 1}.txt`, reason: 'rule: Read(./secret-*) denied' })));
+    expect(all(out)).not.toMatch(/more\]/);
   });
 
-  it('leaves out empty fields and keeps the result, error, logs, warnings and rollback report', () => {
-    expect(Object.keys(compactRunResult({ ...base, result: 1 }).view).sort()).toEqual(['calls', 'ok', 'result']);
-    const rolledBack = { restored: ['a.txt'], skipped: [] };
-    const failed: RunResult = { ...base, ok: false, error: { kind: 'denied', name: 'PermissionDenied', message: 'm' }, logs: ['l'], warnings: ['w'], rolledBack };
-    expect(compactRunResult(failed).view).toEqual({ ok: false, result: null, error: failed.error, logs: ['l'], calls: { total: 0, byTool: {} }, warnings: ['w'], rolledBack });
+  it('D1: lists every failed call and every changed file', () => {
+    const errors = Array.from({ length: 30 }, (_, i): CallLogEntry => ({ id: `c${i}`, tool: 'read', summary: `read m${i}`, decision: 'error', reason: 'missing', durationMs: 0 }));
+    const changedFiles = Array.from({ length: 40 }, (_, i) => `src/f${i}.ts`);
+    const view = json(formatRunResult({ ...base, calls: errors, changedFiles, diff: '--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a\n+b\n' }));
+    expect((view['calls'] as { errors: unknown[] }).errors).toHaveLength(30);
+    expect(view['changedFiles']).toEqual(changedFiles);
   });
 
-  it('returns a small diff whole and cuts a large one at a line end', () => {
-    const small = 'x'.repeat(DIFF_INLINE_CHARS - 1) + '\n';
-    expect(compactRunResult({ ...base, diff: small })).toMatchObject({ diffClipped: false, view: { diff: small } });
-    const line = '+0123456789\n';
-    const large = line.repeat(Math.ceil((DIFF_INLINE_CHARS + 1) / line.length));
-    const { view, diffClipped } = compactRunResult({ ...base, diff: large });
-    const shown = String(view['diff']);
-    expect(diffClipped).toBe(true);
-    const kept = shown.slice(0, shown.indexOf('…['));
-    expect(kept.length).toBeLessThanOrEqual(DIFF_SAMPLE_CHARS);
-    expect(kept.endsWith(line)).toBe(true);
-    expect(large.startsWith(kept)).toBe(true);
-    expect(shown).toContain(`…[${large.length - kept.length} more chars; overflowPath has the whole result]`);
-  });
-
-  it('caps a long list of changed files', () => {
-    const changedFiles = Array.from({ length: CHANGED_FILES_SHOWN + 5 }, (_, i) => `f${i}.txt`);
-    const shown = compactRunResult({ ...base, changedFiles }).view['changedFiles'] as string[];
-    expect(shown).toEqual([...changedFiles.slice(0, CHANGED_FILES_SHOWN), '…[5 more]']);
+  it('keeps the size of a run with many allowed calls constant', () => {
+    const few = all(formatRunResult({ ...base, calls: Array.from({ length: 3 }, (_, i) => allowed(i)) }));
+    const many = all(formatRunResult({ ...base, calls: Array.from({ length: 3_000 }, (_, i) => allowed(i)) }));
+    expect(many.length - few.length).toBeLessThan(10);
   });
 });
 
-describe('formatRunResult', () => {
-  it('returns the whole result when verbose', async () => {
-    const result: RunResult = { ...base, calls: [allowed(1), allowed(2)], diff: 'd'.repeat(DIFF_INLINE_CHARS + 1) };
-    const out = await formatRunResult(result, { stateDir: await tmp(), verbose: true });
-    expect(JSON.parse(out.content[0]?.text ?? '')).toEqual(result);
+describe('runResultView', () => {
+  it('leaves empty fields out', () => {
+    expect(Object.keys(runResultView({ ...base, result: 1 }).view).sort()).toEqual(['calls', 'ok', 'result']);
+    const rolledBack = { restored: ['a'], skipped: [] };
+    const failed: RunResult = { ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, logs: ['l'], warnings: ['w'], rolledBack };
+    expect(runResultView(failed).view).toEqual({ ok: false, result: null, error: failed.error, logs: ['l'], calls: { total: 0, byTool: {} }, warnings: ['w'], rolledBack });
   });
 
-  it('saves the whole result when the compact view cut the diff, and points to the file', async () => {
-    const stateDir = await tmp();
-    const result: RunResult = { ...base, result: 'done', calls: [allowed(1, 'write')], changedFiles: ['a.txt'], diff: '+line\n'.repeat(2_000) };
-    const out = await formatRunResult(result, { stateDir });
-    const shown = JSON.parse(out.content[0]?.text ?? '') as { diff: string; overflowPath: string; truncated?: boolean };
-    expect(shown.truncated).toBeUndefined();
-    expect(shown.diff.length).toBeLessThan(DIFF_SAMPLE_CHARS + 90);
-    expect(shown.diff).toContain('overflowPath');
-    expect(JSON.parse(await readFile(shown.overflowPath, 'utf8'))).toEqual(result);
+  it('D6: verbose returns the log of every call and the whole diff', () => {
+    const diff = fileDiffs(30, 5);
+    const calls = [allowed(1), deniedCall(2)];
+    const { view, cut } = runResultView({ ...base, calls, diff }, true);
+    expect(cut).toBe(false);
+    expect(view['calls']).toEqual(calls);
+    expect(view['diff']).toBe(diff);
+    expect(view['diffStat']).toBeUndefined();
+  });
+});
+
+describe('diffStat', () => {
+  it('replaces a diff above the inline size, with at most ten files plus the totals', () => {
+    const diff = fileDiffs(30, 3);
+    expect(diff.length).toBeGreaterThan(DIFF_INLINE_CHARS);
+    const store = new OverflowStore();
+    const out = formatRunResult({ ...base, changedFiles: ['src/f0.ts'], diff }, { overflow: store });
+    const view = json(out);
+    expect(view['diff']).toBeUndefined();
+    const stat = view['diffStat'] as { files: Record<string, string>; moreFiles: number; total: string };
+    expect(Object.keys(stat.files)).toHaveLength(DIFF_STAT_FILES);
+    expect(stat.files['src/f0.ts']).toBe('+3 -3');
+    expect(stat.moreFiles).toBe(20);
+    expect(stat.total).toBe('30 files +90 -90');
+    // The whole diff stays readable.
+    expect(kept(store, out)).toMatchObject({ diff });
   });
 
-
-  it('returns compact JSON and isError', async () => {
-    const ok = await formatRunResult({ ...base, result: { a: 1 } }, { stateDir: await tmp() });
-    expect(ok.isError).toBe(false);
-    expect(JSON.parse(ok.content[0]?.text ?? '')).toMatchObject({ ok: true, result: { a: 1 } });
-    const err = await formatRunResult({ ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' } }, { stateDir: await tmp() });
-    expect(err.isError).toBe(true);
+  it('keeps a small diff whole', () => {
+    const small = fileDiffs(1, 2);
+    expect(json(formatRunResult({ ...base, diff: small }))).toMatchObject({ diff: small });
   });
 
-  it('writes oversized success results to an overflow file and returns a valid preview', async () => {
-    const stateDir = await tmp();
-    const big: RunResult = { ...base, result: { text: 'x'.repeat(100_000), list: Array.from({ length: 5_000 }, (_, i) => i) }, diff: 'd'.repeat(50_000) };
-    const out = await formatRunResult(big, { stateDir });
-    const text = out.content[0]?.text ?? '';
-    expect(text.length).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
-    const preview = JSON.parse(text) as { overflowPath: string; truncated: boolean; ok: boolean };
-    expect(preview.truncated).toBe(true);
-    expect(preview.ok).toBe(true);
-    const full: unknown = JSON.parse(await readFile(preview.overflowPath, 'utf8'));
-    expect(full).toEqual(JSON.parse(JSON.stringify(big)));
-    if (process.platform !== 'win32') {
-      expect((await stat(preview.overflowPath)).mode & 0o777).toBe(0o600);
-      expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
+  it('counts hunk lines from the hunk header, so removed lines that start with -- are not file headers', () => {
+    const diff = '--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,2 @@\n--- not a header\n+++ not one either\n keep\n\\ No newline at end of file\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+x\n';
+    expect(diffStat(diff)).toEqual({ files: { 'a.md': '+1 -1', 'new.txt': '+1 -0' }, total: '2 files +2 -1' });
+  });
+});
+
+describe('formatRunResult: plain text result', () => {
+  const text = Array.from({ length: 20 }, (_, i) => `line "${i}" \\ of output`).join('\n');
+
+  it('sends a multi-line string result above 200 chars unescaped in a second block', () => {
+    const out = formatRunResult({ ...base, result: text, calls: [allowed(1)] });
+    expect(out.content).toHaveLength(2);
+    expect(json(out)).toMatchObject({ ok: true, result: RESULT_IN_NEXT_BLOCK, calls: { total: 1 } });
+    expect(out.content[1]?.text).toBe(text);
+  });
+
+  it('keeps short strings, single-line strings and other values in the JSON', () => {
+    for (const result of ['short\nstring', 'x'.repeat(5_000), { text }, 42]) {
+      const out = formatRunResult({ ...base, result });
+      expect(out.content).toHaveLength(1);
+      expect(json(out)['result']).toEqual(result);
     }
   });
+});
 
-  it('caps error results lower', async () => {
+describe('formatRunResult: response cap', () => {
+  it('sets isError on failed runs', () => {
+    expect(formatRunResult({ ...base, result: { a: 1 } }).isError).toBe(false);
+    expect(formatRunResult({ ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' } }).isError).toBe(true);
+  });
+
+  it('keeps the start and end of a huge result, reports its size and keeps the rest for readOverflow', () => {
+    const lines = Array.from({ length: 50_000 }, (_, i) => `row ${i}`).join('\n');
+    const result: RunResult = { ...base, result: lines, calls: [allowed(1)] };
+    const store = new OverflowStore();
+    const out = formatRunResult(result, { overflow: store });
+    expect(total(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+    const view = json(out);
+    expect(view).toMatchObject({ ok: true, result: RESULT_IN_NEXT_BLOCK, truncated: true, calls: { total: 1 } });
+    const overflow = view['overflow'] as { id: string; chars: number };
+    expect(overflow.chars).toBe(JSON.stringify(result).length);
+    const shown = out.content[1]?.text ?? '';
+    expect(shown.startsWith('row 0\nrow 1\n')).toBe(true);
+    expect(shown.endsWith('row 49998\nrow 49999')).toBe(true);
+    expect(shown).toContain(`readOverflow(${JSON.stringify(overflow.id)})`);
+    expect(kept(store, out)).toEqual(result);
+  });
+
+  it('cuts a huge non-string result as JSON text in the second block', () => {
+    const result: RunResult = { ...base, result: { list: Array.from({ length: 20_000 }, (_, i) => ({ i })) } };
+    const out = formatRunResult(result, { overflow: new OverflowStore() });
+    expect(total(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+    expect(json(out)['result']).toBe(RESULT_IN_NEXT_BLOCK);
+    expect(out.content[1]?.text.startsWith('{"list":[{"i":0},')).toBe(true);
+  });
+
+  it('D1: above the cap, denied calls stay whole entries and the rest is in the overflow', () => {
+    const calls = Array.from({ length: 2_000 }, (_, i) => deniedCall(i, `hook: ${'policy text '.repeat(10)}`));
+    const store = new OverflowStore();
+    const out = formatRunResult({ ...base, result: 'r', calls }, { overflow: store });
+    expect(total(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+    const denied = (json(out)['calls'] as { denied: unknown[] }).denied;
+    const entries = denied.slice(0, -1);
+    expect(entries.length).toBeGreaterThan(50);
+    entries.forEach((e, i) => expect(e).toEqual({ id: `c${i}`, tool: 'read', summary: `read secret-${i}.txt`, reason: calls[i]?.reason }));
+    expect(denied.at(-1)).toBe(`…[${2_000 - entries.length} more in overflow]`);
+    expect((kept(store, out) as RunResult).calls).toHaveLength(2_000);
+  });
+
+  it('caps error results lower', () => {
     const big: RunResult = { ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'm'.repeat(20_000) }, logs: ['l'.repeat(20_000)] };
-    const out = await formatRunResult(big, { stateDir: await tmp() });
-    const text = out.content[0]?.text ?? '';
-    expect(text.length).toBeLessThanOrEqual(ERROR_CAP_CHARS);
-    expect(JSON.parse(text)).toMatchObject({ ok: false, truncated: true, error: { name: 'Error' } });
+    const out = formatRunResult(big, { overflow: new OverflowStore() });
+    expect(total(out)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    expect(json(out)).toMatchObject({ ok: false, truncated: true, error: { name: 'Error' } });
   });
 
-  it('still returns a preview when the overflow file cannot be written', async () => {
-    const big: RunResult = { ...base, result: 'x'.repeat(60_000) };
-    const out = await formatRunResult(big, { stateDir: '\0invalid' });
-    const preview = JSON.parse(out.content[0]?.text ?? '') as Record<string, unknown>;
-    expect(preview['overflowPath']).toBeUndefined();
-    expect(String(preview['note'])).toContain('could not be saved');
+  it('D2: never names an overflow that could not be kept', () => {
+    const big: RunResult = { ...base, result: 'x\n'.repeat(60_000), calls: Array.from({ length: 3_000 }, (_, i) => deniedCall(i)) };
+    const out = formatRunResult(big, { overflow: failingSink });
+    expect(total(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+    expect(all(out)).not.toMatch(/overflow/i);
+    expect(json(out)).toMatchObject({ truncated: true, chars: JSON.stringify(big).length });
+    const diffOnly = formatRunResult({ ...base, diff: fileDiffs(30, 3) }, { overflow: failingSink });
+    expect(all(diffOnly)).not.toMatch(/overflow/i);
+    expect(json(diffOnly)['diffStat']).toBeDefined();
   });
-});
 
-describe('truncateStructurally', () => {
-  it('always returns valid JSON within the cap', () => {
-    const deep: Record<string, unknown> = {};
-    let cur = deep;
-    for (let i = 0; i < 50; i++) {
-      const next: Record<string, unknown> = { s: 'y'.repeat(1_000) };
-      cur['n'] = next;
-      cur = next;
+  it('stays under the cap with valid JSON whatever the shape', () => {
+    let seed = 7;
+    const rand = (n: number): number => ((seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648), seed % n);
+    for (let round = 0; round < 40; round++) {
+      const result: RunResult = {
+        ...base,
+        ok: rand(3) !== 0,
+        ...(rand(2) === 0 ? { error: { kind: 'error' as const, name: 'Error', message: 'e'.repeat(rand(30_000)), stack: 's\n'.repeat(rand(5_000)) } } : {}),
+        result: rand(2) === 0 ? 'q"\n'.repeat(rand(40_000)) : { deep: Array.from({ length: rand(5_000) }, (_, i) => ({ i, s: 'z'.repeat(rand(50)) })) },
+        logs: Array.from({ length: rand(3_000) }, (_, i) => `log ${i} ${'"'.repeat(rand(40))}`),
+        calls: Array.from({ length: rand(1_500) }, (_, i) => (rand(2) === 0 ? allowed(i) : deniedCall(i, 'r'.repeat(rand(400))))),
+        changedFiles: Array.from({ length: rand(400) }, (_, i) => `src/${'d/'.repeat(rand(10))}f${i}.ts`),
+        diff: fileDiffs(rand(40), rand(30)),
+        warnings: Array.from({ length: rand(200) }, (_, i) => `warning ${i} ${'w'.repeat(rand(200))}`),
+      };
+      for (const verbose of [false, true]) {
+        const out = formatRunResult(result, { overflow: new OverflowStore(), verbose });
+        expect(total(out)).toBeLessThanOrEqual(result.ok ? SUCCESS_CAP_CHARS : ERROR_CAP_CHARS);
+        expect(json(out)['ok']).toBe(result.ok);
+      }
     }
-    for (const cap of [40, 200, 1_000, 5_000]) {
-      const text = truncateStructurally({ ok: true, deep, arr: new Array(1000).fill('z'.repeat(100)) }, cap, { overflowPath: '/state/x.json' });
-      expect(text.length).toBeLessThanOrEqual(cap);
-      expect(() => JSON.parse(text)).not.toThrow();
-    }
   });
-});
 
-describe('truncateStructurally with wide objects', () => {
-  it('cuts objects with many keys instead of dropping everything', () => {
-    const wide = Object.fromEntries(Array.from({ length: 50_000 }, (_, i) => [`k${i}`, i]));
-    const text = truncateStructurally({ ok: true, result: wide }, 30_000);
-    const parsed = JSON.parse(text) as { result: Record<string, unknown> };
-    expect(text.length).toBeLessThanOrEqual(30_000);
-    expect(parsed.result['k0']).toBe(0);
+  it('serializes values JSON cannot represent instead of throwing', () => {
+    const circular: Record<string, unknown> = { n: 1n };
+    circular['self'] = circular;
+    expect(json(formatRunResult({ ...base, result: circular }))['result']).toEqual({ n: '1', self: '[circular]' });
   });
 });
 

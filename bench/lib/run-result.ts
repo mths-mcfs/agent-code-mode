@@ -3,7 +3,8 @@ import { z } from 'zod';
 /**
  * The agent-code-mode `run` response as the server returns it (only the fields the bench reads).
  * `calls` is the full log (verbose, and every result before the compact view existed) or the
- * compact summary: counts by tool plus the denied calls.
+ * compact summary: counts by tool plus the denied calls. A long multi-line string result comes in
+ * a second content block after the JSON one; hosts hand the blocks over joined.
  */
 const Call = z.object({ tool: z.string(), decision: z.string().optional(), summary: z.string().optional(), reason: z.string().optional() }).passthrough();
 const RunResultText = z.object({
@@ -22,14 +23,45 @@ export interface RunInnerCalls {
 
 const denialLine = (c: z.infer<typeof Call>): string => `${c.tool} ${c.summary ?? ''}: ${c.reason ?? 'denied'}`.slice(0, 500);
 
-/** Inner calls of one `run` response text; null when the text is not a run result. */
-export function runInnerCalls(text: string): RunInnerCalls | null {
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    return null;
+/** End index of the JSON object `text` starts with, or -1. */
+function leadingObjectEnd(text: string): number {
+  if (!text.startsWith('{')) return -1;
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
   }
+  return -1;
+}
+
+/** The JSON value of a response's first block: the whole text, or the object it starts with when a text block follows. */
+function firstBlockJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const end = leadingObjectEnd(text);
+    if (end === -1) return undefined;
+    try {
+      return JSON.parse(text.slice(0, end));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/** Inner calls of one `run` response text (its content blocks joined); null when the text is not a run result. */
+export function runInnerCalls(text: string): RunInnerCalls | null {
+  const json = firstBlockJson(text);
+  if (json === undefined) return null;
   const parsed = RunResultText.safeParse(json);
   if (!parsed.success) return null;
   const calls = parsed.data.calls;

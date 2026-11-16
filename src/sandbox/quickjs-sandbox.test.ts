@@ -4,7 +4,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
+import type { CallReply, LogLevel, SandboxOutcome, ScriptValue } from '../core/types.js';
 import { childEntryPath, childEnv, childExecArgv, permissionFlag, QuickJsSandbox, SandboxUnavailableError, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
 
 interface Recorded {
@@ -24,7 +24,7 @@ const echo: OnCall = async (tool, args) => {
 
 /** Test replies carry arbitrary data; the sandbox forwards any JSON value. */
 function ok(value: unknown): CallReply {
-  return { ok: true, value: value as ToolResult };
+  return { ok: true, value: value as ScriptValue };
 }
 
 async function run(
@@ -241,7 +241,7 @@ describe('QuickJsSandbox: no ambient authority', () => {
         'eval', 'globalThis', 'Date', 'RegExp', 'JSON', 'Proxy', 'Map', 'Set', 'WeakMap', 'WeakSet', 'ArrayBuffer', 'SharedArrayBuffer',
         'Uint8ClampedArray', 'Int8Array', 'Uint8Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'BigInt64Array',
         'BigUint64Array', 'Float16Array', 'Float32Array', 'Float64Array', 'DataView', 'Promise', 'BigInt', 'WeakRef', 'FinalizationRegistry',
-        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob',
+        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow',
       ]),
     ));
     const result = value(outcome);

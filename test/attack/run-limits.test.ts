@@ -152,3 +152,50 @@ describe('oversized outputs are capped', () => {
     expect(out.result).toMatchObject({ truncated: true });
   });
 });
+
+describe('readOverflow reads back what a response cut, in this server session only', () => {
+  const overflowOf = (text: string): { id: string; chars: number } => {
+    const body: unknown = JSON.parse(text);
+    const overflow = body !== null && typeof body === 'object' && 'overflow' in body ? body.overflow : undefined;
+    if (overflow === null || typeof overflow !== 'object' || !('id' in overflow) || typeof overflow.id !== 'string' || !('chars' in overflow) || typeof overflow.chars !== 'number') {
+      throw new Error(`no overflow in ${text.slice(0, 200)}`);
+    }
+    return { id: overflow.id, chars: overflow.chars };
+  };
+
+  it('a cut result is readable whole from the next script, with no file path in the response', async () => {
+    const { lab, server } = await start({});
+    const blocks = await server.runBlocks(`return Array.from({ length: 30000 }, (_, i) => 'line ' + i).join('\\n');`);
+    const text = blocks.join('');
+    expect(text.length).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+    expect(text).not.toContain(lab.stateDir);
+    expect(readdirSync(lab.stateDir).filter((f) => f.startsWith('run-'))).toEqual([]);
+    const { id, chars } = overflowOf(blocks[0] ?? '');
+    const out = await server.run(
+      `const parts = []; let offset = 0;
+       for (;;) { const s = await readOverflow(${JSON.stringify(id)}, offset, 50000); parts.push(s.text); offset += s.text.length; if (!s.truncated) break; }
+       const whole = JSON.parse(parts.join(''));
+       const lines = whole.result.split('\\n');
+       return { chars: offset, lines: lines.length, last: lines[lines.length - 1] };`,
+    );
+    expect(out.result).toEqual({ chars, lines: 30_000, last: 'line 29999' });
+  });
+
+  it('an id from another server session, a made-up id and bad arguments are refused', async () => {
+    const { lab, server } = await start({});
+    const { id } = overflowOf((await server.runBlocks(`return 'x\\n'.repeat(30000);`))[0] ?? '');
+    const other = await claudeServer(lab, { permissions: { defaultMode: 'bypassPermissions' } });
+    try {
+      const out = await other.run(
+        `const errors = [];
+         for (const args of [[${JSON.stringify(id)}], ['ov_AAAAAAAAAAAAAAAAAAAAAA'], ['../state/run-1.json'], [${JSON.stringify(id)}, -1], [${JSON.stringify(id)}, 0, 0]]) {
+           try { await readOverflow(...args); errors.push('read'); } catch (e) { errors.push(e.name + ':' + e.code); }
+         }
+         return errors;`,
+      );
+      expect(out.result).toEqual(['ToolError:not-found', 'ToolError:not-found', 'ToolError:not-found', 'ToolError:invalid-args', 'ToolError:invalid-args']);
+    } finally {
+      await other.close();
+    }
+  });
+});

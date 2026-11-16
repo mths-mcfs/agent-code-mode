@@ -3,6 +3,7 @@ import { errorMessage } from './errors.js';
 import { DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS, type RunArgs } from './schemas.js';
 import type {
   CallLogEntry,
+  CallReply,
   HostAdapter,
   LogLevel,
   PolicyLoadError,
@@ -41,7 +42,12 @@ export interface RunDeps<P = unknown> {
   readonly stopGraceMs?: number;
   /** Upper bound of a transaction rollback. */
   readonly rollbackTimeoutMs?: number;
+  /** Serves the `readOverflow` binding (results earlier responses of this server cut). */
+  readonly overflow?: { read(args: unknown): CallReply };
 }
+
+/** Binding that reads back what a response cut; it never reaches the host, it only reads this server's memory. */
+export const READ_OVERFLOW_BINDING = 'readOverflow';
 
 type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
 
@@ -179,6 +185,11 @@ function runError(stopReason: StopReason | undefined, outcome: SandboxOutcome, d
   return undefined;
 }
 
+function readOverflow(store: RunDeps['overflow'], args: unknown): CallReply {
+  if (store === undefined) return { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
+  return store.read(args);
+}
+
 /**
  * Runs one script end to end: loads the policy, starts the transaction,
  * runs the sandbox with the dispatcher behind its bindings, enforces the
@@ -239,7 +250,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
           timeoutMs,
           memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
           signal: controller.signal,
-          onCall: (tool, args) => active.dispatch(tool, args),
+          onCall: (tool, args) => (tool === READ_OVERFLOW_BINDING ? Promise.resolve(readOverflow(deps.overflow, args)) : active.dispatch(tool, args)),
           onLog: (level, text) => logs.add(level, text),
         });
       } catch (err) {

@@ -7,7 +7,7 @@ import { makeContext } from '../testing/context.js';
 import { StaticHostAdapter } from '../testing/static-host-adapter.js';
 import { NodeToolRuntime } from '../tools/runtime.js';
 import { Dispatcher } from './dispatcher.js';
-import type { CallReply, GlobResult, GrepResult, PolicySnapshot, PreparedCall, SessionContext, ToolCall } from './types.js';
+import type { CallReply, GlobResult, PolicySnapshot, ScriptGrepResult, PreparedCall, SessionContext, ToolCall } from './types.js';
 
 const posix = process.platform !== 'win32';
 
@@ -115,8 +115,8 @@ describe('PolicySnapshot.readFilter and additionalRoots', () => {
       payload: null,
     };
     const d = dispatcherFor(ctx, policy);
-    const grep = value<GrepResult>(await d.dispatch('grep', { pattern: 'token' }));
-    expect(grep.matches.map((m) => m.file)).toEqual(['src/a.ts']);
+    const grep = value<ScriptGrepResult>(await d.dispatch('grep', { pattern: 'token' }));
+    expect(grep.rows.map(([file]) => file)).toEqual(['src/a.ts']);
     expect(grep.filtered).toBe(2);
     const glob = value<GlobResult>(await d.dispatch('glob', { pattern: '**/*' }));
     expect(glob.files).toEqual(['src/a.ts']);
@@ -126,8 +126,9 @@ describe('PolicySnapshot.readFilter and additionalRoots', () => {
   it('reports filtered 0 without a filter', async () => {
     const { ctx } = workspace();
     const policy: PolicySnapshot<null> = { host: 'generic', bashContainment: { mode: 'none' }, protectedPaths: [], payload: null };
-    const grep = value<GrepResult>(await dispatcherFor(ctx, policy).dispatch('grep', { pattern: 'token' }));
-    expect(grep.matches).toHaveLength(3);
+    const grep = value<ScriptGrepResult>(await dispatcherFor(ctx, policy).dispatch('grep', { pattern: 'token' }));
+    expect(grep.rows).toHaveLength(3);
+    expect(grep.count).toBe(3);
     expect(grep.filtered).toBe(0);
   });
 
@@ -195,8 +196,8 @@ describe('Claude policy wiring', () => {
     expect(policy.readFilter?.(path.join(project, '.env'))).toBe(false);
     expect(policy.readFilter?.(path.join(project, 'private', 'p.txt'))).toBe(false);
     expect(policy.readFilter?.(path.join(project, 'src', 'ok.txt'))).toBe(true);
-    const grep = value<GrepResult>(await d.dispatch('grep', { pattern: 'key' }));
-    expect(grep.matches.map((m) => m.file)).toEqual(['src/ok.txt']);
+    const grep = value<ScriptGrepResult>(await d.dispatch('grep', { pattern: 'key' }));
+    expect(grep.rows.map(([file]) => file)).toEqual(['src/ok.txt']);
     expect(grep.filtered).toBe(2);
   });
 

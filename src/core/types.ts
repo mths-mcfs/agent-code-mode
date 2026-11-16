@@ -219,6 +219,29 @@ export interface ToolResultMap {
 /** Any tool result. */
 export type ToolResult = ToolResultMap[ToolName];
 
+/** `grep` result as the script sees it: one row per match, paths relative to the session cwd when inside it. */
+export interface ScriptGrepResult {
+  readonly columns: readonly ['file', 'line', 'text'];
+  readonly rows: readonly (readonly [file: string, line: number, text: string])[];
+  /** Number of rows. */
+  readonly count: number;
+  readonly truncated: boolean;
+  readonly filtered: number;
+}
+
+/** What `readOverflow(id, offset?, limit?)` resolves to: a slice of a result a response cut. */
+export interface OverflowSlice {
+  readonly text: string;
+  /** Character offset of `text` in the kept result. */
+  readonly offset: number;
+  readonly totalChars: number;
+  /** True when the kept result goes on after `text`. */
+  readonly truncated: boolean;
+}
+
+/** A binding's resolved value as the script receives it. */
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice;
+
 // ---------------------------------------------------------------------------
 // Prepared calls: the exact effect that is authorized and then committed.
 // ---------------------------------------------------------------------------
@@ -582,7 +605,7 @@ export type BindingError =
 
 /** Reply to one binding call. Never thrown: the dispatcher always resolves. */
 export type CallReply =
-  | { readonly ok: true; readonly value: ToolResult }
+  | { readonly ok: true; readonly value: ScriptValue }
   | { readonly ok: false; readonly error: BindingError };
 
 /** Options of `Sandbox.run`. */
@@ -674,6 +697,4 @@ export interface RunResult {
   readonly rolledBack?: RollbackReport;
   /** Notes the model must know, e.g. bash effects that were not rolled back. */
   readonly warnings: readonly string[];
-  /** Set by output shaping when the full result was written to a file. */
-  readonly overflowPath?: string;
 }
