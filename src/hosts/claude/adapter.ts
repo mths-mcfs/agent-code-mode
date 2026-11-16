@@ -241,6 +241,10 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
   });
 }
 
+/** Why no allow rule approved a bash command that names files by glob, variable or substitution. */
+export const RUNTIME_FILES_HINT =
+  'the command names files only known at run time (a glob, variable or substitution), which no allow rule covers; name each file literally, or find and read files with glob(), read() and grep()';
+
 /** What the permission mode does with a call that no rule decided. */
 function modeDecision(view: CallView, policy: ClaudePolicy): Decision {
   const { prepared } = view;
@@ -601,7 +605,12 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const critical = criticalRemoval(view, policy);
     if (critical !== undefined) return askOrDeny(`${critical}; no rule or mode approves it`);
     if (allowedByRule(view, policy.rules.allow, policy)) return { kind: 'allow' };
-    return modeDecision(view, policy);
+    const decision = modeDecision(view, policy);
+    // Same decision, with the cause the script can act on: allow rules never cover files named at run time.
+    if (decision.kind !== 'allow' && view.bashFiles.some((f) => f.path === undefined)) {
+      return { ...decision, reason: `${decision.reason}: ${RUNTIME_FILES_HINT}` };
+    }
+    return decision;
   }
 
   /**

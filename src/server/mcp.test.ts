@@ -67,7 +67,7 @@ function textOf(result: unknown): string {
 }
 
 describe('MCP server', () => {
-  it('lists the run tool with annotations, _meta and instructions', async () => {
+  it('lists the run tool with annotations and _meta, and documents the bindings in its description (no server instructions)', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     expect(tools).toHaveLength(1);
@@ -77,7 +77,10 @@ describe('MCP server', () => {
       _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: { type: 'object', required: ['code'] },
     });
-    expect(client.getInstructions()).toContain('bash({command');
+    expect(tools[0]?.description).toContain('bash({command');
+    expect(tools[0]?.inputSchema.properties).toHaveProperty('verbose');
+    // Claude Code writes server instructions to the prompt cache again in every session.
+    expect(client.getInstructions()).toBeUndefined();
   });
 
   it('runs a script end to end: FakeSandbox → Dispatcher → StaticHostAdapter → MemoryToolRuntime, with one denied call', async () => {
@@ -87,7 +90,7 @@ describe('MCP server', () => {
       { tool: 'bash', args: { command: 'rm -rf /' } },
       { tool: 'read', args: { path: 'notes.txt' } },
     ]);
-    const result = await client.callTool({ name: 'run', arguments: { code } });
+    const result = await client.callTool({ name: 'run', arguments: { code, verbose: true } });
     expect(result.isError).toBe(false);
     const body = JSON.parse(textOf(result)) as {
       ok: boolean;
@@ -110,6 +113,23 @@ describe('MCP server', () => {
     expect(body.diff).toContain('+written');
     expect(tools.read('out.txt')).toBe('written\n');
     expect(tools.commits.some((c) => c.tool === 'bash')).toBe(false);
+  });
+
+  it('returns the compact view by default: call counts, the denied call in full, no empty fields', async () => {
+    const { client } = await connect();
+    const code = JSON.stringify([
+      { tool: 'read', args: { path: 'notes.txt' } },
+      { tool: 'bash', args: { command: 'rm -rf /' } },
+      { tool: 'read', args: { path: 'notes.txt' } },
+    ]);
+    const result = await client.callTool({ name: 'run', arguments: { code } });
+    const body = JSON.parse(textOf(result)) as Record<string, unknown>;
+    expect(body['calls']).toEqual({
+      total: 3,
+      byTool: { read: 2, bash: 1 },
+      denied: [{ id: 'c2', tool: 'bash', summary: 'bash rm -rf /', reason: 'rule: rm is not allowed' }],
+    });
+    expect(Object.keys(body).sort()).toEqual(['calls', 'ok', 'result']);
   });
 
   it('rolls back a transaction when a call is denied and reports isError', async () => {

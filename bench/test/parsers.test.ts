@@ -5,6 +5,7 @@ import { claudeIsolationIssues, parseClaudeTranscript } from '../lib/claude.ts';
 import { classifyCodexTool, codexToolSurface, extractCodexRequests, parseCodexTranscript } from '../lib/codex.ts';
 import { costFromUsage, loadPricing } from '../lib/pricing.ts';
 import { checkArm, checkSurface } from '../lib/record.ts';
+import { runInnerCalls } from '../lib/run-result.ts';
 
 const F = path.join(import.meta.dirname, '..', 'parser-fixtures');
 const read = (name: string): string => readFileSync(path.join(F, name), 'utf8');
@@ -47,6 +48,15 @@ describe('Claude transcript parser', () => {
     expect(replay).toHaveLength(1);
     const p = parseClaudeTranscript(`${raw}\n${replay.join('\n')}\n${replay.join('\n')}`);
     expect(p.innerCalls).toEqual({ total: 3, byTool: { read: 2, grep: 1 } });
+  });
+
+  it('reads the compact run response: call counts and the denied calls', () => {
+    const compact = { ok: true, result: 1, calls: { total: 5, byTool: { read: 3, bash: 2 }, denied: [{ id: 'c2', tool: 'bash', summary: 'bash rm x', reason: 'rule: no rm' }, '…[1 more]'] } };
+    expect(runInnerCalls(JSON.stringify(compact))).toEqual({ total: 5, byTool: { read: 3, bash: 2 }, denials: ['bash bash rm x: rule: no rm'] });
+    const full = { ok: true, calls: [{ id: 'c1', tool: 'read', summary: 'read a', decision: 'allowed' }, { id: 'c2', tool: 'bash', summary: 'bash rm x', decision: 'denied', reason: 'rule: no rm' }] };
+    expect(runInnerCalls(JSON.stringify(full))).toEqual({ total: 2, byTool: { read: 1, bash: 1 }, denials: ['bash bash rm x: rule: no rm'] });
+    expect(runInnerCalls('not json')).toBeNull();
+    expect(runInnerCalls('{"ok":true}')).toBeNull();
   });
 
   it('collects denied calls from hook errors and the run call log', () => {

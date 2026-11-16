@@ -286,7 +286,8 @@ export class MemoryToolRuntime implements ToolRuntime {
         const lines = content.split('\n');
         const window = lines.slice(offset - 1, offset - 1 + limit);
         this.commits.push({ id: prepared.id, tool: 'read', target: absPath });
-        return { path: absPath, content: window.join('\n'), startLine: offset, totalLines: lines.length, truncated: offset - 1 + limit < lines.length };
+        const more = offset - 1 + window.length < lines.length;
+        return { path: absPath, content: `${window.join('\n')}${more ? '\n' : ''}`, startLine: offset, totalLines: lines.length, truncated: offset - 1 + limit < lines.length };
       }
       case 'grep': {
         const { absRoot, pattern, ignoreCase, maxResults, glob } = prepared.effect;

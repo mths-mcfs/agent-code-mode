@@ -144,6 +144,7 @@ export const RunArgsSchema = z.object({
   code: z.string().min(1, 'must not be empty').max(MAX_CODE_CHARS),
   transaction: z.boolean().optional(),
   timeoutMs: z.number().int().min(1).optional(),
+  verbose: z.boolean().optional(),
 });
 
 export type RunArgs = z.infer<typeof RunArgsSchema>;
@@ -160,6 +161,10 @@ export const RUN_INPUT_JSON_SCHEMA: {
       type: 'string',
       description:
         'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob; the return value is the result.',
+    },
+    verbose: {
+      type: 'boolean',
+      description: 'Return the log of every call and the whole diff instead of the compact summary.',
     },
     transaction: {
       type: 'boolean',

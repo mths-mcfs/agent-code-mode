@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { errorMessage } from './errors.js';
 import { ensureStateDir } from './state-dir.js';
-import type { RunResult } from './types.js';
+import type { CallLogEntry, RunResult } from './types.js';
 
 /** Largest text of a successful result. */
 export const SUCCESS_CAP_CHARS = 30_000;
@@ -16,9 +16,20 @@ export interface McpToolResponse {
   isError: boolean;
 }
 
+/** A combined diff up to this size is returned whole. */
+export const DIFF_INLINE_CHARS = 1_500;
+/** How much of a larger diff is returned; the whole result goes to a file. */
+export const DIFF_SAMPLE_CHARS = 600;
+/** Changed files listed before the rest is counted. */
+export const CHANGED_FILES_SHOWN = 10;
+/** Denied or failed calls listed in full before the rest is counted. */
+export const FAILED_CALLS_SHOWN = 20;
+
 export interface FormatOptions {
   /** Directory for overflow files. Created 0700 when needed. */
   readonly stateDir: string;
+  /** Return every call and the whole diff instead of the compact view. */
+  readonly verbose?: boolean;
   readonly successCap?: number;
   readonly errorCap?: number;
 }
@@ -102,24 +113,78 @@ async function writeOverflow(stateDir: string, text: string): Promise<string> {
   return file;
 }
 
+function clipList<T>(items: readonly T[], shown: number): (T | string)[] {
+  return items.length <= shown ? [...items] : [...items.slice(0, shown), `…[${items.length - shown} more]`];
+}
+
+/** The call log as counts; only calls that were denied or failed keep their entry (without the duration). */
+export function summarizeCalls(calls: readonly CallLogEntry[]): Record<string, unknown> {
+  const byTool: Record<string, number> = {};
+  for (const c of calls) byTool[c.tool] = (byTool[c.tool] ?? 0) + 1;
+  const failed = (decision: CallLogEntry['decision']): unknown[] =>
+    clipList(
+      calls.filter((c) => c.decision === decision).map(({ id, tool, summary, reason }) => ({ id, tool, summary, ...(reason === undefined ? {} : { reason }) })),
+      FAILED_CALLS_SHOWN,
+    );
+  const denied = failed('denied');
+  const errors = failed('error');
+  return { total: calls.length, byTool, ...(denied.length > 0 ? { denied } : {}), ...(errors.length > 0 ? { errors } : {}) };
+}
+
 /**
- * Formats a `RunResult` as an MCP tool response: compact JSON text, `isError`
- * when the run failed. Results above the cap are written whole to an
- * overflow file (mode 0600) and replaced by a structurally truncated preview
- * carrying `overflowPath`.
+ * The default view of a `RunResult`: what the model needs to go on, without
+ * the parts that grow with the number of calls. The call log becomes counts
+ * plus the denied and failed calls, a large diff is cut to its first lines
+ * (`diffClipped`), a long list of changed files is cut, empty fields are left out.
+ */
+export function compactRunResult(result: RunResult): { readonly view: Record<string, unknown>; readonly diffClipped: boolean } {
+  const { logs, calls, changedFiles, diff, warnings, ...rest } = result;
+  const diffClipped = diff.length > DIFF_INLINE_CHARS;
+  let shownDiff = diff;
+  if (diffClipped) {
+    const head = diff.slice(0, DIFF_SAMPLE_CHARS);
+    const lineEnd = head.lastIndexOf('\n');
+    shownDiff = `${lineEnd > 0 ? head.slice(0, lineEnd + 1) : head}…[${diff.length - (lineEnd > 0 ? lineEnd + 1 : head.length)} more chars; overflowPath has the whole result]`;
+  }
+  const view = {
+    ...rest,
+    ...(logs.length > 0 ? { logs } : {}),
+    calls: summarizeCalls(calls),
+    ...(changedFiles.length > 0 ? { changedFiles: clipList(changedFiles, CHANGED_FILES_SHOWN) } : {}),
+    ...(shownDiff !== '' ? { diff: shownDiff } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+  return { view, diffClipped };
+}
+
+/**
+ * Formats a `RunResult` as an MCP tool response: JSON text, `isError` when
+ * the run failed. The text is the compact view (`compactRunResult`) unless
+ * `verbose`. When the view cut the diff, or the text is above the cap, the
+ * whole result is written to an overflow file (mode 0600) and the response
+ * carries `overflowPath`; above the cap the text is a structurally truncated
+ * preview.
  */
 export async function formatRunResult(result: RunResult, opts: FormatOptions): Promise<McpToolResponse> {
   const isError = !result.ok;
   const cap = isError ? (opts.errorCap ?? ERROR_CAP_CHARS) : (opts.successCap ?? SUCCESS_CAP_CHARS);
-  const full = safeStringify(result);
-  if (full.length <= cap) return { content: [{ type: 'text', text: full }], isError };
+  const compact = opts.verbose === true ? undefined : compactRunResult(result);
+  const shown: unknown = compact ? compact.view : result;
+  const text = safeStringify(shown);
+  const fits = text.length <= cap;
+  if (fits && compact?.diffClipped !== true) return { content: [{ type: 'text', text }], isError };
 
+  const full = safeStringify(result);
   let extra: Record<string, unknown>;
   try {
     const overflowPath = await writeOverflow(opts.stateDir, full);
-    extra = { overflowPath, note: `Result was ${full.length} chars; the full JSON is in the file at overflowPath (open it with the host's file reading tool).` };
+    extra = fits
+      ? { overflowPath }
+      : { overflowPath, note: `Result was ${full.length} chars; the full JSON is in the file at overflowPath (open it with the host's file reading tool).` };
   } catch (err) {
-    extra = { note: `Result was ${full.length} chars and could not be saved: ${errorMessage(err)}` };
+    extra = { note: `${fits ? 'The diff is cut' : `Result was ${full.length} chars`} and the whole result could not be saved: ${errorMessage(err)}` };
   }
-  return { content: [{ type: 'text', text: truncateStructurally(result, cap, extra) }], isError };
+  const noted = fits ? safeStringify({ ...compact?.view, ...extra }) : undefined;
+  if (noted !== undefined && noted.length <= cap) return { content: [{ type: 'text', text: noted }], isError };
+  return { content: [{ type: 'text', text: truncateStructurally(shown, cap, extra) }], isError };
 }

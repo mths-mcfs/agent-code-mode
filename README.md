@@ -74,7 +74,7 @@ return { files: hits.matches.length, exitCode: test.exitCode };
 | `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{matches: [{file, line, text}], truncated, filtered}` |
 | `glob({pattern, path?, maxResults?})` | `{files, truncated, filtered}` |
 
-`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `run` takes `{code, transaction?, timeoutMs?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The result holds the return value, logs, a call log, the changed files and a combined diff.
+`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `read` returns the exact text of the lines, final newline included, and paths in results are relative to the working directory when inside it. `run` takes `{code, transaction?, timeoutMs?, verbose?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The result holds the return value, logs, the number of calls by tool with every denied or failed call, the changed files and a combined diff; a diff above 1,500 characters is cut and the whole result saved to a file. `verbose: true` returns the log of every call and the whole diff.
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` says which rung matched.
 
@@ -110,7 +110,7 @@ Output is capped below the hosts' MCP limits (about 30,000 characters, less for 
 
 ## Compared with the built-in code modes
 
-- **Claude Code's official Code Mode** applies the same per-call rules and hooks, but only in interactive sessions. agent-code-mode also works in `claude -p`, the Agent SDK and Codex, and every call shows up in a call log you get back.
+- **Claude Code's official Code Mode** applies the same per-call rules and hooks, but only in interactive sessions. agent-code-mode also works in `claude -p`, the Agent SDK and Codex, and every denied or failed call shows up in the result you get back (every call with `verbose: true`).
 - **Codex's own code mode.** Codex 0.169 models already run in Codex's code mode by default (its `exec` tool calls nested tools). agent-code-mode gives Codex the same binding surface as Claude, with transactions, the call log and your hooks applied to file reads and edits made inside the script.
 
 ## Benchmark

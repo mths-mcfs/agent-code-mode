@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
+import { runInnerCalls } from './run-result.ts';
 
 /** Native file and shell tools of Claude Code. Using one of them in the agent-code-mode arm is a fallback. */
 export const CLAUDE_NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
@@ -99,11 +100,6 @@ export function claudeIsolationIssues(ctx: { agents: readonly string[]; plugins:
   return reasons;
 }
 
-/** The agent-code-mode `run` result as the server returns it (only the fields the bench reads). */
-const RunResultText = z.object({
-  calls: z.array(z.object({ tool: z.string(), decision: z.string(), summary: z.string().optional(), reason: z.string().optional() }).passthrough()),
-}).passthrough();
-
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
@@ -190,14 +186,12 @@ export function parseClaudeTranscript(text: string): ParsedRun {
       // A result can be replayed in the stream (e.g. on resume); count each tool_use_id once.
       if (tr.success && runToolUses.has(tr.data.tool_use_id) && !seenToolResult.has(tr.data.tool_use_id)) {
         seenToolResult.add(tr.data.tool_use_id);
-        const parsed = RunResultText.safeParse(parseJson(textOf(tr.data.content)));
-        if (parsed.success) {
+        const innerCalls = runInnerCalls(textOf(tr.data.content));
+        if (innerCalls !== null) {
           innerSeen = true;
-          for (const call of parsed.data.calls) {
-            innerTotal += 1;
-            inner[call.tool] = (inner[call.tool] ?? 0) + 1;
-            if (call.decision === 'denied') denials.push(`${call.tool} ${call.summary ?? ''}: ${call.reason ?? 'denied'}`.slice(0, 500));
-          }
+          innerTotal += innerCalls.total;
+          for (const [tool, n] of Object.entries(innerCalls.byTool)) inner[tool] = (inner[tool] ?? 0) + n;
+          denials.push(...innerCalls.denials);
           evidence['innerCalls']?.push(i + 1);
         }
       }

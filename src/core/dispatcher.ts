@@ -434,7 +434,7 @@ export class Dispatcher<P = unknown> {
     }
 
     this.#calls[slot] = { id: prepared.id, tool: prepared.tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
-    return { ok: true, value: result };
+    return { ok: true, value: scriptResult(result, this.#opts.ctx.cwd) };
   }
 
   #toolFailure(err: unknown): Failure {
@@ -564,6 +564,19 @@ function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall
 export function displayPath(absPath: string, cwd: string): string {
   const rel = path.relative(cwd, absPath);
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
+}
+
+/**
+ * The result as the script sees it: paths inside `cwd` are relative to it
+ * (they resolve back to the same file when passed to a binding), so a result
+ * the script returns does not repeat the workspace path in every entry.
+ * Hooks and the diff keep the tool runtime's absolute paths.
+ */
+export function scriptResult(result: ToolResult, cwd: string): ToolResult {
+  if ('matches' in result) return { ...result, matches: result.matches.map((m) => ({ ...m, file: displayPath(m.file, cwd) })) };
+  if ('files' in result) return { ...result, files: result.files.map((f) => displayPath(f, cwd)) };
+  if ('path' in result) return { ...result, path: displayPath(result.path, cwd) };
+  return result;
 }
 
 /** Short description of a call for the call log. */
