@@ -195,7 +195,9 @@ describe('malformed permission rules fail the policy load', () => {
     ['deny', 'Bash[rm]'],
     ['deny', 'Read[./.env]'],
     ['deny', 'Bash(rm'],
-    ['deny', 'B*'],
+    ['deny', 'B*(x)'],
+    ['ask', 'mcp__srv__*(x)'],
+    ['allow', 'Ba-sh*'],
     ['ask', 'Bash rm'],
     ['allow', 'Read[x]'],
     ['deny', 'mcp__srv__tool(arg)'],
@@ -226,4 +228,47 @@ describe('malformed permission rules fail the policy load', () => {
       await expect(setup({ permissions: { deny: [raw] } }, 'default')).resolves.toBeDefined();
     },
   );
+});
+
+describe('tool-name globs (documented in "Tool name wildcards")', () => {
+  const decide = async (list: 'deny' | 'ask' | 'allow', rule: string, mode: string): Promise<{ bash: string; read: string; runApproved: boolean }> => {
+    const s = await setup({ permissions: { [list]: [rule] } }, mode);
+    return { bash: check(s, bash('ls', s.project)), read: check(s, read(path.join(s.project, 'a'))), runApproved: s.policy.payload.runApprovedByAllowRule };
+  };
+
+  it.each([
+    // deny: the pattern must match the full tool name.
+    ['deny', '*', { bash: 'deny', read: 'deny' }],
+    ['deny', 'B*', { bash: 'deny', read: 'allow' }],
+    ['deny', 'R*d', { bash: 'allow', read: 'deny' }],
+    ['deny', 'mcp__*', { bash: 'allow', read: 'allow' }],
+    ['deny', 'mcp__agent-code-mode__*', { bash: 'allow', read: 'allow' }],
+    // ask: same matching, the result is ask.
+    ['ask', '*', { bash: 'ask', read: 'ask' }],
+    ['ask', 'B*', { bash: 'ask', read: 'allow' }],
+    ['ask', 'mcp__*', { bash: 'allow', read: 'allow' }],
+    ['ask', 'mcp__srv__*', { bash: 'allow', read: 'allow' }],
+  ])('%s %j in bypassPermissions', async (list, rule, expected) => {
+    expect(await decide(list as 'deny' | 'ask', rule, 'bypassPermissions')).toMatchObject(expected);
+  });
+
+  it.each([
+    // Unanchored allow globs are skipped: they approve nothing.
+    ['*', { bash: 'ask', runApproved: false }],
+    ['B*', { bash: 'ask', runApproved: false }],
+    ['mcp__*', { bash: 'ask', runApproved: false }],
+    ['mcp__*__run', { bash: 'ask', runApproved: false }],
+    // Anchored after a literal mcp__<server>__ prefix: they match that server's tools.
+    ['mcp__agent-code-mode__*', { bash: 'ask', runApproved: true }],
+    ['mcp__agent-code-mode__r*', { bash: 'ask', runApproved: true }],
+    ['mcp__agent-code-mode__x*', { bash: 'ask', runApproved: false }],
+    ['mcp__other__*', { bash: 'ask', runApproved: false }],
+  ])('allow %j', async (rule, expected) => {
+    expect(await decide('allow', rule, 'default')).toMatchObject(expected);
+  });
+
+  it('allow * does not approve run, so in auto mode the script counts as classifier-reviewed', async () => {
+    expect((await decide('allow', '*', 'auto')).bash).toBe('allow');
+    expect((await decide('allow', 'mcp__agent-code-mode__*', 'auto')).bash).toBe('ask');
+  });
 });

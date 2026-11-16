@@ -522,7 +522,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         preHooks: pre,
         postHooks: post,
         hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
-        runApprovedByAllowRule: rules.allow.some((r) => r.matcher.type !== 'never' && (r.tool === serverRule || r.tool === '*' || matchesToolName(r.tool, runTool))),
+        runApprovedByAllowRule: rules.allow.some((r) => r.matcher.type !== 'never' && (r.tool === serverRule || matchesToolName(r.tool, runTool))),
         isReadDenied: (absPath: string): boolean =>
           rules.deny.some((r) => governs(r, 'Read') && (r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)))),
       },

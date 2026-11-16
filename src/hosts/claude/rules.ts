@@ -95,21 +95,29 @@ export function splitRule(raw: string): { tool: string; spec: string | undefined
 }
 
 const TOOL_NAME = /^[A-Za-z0-9_]+$/;
-/** `mcp__server`, `mcp__server__tool`, `mcp__server__*` (server and tool names may contain `-`). */
-const MCP_RULE = /^mcp__[A-Za-z0-9_-]+(?:__(?:[A-Za-z0-9_-]+|\*))?$/;
+/** `mcp__server` or `mcp__server__tool` (server and tool names may contain `-`). */
+const MCP_RULE = /^mcp__[A-Za-z0-9_-]+(?:__[A-Za-z0-9_-]+)?$/;
+/** A tool-name glob: `*` anywhere, matched against the full tool name. */
+const TOOL_GLOB = /^[A-Za-z0-9_*]+$/;
+const MCP_GLOB = /^mcp__[A-Za-z0-9_*-]*$/;
+/** An allow glob anchored after a literal, glob-free `mcp__<server>__` prefix (`mcp__github__get_*`). */
+const ANCHORED_MCP_GLOB = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_*-]*$/;
 
 /**
- * Whether a rule string has a form this adapter understands: `Tool`,
- * `Tool(specifier)` with a `[A-Za-z0-9_]+` tool name, or one of the MCP forms
- * without a specifier. Anything else would be silently ignored, so callers
- * refuse it instead.
+ * Whether a rule string has a form the Claude Code docs define
+ * (https://code.claude.com/docs/en/permissions, "Permission rule syntax" and
+ * "Tool name wildcards"): `Tool`, `Tool(specifier)` with a `[A-Za-z0-9_]+`
+ * tool name, the MCP forms without a specifier, or a tool-name glob without a
+ * specifier. Anything else would be silently ignored, so callers refuse it.
  */
 export function isValidRuleSyntax(raw: string): boolean {
   const split = splitRule(raw);
   if (!split) return false;
+  const { tool, spec } = split;
+  if (tool.includes('*')) return spec === undefined && (tool.startsWith('mcp__') ? MCP_GLOB.test(tool) : TOOL_GLOB.test(tool));
   // MCP rules take no specifier (Claude Code skips `mcp__…(…)` in settings files).
-  if (split.tool.startsWith('mcp__')) return split.spec === undefined && MCP_RULE.test(split.tool);
-  return TOOL_NAME.test(split.tool);
+  if (tool.startsWith('mcp__')) return spec === undefined && MCP_RULE.test(tool);
+  return TOOL_NAME.test(tool);
 }
 
 /** Compiles a gitignore-style Read/Edit specifier into absolute patterns. */
@@ -174,7 +182,12 @@ export function parseRule(raw: string, kind: RuleKind, source: RuleSourceName, a
   if (!split) return undefined;
   const { tool, spec } = split;
   const base = { raw, kind, source, tool };
-  if (spec === undefined) return { ...base, matcher: { type: 'all' } };
+  if (spec === undefined) {
+    // Allow rules take tool-name globs only after a literal `mcp__<server>__`;
+    // an unanchored allow glob (`*`, `B*`, `mcp__*`) is documented as skipped.
+    if (kind === 'allow' && tool.includes('*') && !ANCHORED_MCP_GLOB.test(tool)) return { ...base, matcher: { type: 'never' } };
+    return { ...base, matcher: { type: 'all' } };
+  }
   // Tool-name globs are only meaningful without a specifier, and MCP rules never concern our calls.
   if (tool.includes('*') || tool.startsWith('mcp__')) return { ...base, matcher: { type: 'never' } };
   const param = /^\s*([A-Za-z_-][A-Za-z0-9_-]*)\s*:(.*)$/s.exec(spec);
