@@ -55,7 +55,7 @@ describe('settings sources', () => {
     expect(await decide(await layout({ 'home/.claude/settings.json': { permissions: { deny: 'Bash(rm:*)' } } }), 'ls')).toMatch(/^error: .*permissions\.deny/);
     expect(await decide(await layout({ 'project/.claude/settings.local.json': { hooks: { PreToolUse: [{ hooks: 'x' }] } } }), 'ls')).toMatch(/^error/);
     expect(await decide(await layout({ 'managed/managed-settings.json': '[' }), 'ls')).toMatch(/^error/);
-    expect(await decide(await layout({ 'home/.claude/settings.json': { permissions: { deny: ['Bash(rm'] } } }), 'ls')).toMatch(/^error: .*cannot be parsed/);
+    expect(await decide(await layout({ 'home/.claude/settings.json': { permissions: { deny: ['Bash(rm'] } } }), 'ls')).toMatch(/^error: .*not a valid/);
   });
 
   it('combines deny rules from every source', async () => {
