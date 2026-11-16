@@ -182,22 +182,74 @@ function identityOf(st: BigIntStats): string {
   return `${st.dev}:${st.ino}:${type}`;
 }
 
-/** Environment variables that make bash run code at startup; dropped so expanding has no side effect. */
-const STARTUP_CODE_VARS = ['BASH_ENV', 'ENV'];
+/** Locale variables: they set the collation, so the order of the matches. */
+const GLOB_LOCALE_VARS = ['LANG', 'LC_ALL', 'LC_COLLATE', 'LC_CTYPE'] as const;
+
+/** `BASHOPTS` options that change what a glob matches; set again, explicitly, in the expanding bash. */
+const GLOB_SHOPTS = new Set(['dotglob', 'extglob', 'nocaseglob', 'globstar', 'globasciiranges', 'globskipdots', 'nullglob', 'failglob', 'nocasematch']);
+
+/** `BASHOPTS` options (bash 5.3) that leave pathname expansion as it is. */
+const INERT_SHOPTS = new Set([
+  'array_expand_once', 'assoc_expand_once', 'autocd', 'bash_source_fullpath', 'cdable_vars', 'cdspell', 'checkhash', 'checkjobs',
+  'checkwinsize', 'cmdhist', 'complete_fullquote', 'direxpand', 'dirspell', 'execfail', 'expand_aliases', 'extdebug', 'extquote',
+  'force_fignore', 'gnu_errfmt', 'histappend', 'histreedit', 'histverify', 'hostcomplete', 'huponexit', 'inherit_errexit',
+  'interactive_comments', 'lastpipe', 'lithist', 'localvar_inherit', 'localvar_unset', 'login_shell', 'mailwarn',
+  'no_empty_cmd_completion', 'noexpand_translation', 'patsub_replacement', 'progcomp', 'progcomp_alias', 'promptvars',
+  'restricted_shell', 'shift_verbose', 'sourcepath', 'varredir_close', 'xpg_echo',
+]);
+
+/** Variables that change globbing in a way the expanding bash does not reproduce. */
+const DIVERGING_VARS = ['GLOBSORT', 'BASH_COMPAT', 'POSIXLY_CORRECT', 'LOCPATH'] as const;
+
+/** `SHELLOPTS` options that change globbing: `noglob` turns it off, `posix` may change it. */
+const DIVERGING_SHELLOPTS = new Set(['noglob', 'posix']);
+
+/** The environment and `shopt -s` options that expand a glob as the command's bash would. */
+interface GlobEnvironment {
+  readonly env: NodeJS.ProcessEnv;
+  readonly shopts: readonly string[];
+}
 
 /**
- * Matches of one glob word, from the bash that runs the command, in `cwd`,
- * with the same environment (locale, `GLOBIGNORE`, `BASHOPTS`): exactly the
- * words, in the order, that bash would pass the command. The word holds only
- * literal text, quotes and glob characters (the planner refused anything
- * else), so expanding it runs no code. Empty when nothing matches.
+ * Builds the expanding bash's environment from nothing: the locale,
+ * `GLOBIGNORE` and the glob options of `BASHOPTS`, never anything bash reads
+ * code from (`BASH_FUNC_*`, `SHELLOPTS`, `PS4`, `BASH_ENV`, ...). Undefined
+ * when `from` holds something that changes globbing which this environment
+ * would not reproduce: the expansion could then differ from what the command
+ * gets, so it is not done.
  */
-function bashGlob(raw: string, cwd: string, shell: string): Promise<string[]> {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of STARTUP_CODE_VARS) delete env[name];
-  const script = `shopt -u failglob 2>/dev/null; shopt -s nullglob; for f in ${raw}; do printf '%s\\0' "$f"; done`;
+export function globEnvironment(from: NodeJS.ProcessEnv): GlobEnvironment | undefined {
+  if (DIVERGING_VARS.some((name) => from[name] !== undefined)) return undefined;
+  if ((from['SHELLOPTS'] ?? '').split(':').some((o) => DIVERGING_SHELLOPTS.has(o))) return undefined;
+  const shopts: string[] = [];
+  for (const option of (from['BASHOPTS'] ?? '').split(':')) {
+    if (option === '' || INERT_SHOPTS.has(option)) continue;
+    if (!GLOB_SHOPTS.has(option)) return undefined;
+    shopts.push(option);
+  }
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of [...GLOB_LOCALE_VARS, 'GLOBIGNORE']) {
+    const value = from[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return { env, shopts };
+}
+
+/**
+ * Matches of one glob word in `cwd`, as the bash that runs the command gives
+ * them: same locale, `GLOBIGNORE` and glob options, so the same words in the
+ * same order. Undefined when that cannot be guaranteed (`globEnvironment`).
+ * The word holds only literal text, quotes and glob characters (the planner
+ * refused anything else), and the environment is built from nothing, so
+ * expanding it runs no code. Empty when nothing matches.
+ */
+function bashGlob(raw: string, cwd: string, shell: string): Promise<string[] | undefined> {
+  const glob = globEnvironment(process.env);
+  if (glob === undefined) return Promise.resolve(undefined);
+  const enable = glob.shopts.map((o) => `builtin shopt -s ${o} 2>/dev/null; `).join('');
+  const script = `${enable}builtin shopt -u failglob 2>/dev/null; builtin shopt -s nullglob; for f in ${raw}; do builtin printf '%s\\0' "$f"; done`;
   return new Promise((resolve, reject) => {
-    execFile(shell, ['--noprofile', '--norc', '-c', script], { cwd, env, encoding: 'buffer', timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
+    execFile(shell, ['--noprofile', '--norc', '-c', script], { cwd, env: glob.env, encoding: 'buffer', timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
       if (err) {
         reject(new ToolError('tool-error', `bash could not expand ${raw}: ${err.message}`));
         return;
@@ -218,7 +270,9 @@ export interface ExpandedCommand {
 /**
  * Expands `plan` against `cwd` (the real directory the command runs in).
  * Undefined when a glob matches nothing (bash would pass it as written, so
- * the command stays as it is). Throws `ToolError` when a match is outside the
+ * the command stays as it is) or when the server's environment changes
+ * globbing in a way the expansion would not reproduce (`globEnvironment`;
+ * the command stays as written and the rules decide it). Throws `ToolError` when a match is outside the
  * workspace (symbolic links resolved), is not a regular file (or a directory,
  * where the reader lists directories), names a directory the host's Read rules
  * refuse to list, or there are too many matches.
@@ -238,7 +292,7 @@ export async function expandBashGlobs(
   const entries: BashExpandedEntry[] = [];
   for (const glob of plan.globs) {
     const matches = await bashGlob(glob.raw, cwd, shell);
-    if (matches.length === 0) return undefined;
+    if (matches === undefined || matches.length === 0) return undefined;
     if (entries.length + matches.length > MAX_EXPANDED_ENTRIES) {
       throw new ToolError('invalid-args', `the globs of this command match more than ${MAX_EXPANDED_ENTRIES} entries; narrow them or use glob()`);
     }
