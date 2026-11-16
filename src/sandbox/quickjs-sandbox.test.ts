@@ -495,12 +495,12 @@ describe('QuickJsSandbox: reply buffering', () => {
     expect(f.kind).toBe('oom');
     expect(f.error.name).toBe('ReplyBufferFull');
     expect(f.error.message).toContain(`not read yet exceeded ${cap} bytes`);
-    // How many replies fit before the cap depends on how much the OS pipe absorbs (about 64 KiB on Linux,
-    // less on macOS and Windows), so only the bound that holds everywhere is checked: every reply line is
-    // a little over 1 MiB, so at least floor(cap / (1 MiB + 1 KiB)) replies were sent, and the script was
-    // stopped long before its 200 calls were all answered.
+    // `calls` counts the requests the script sent (all 200 may arrive before the overflow ends the run),
+    // and how many replies fit before the cap depends on how much the OS pipe absorbs (about 64 KiB on
+    // Linux, less on macOS and Windows). Only the bound that holds everywhere is checked: a reply exists
+    // only for a received call, and the cap overflows only after at least floor(cap / (1 MiB + 1 KiB))
+    // replies of a little over 1 MiB each.
     expect(calls.length).toBeGreaterThanOrEqual(Math.floor(cap / (1024 * 1024 + 1024)));
-    expect(calls.length).toBeLessThan(200);
     const after = process.memoryUsage();
     expect(after.external + after.arrayBuffers - (before.external + before.arrayBuffers)).toBeLessThan(64 * 1024 * 1024);
   });
