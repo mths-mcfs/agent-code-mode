@@ -65,12 +65,16 @@ const ResultEvent = z.object({
 
 const ContentBlock = z.object({ type: z.string() }).passthrough();
 const ToolUse = z.object({ type: z.literal('tool_use'), id: z.string(), name: z.string() }).passthrough();
-const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.string(), content: z.unknown() }).passthrough();
+const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.string(), content: z.unknown(), is_error: z.boolean().optional() }).passthrough();
+/** Error text of a blocked call (hook deny, permission rule), as opposed to an ordinary tool failure. */
+export const DENIAL_TEXT = /denied|blocked|hook|protected|not allowed|permission/i;
 const MessageEvent = z.object({ type: z.enum(['assistant', 'user']), message: z.object({ content: z.union([z.string(), z.array(ContentBlock)]) }).passthrough() }).passthrough();
 const InitEvent = z.object({ type: z.literal('system'), subtype: z.literal('init'), model: z.string(), tools: z.array(z.string()).optional() }).passthrough();
 
 /** The agent-code-mode `run` result as the server returns it (only the fields the bench reads). */
-const RunResultText = z.object({ calls: z.array(z.object({ tool: z.string(), decision: z.string() }).passthrough()) }).passthrough();
+const RunResultText = z.object({
+  calls: z.array(z.object({ tool: z.string(), decision: z.string(), summary: z.string().optional(), reason: z.string().optional() }).passthrough()),
+}).passthrough();
 
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -105,6 +109,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   const seenToolUse = new Set<string>();
   const runToolUses = new Set<string>();
   const seenToolResult = new Set<string>();
+  const denials: string[] = [];
   const calls: ToolCalls = { native: 0, run: 0, codeMode: 0, other: 0, byName: {} };
   const inner: Record<string, number> = {};
   let innerTotal = 0;
@@ -143,6 +148,11 @@ export function parseClaudeTranscript(text: string): ParsedRun {
         evidence['toolUse']?.push(i + 1);
       }
       const tr = ToolResult.safeParse(block);
+      if (tr.success && tr.data.is_error === true && !seenToolResult.has(`err:${tr.data.tool_use_id}`)) {
+        seenToolResult.add(`err:${tr.data.tool_use_id}`);
+        const text = textOf(tr.data.content);
+        if (DENIAL_TEXT.test(text)) denials.push(text.slice(0, 500));
+      }
       // A result can be replayed in the stream (e.g. on resume); count each tool_use_id once.
       if (tr.success && runToolUses.has(tr.data.tool_use_id) && !seenToolResult.has(tr.data.tool_use_id)) {
         seenToolResult.add(tr.data.tool_use_id);
@@ -152,6 +162,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
           for (const call of parsed.data.calls) {
             innerTotal += 1;
             inner[call.tool] = (inner[call.tool] ?? 0) + 1;
+            if (call.decision === 'denied') denials.push(`${call.tool} ${call.summary ?? ''}: ${call.reason ?? 'denied'}`.slice(0, 500));
           }
           evidence['innerCalls']?.push(i + 1);
         }
@@ -177,6 +188,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     toolCalls: calls,
     innerCalls: innerSeen ? { total: innerTotal, byTool: inner } : null,
     availableTools,
+    denials,
     hostError: r.is_error ? `${r.subtype}` : null,
     evidence,
   };

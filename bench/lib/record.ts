@@ -50,6 +50,11 @@ export const ParsedRunSchema = z.object({
   innerCalls: z.object({ total: z.number().int().nonnegative(), byTool: Counts }).nullable(),
   /** Tools the model could call: Claude `init` event; Codex `codex debug prompt-input` (set by the runner). */
   availableTools: z.array(z.string()).nullable(),
+  /**
+   * Denied tool calls seen in the host's own log (hook/permission blocks) and in agent-code-mode call
+   * logs, as short texts. Null when the log cannot show denials (Codex without its rollout).
+   */
+  denials: z.array(z.string()).nullable().default(null),
   /** Host-reported error, e.g. a Claude result with `is_error`. */
   hostError: z.string().nullable(),
   /** Where the numbers came from: transcript line numbers (1-based) of the source events. */
