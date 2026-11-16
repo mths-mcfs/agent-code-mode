@@ -3,7 +3,6 @@ import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type {
   BashContainment,
-  MatchStrategy,
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
@@ -16,7 +15,7 @@ import type {
 } from '../core/types.js';
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
-import { applySearchReplace, type MatchHow } from './edit-match.js';
+import { applySearchReplace } from './edit-match.js';
 import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
@@ -30,23 +29,14 @@ export const READ_CAP_BYTES = 256 * 1024;
 /** Largest file `read`, `write` (existing content) and `edit` load. */
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 
-/**
- * How each Turnpack rung is reported in the frozen `MatchStrategy` type,
- * which has fewer names than the ladder has rungs.
- */
-const STRATEGY: Record<MatchHow, MatchStrategy> = {
-  exact: 'exact',
-  'line-endings': 'whitespace-normalized',
-  'line-numbers': 'line-trimmed',
-  'trailing-whitespace': 'line-trimmed',
-  indentation: 'indentation-flexible',
-  punctuation: 'whitespace-normalized',
-};
-
 export interface NodeToolRuntimeOptions {
   /** Server state directory; transaction journals live under `<stateDir>/journal/`. */
   readonly stateDir: string;
-  /** Extra absolute directories the tools may touch besides the session cwd and MCP roots. */
+  /**
+   * Extra absolute directories the tools may touch besides the session cwd,
+   * MCP roots and the policy's `additionalRoots` (tests; the server takes
+   * them from the policy).
+   */
   readonly additionalRoots?: readonly string[];
   /** Bytes kept of each of bash stdout and stderr. */
   readonly bashOutputCapBytes?: number;
@@ -64,6 +54,8 @@ interface CallMeta {
   readonly denyWrite: readonly string[];
   /** For write and edit: identity of the file and its directories at prepare. */
   readonly identity?: PathIdentity;
+  /** For grep and glob: the policy's Read filter. */
+  readonly readFilter?: (realAbsPath: string) => boolean;
 }
 
 /** Most prepared calls whose metadata is kept while they wait for commit. */
@@ -152,13 +144,15 @@ export class NodeToolRuntime implements ToolRuntime {
   async #prepareInJail(call: ToolCall, ctx: SessionContext, policy: PolicySnapshot): Promise<PreparedCall> {
     const jail = await Jail.create({
       cwd: ctx.cwd,
-      roots: [...ctx.roots, ...(this.#opts.additionalRoots ?? [])],
+      roots: [...ctx.roots, ...(policy.additionalRoots ?? []), ...(this.#opts.additionalRoots ?? [])],
       protectedPaths: policy.protectedPaths,
     });
+    const readFilter = policy.readFilter;
     const meta = (abs: string, denyWrite: readonly string[] = []): CallMeta => ({
       root: jail.rootOf(abs) ?? jail.cwd,
       display: jail.displayPath(abs),
       denyWrite,
+      ...(readFilter && (call.tool === 'grep' || call.tool === 'glob') ? { readFilter } : {}),
     });
     return this.#prepare(call, jail, policy, meta);
   }
@@ -259,7 +253,7 @@ export class NodeToolRuntime implements ToolRuntime {
             afterContent: outcome.text,
             diff: unifiedDiff(m.display, text, outcome.text),
             matchedOldString: outcome.matched,
-            matchStrategy: STRATEGY[outcome.how],
+            matchStrategy: outcome.how,
             replacements: outcome.count,
           },
         };
@@ -320,6 +314,13 @@ export class NodeToolRuntime implements ToolRuntime {
     return this.#meta.take(prepared) ?? { root: path.dirname(fallbackPath), display: fallbackPath, denyWrite: [] };
   }
 
+  /** grep and glob must have been prepared here: the Read filter travels in their metadata, so a missing one fails closed. */
+  #searchMetaOf(prepared: PreparedCallOf<'grep'> | PreparedCallOf<'glob'>): CallMeta {
+    const m = this.#meta.take(prepared);
+    if (m === undefined) throw new ToolError('tool-error', `this ${prepared.tool} was not prepared by this tool runtime (or was already committed); prepare it again`);
+    return m;
+  }
+
   async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
     try {
       return await this.#commit(prepared, signal, tx);
@@ -345,11 +346,13 @@ export class NodeToolRuntime implements ToolRuntime {
         return this.#commitWrite(prepared, signal, tx);
       case 'grep': {
         await assertDirUnchanged(prepared.effect.absRoot);
-        return runGrep(prepared.effect, this.#metaOf(prepared, prepared.effect.absRoot).root, signal, this.#opts.grepFileBudgetMs);
+        const m = this.#searchMetaOf(prepared);
+        return runGrep(prepared.effect, m.root, signal, this.#opts.grepFileBudgetMs, m.readFilter);
       }
       case 'glob': {
         await assertDirUnchanged(prepared.effect.absRoot);
-        return runGlob(prepared.effect, this.#metaOf(prepared, prepared.effect.absRoot).root, signal);
+        const m = this.#searchMetaOf(prepared);
+        return runGlob(prepared.effect, m.root, signal, m.readFilter);
       }
     }
   }

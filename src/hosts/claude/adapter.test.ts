@@ -94,7 +94,7 @@ function edit(p: string, matched: string, newString: string): PreparedCall {
     id: 'c1',
     tool: 'edit',
     args: { path: p, oldString: matched.trim(), newString },
-    effect: { absPath: p, beforeHash: 'h', afterContent: newString, diff: '', matchedOldString: matched, matchStrategy: 'line-trimmed', replacements: 1 },
+    effect: { absPath: p, beforeHash: 'h', afterContent: newString, diff: '', matchedOldString: matched, matchStrategy: 'trailing-whitespace', replacements: 1 },
   };
 }
 function grep(root: string): PreparedCall {

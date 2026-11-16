@@ -20,6 +20,7 @@
  * names, and the patch-hunk helpers that this project does not use were removed.
  */
 
+import type { MatchStrategy } from "../core/types.js";
 /**
  * Search/replace matching for `edit`.
  *
@@ -42,13 +43,8 @@
  * numbers and the first differing line, so the next attempt can be written without re-reading.
  */
 
-export type MatchHow =
-  | "exact"
-  | "line-endings"
-  | "line-numbers"
-  | "trailing-whitespace"
-  | "indentation"
-  | "punctuation";
+/** The rung that matched; the contract's `MatchStrategy` names the same six rungs. */
+export type MatchHow = MatchStrategy;
 
 export interface EditApplied {
   ok: true;
