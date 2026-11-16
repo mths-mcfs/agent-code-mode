@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { HookContextRecord, HookContextStore } from '../core/types.js';
 import { ClaudeContextProvider } from '../hosts/claude/context.js';
@@ -42,7 +43,7 @@ describe('context providers', () => {
       roots: [],
       serverCwd: '/srv',
     });
-    expect(ctx).toMatchObject({ host: 'codex', sessionId: 's', turnId: 't', sandboxMode: 'workspace-write', cwd: '/srv' });
+    expect(ctx).toMatchObject({ host: 'codex', sessionId: 's', turnId: 't', sandboxMode: 'workspace-write', cwd: path.resolve('/srv') });
     expect(ctx.model).toBeUndefined();
   });
 

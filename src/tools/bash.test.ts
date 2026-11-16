@@ -140,7 +140,7 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
     const r = await bash(`touch y && touch ${JSON.stringify(path.join(base, 'z'))}`, {
       containment: { mode: 'sandbox', readOnly: false, writableRoots: [ws], network: false },
     });
-    expect(existsSync(path.join(ws, 'y'))).toBe(true);
+    expect(existsSync(path.join(ws, 'y')), `sandboxed bash failed: exit ${r.exitCode} stderr ${r.stderr}`).toBe(true);
     expect(r.exitCode).not.toBe(0);
     expect(existsSync(path.join(base, 'z'))).toBe(false);
   });
@@ -154,7 +154,7 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   it('kills the sandboxed command on timeout', async () => {
     const started = Date.now();
     const r = await bash('sleep 100', { containment: readOnly, timeoutMs: 1000 });
-    expect(r.timedOut).toBe(true);
+    expect(r.timedOut, `sandboxed bash failed: exit ${r.exitCode} stderr ${r.stderr}`).toBe(true);
     expect(Date.now() - started).toBeLessThan(8000);
   });
 });
