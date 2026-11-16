@@ -149,20 +149,21 @@ describe('PolicySnapshot.readFilter and additionalRoots', () => {
 });
 
 describe('names of files outside the session cwd', () => {
-  it('diff headers and changedFiles name a file in an additional root as <root basename>/<path>', async () => {
+  it('diff headers and changedFiles use the path relative to the cwd, so a cwd folder and a root of the same name stay distinct', async () => {
     const ws = path.join(base, 'ws');
     const extra = path.join(base, 'extra');
-    mkdirSync(ws);
-    mkdirSync(path.join(extra, 'sub'), { recursive: true });
-    writeFileSync(path.join(extra, 'sub', 'x'), 'old\n');
+    mkdirSync(path.join(ws, 'extra'), { recursive: true });
+    mkdirSync(extra);
+    writeFileSync(path.join(ws, 'extra', 'x'), 'in cwd\n');
+    writeFileSync(path.join(extra, 'x'), 'in root\n');
     const policy: PolicySnapshot<null> = { host: 'generic', bashContainment: { mode: 'none' }, protectedPaths: [], additionalRoots: [extra], payload: null };
     const d = dispatcherFor(makeContext(ws), policy);
-    const w = value<{ diff: string }>(await d.dispatch('write', { path: path.join(extra, 'sub', 'x'), content: 'new\n' }));
-    value(await d.dispatch('write', { path: 'f', content: 'x\n' }));
-    expect(w.diff.split('\n').slice(0, 2)).toEqual(['--- a/extra/sub/x', '+++ b/extra/sub/x']);
+    const inRoot = value<{ diff: string }>(await d.dispatch('write', { path: path.join(extra, 'x'), content: 'root new\n' }));
+    const inCwd = value<{ diff: string }>(await d.dispatch('write', { path: 'extra/x', content: 'cwd new\n' }));
+    expect(inRoot.diff.split('\n').slice(0, 2)).toEqual(['--- a/../extra/x', '+++ b/../extra/x']);
+    expect(inCwd.diff.split('\n').slice(0, 2)).toEqual(['--- a/extra/x', '+++ b/extra/x']);
     expect(d.diff).not.toMatch(/^\+\+\+ b\/\//m);
-    expect(d.diff).toMatch(/^\+\+\+ b\/f$/m);
-    expect(d.changedFiles).toEqual(['extra/sub/x', 'f']);
+    expect(d.changedFiles).toEqual(['../extra/x', 'extra/x']);
   });
 });
 

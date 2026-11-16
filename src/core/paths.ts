@@ -69,28 +69,15 @@ export function findMatchingPattern(
   return patterns.find((pattern) => matchesPathPattern(path, pattern, caseInsensitive));
 }
 
-function insideOrEqual(root: string, abs: string): string | undefined {
-  const rel = path.relative(root, abs);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)) ? rel : undefined;
-}
-
 /**
- * How a workspace file is named in diffs and `changedFiles`: relative to the
- * session cwd when inside it; inside another root (client root, additional
- * directory) as `<root basename>/<path in that root>`, choosing the deepest
- * root that holds it; otherwise the absolute path. Always `/`-separated, so a
- * diff header reads `b/src/a.ts` or `b/extra/x`, never `b//abs/path`.
+ * How a workspace file is named in diffs and `changedFiles`: its path
+ * relative to the real session cwd, `/`-separated (`src/a.ts`, or
+ * `../extra/x` for a file in an additional root). Unambiguous, and still a
+ * valid diff path; absolute only when no relative path exists (another
+ * Windows drive).
  */
-export function workspaceDisplayPath(abs: string, cwd: string, roots: readonly string[]): string {
-  const toPosix = (p: string): string => p.split(path.sep).join('/');
-  const inCwd = insideOrEqual(cwd, abs);
-  if (inCwd !== undefined) return inCwd === '' ? '.' : toPosix(inCwd);
-  const holder = [...roots]
-    .filter((r) => path.basename(r) !== '' && insideOrEqual(r, abs) !== undefined)
-    .sort((a, b) => b.length - a.length)[0];
-  if (holder !== undefined) {
-    const rel = insideOrEqual(holder, abs) ?? '';
-    return toPosix(rel === '' ? path.basename(holder) : path.join(path.basename(holder), rel));
-  }
-  return toPosix(abs);
+export function workspaceDisplayPath(abs: string, cwd: string): string {
+  const rel = path.relative(cwd, abs);
+  if (rel === '') return '.';
+  return (path.isAbsolute(rel) ? abs : rel).split(path.sep).join('/');
 }

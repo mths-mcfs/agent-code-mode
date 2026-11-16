@@ -336,6 +336,6 @@ export class Jail {
 
   /** Path for diffs and messages: relative to the first root when inside it, else absolute. */
   displayPath(abs: string): string {
-    return workspaceDisplayPath(abs, this.roots[0] ?? this.cwd, this.roots);
+    return workspaceDisplayPath(abs, this.cwd);
   }
 }
