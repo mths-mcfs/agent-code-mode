@@ -20,7 +20,13 @@ import { killLiveChildren } from './proc.ts';
 export const HOME_MARKER = '.bench-temp-home';
 const live = new Set<string>();
 
-const MarkerSchema = z.object({ pid: z.number().int(), source: z.string().min(1), copiedSha256: z.string().regex(/^[0-9a-f]{64}$/) });
+const MarkerSchema = z.object({
+  pid: z.number().int(),
+  source: z.string().min(1),
+  /** Name of the credentials file inside the home (`auth.json` for Codex, `.credentials.json` for Claude). */
+  file: z.string().min(1).default('auth.json'),
+  copiedSha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
 type Marker = z.infer<typeof MarkerSchema>;
 
 export type SyncOutcome = 'unchanged' | 'written-back' | 'conflict-kept-real' | 'no-auth';
@@ -59,31 +65,35 @@ export function atomicWrite(file: string, data: Buffer): void {
   }
 }
 
-/** Creates a temp home holding a 0600 copy of `<sourceHome>/auth.json` and the marker used by `syncBack`. */
-export function createCodexHome(dir: string, sourceHome: string): void {
+/**
+ * Creates a temp home holding a 0600 copy of `<sourceHome>/<file>` and the marker used by `syncBack`.
+ * Used for Codex (`CODEX_HOME`, `auth.json`) and Claude (`CLAUDE_CONFIG_DIR`, `.credentials.json`).
+ */
+export function createCodexHome(dir: string, sourceHome: string, file = 'auth.json'): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const source = path.resolve(sourceHome, 'auth.json');
+  const source = path.resolve(sourceHome, file);
   const bytes = readFileSync(source);
-  const marker: Marker = { pid: process.pid, source, copiedSha256: sha256(bytes) };
+  const marker: Marker = { pid: process.pid, source, file, copiedSha256: sha256(bytes) };
   // Marker first, so any copy on disk can be synced back and cleaned by the sweep.
   writeFileSync(path.join(dir, HOME_MARKER), `${JSON.stringify(marker)}\n`, { mode: 0o600 });
   live.add(dir);
-  writeFileSync(path.join(dir, 'auth.json'), bytes, { mode: 0o600 });
-  if (process.platform !== 'win32') chmodSync(path.join(dir, 'auth.json'), 0o600);
+  writeFileSync(path.join(dir, file), bytes, { mode: 0o600 });
+  if (process.platform !== 'win32') chmodSync(path.join(dir, file), 0o600);
 }
 
 /** Applies the write-back rule for one home (see the module comment). Never deletes anything. */
 export function syncBack(dir: string, warn: (message: string) => void = (m) => process.stderr.write(`${m}\n`)): SyncOutcome {
   const marker = readMarker(dir);
-  const temp = readOrNull(path.join(dir, 'auth.json'));
-  if (marker === null || temp === null) return 'no-auth';
+  if (marker === null) return 'no-auth';
+  const temp = readOrNull(path.join(dir, marker.file));
+  if (temp === null) return 'no-auth';
   if (sha256(temp) === marker.copiedSha256) return 'unchanged';
   const real = readOrNull(marker.source);
   if (real !== null && sha256(real) === marker.copiedSha256) {
     atomicWrite(marker.source, temp);
     return 'written-back';
   }
-  warn(`bench: Codex refreshed auth.json in a temp home, but ${marker.source} also changed since it was copied; kept the real file and discarded the temp copy`);
+  warn(`bench: the host refreshed ${marker.file} in a temp home, but ${marker.source} also changed since it was copied; kept the real file and discarded the temp copy`);
   return 'conflict-kept-real';
 }
 

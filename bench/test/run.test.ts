@@ -37,7 +37,10 @@ describe('host commands', () => {
     const a = claudeArgs({ arm: 'A', model: 'm', effort: 'low', maxTurns: 5, settingsFile: 's.json', mcpConfigFile: 'm.json' });
     expect(a).toEqual(expect.arrayContaining(['--setting-sources', 'project', '--strict-mcp-config', '--no-session-persistence']));
     const b = claudeArgs({ arm: 'B', model: 'm', effort: 'low', maxTurns: 5, settingsFile: 's.json', mcpConfigFile: 'm.json' });
-    expect(b.slice(b.indexOf('--allowedTools'))).toEqual(['--allowedTools', 'mcp__agent-code-mode__run', '--disallowedTools', 'Bash,Read,Write,Edit,Glob,Grep,NotebookEdit']);
+    // Native tools removed with --tools "" (not denied: a CLI deny would also deny them inside run).
+    expect(b).not.toContain('--disallowedTools');
+    expect(b.slice(b.indexOf('--tools'))).toEqual(['--tools', '', '--allowedTools', 'mcp__agent-code-mode__run,Bash,Read,Write,Edit,Glob,Grep']);
+    expect(a.slice(a.indexOf('--allowedTools'))).toEqual(['--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep']);
     expect(claudeMcpConfig('A', 'x')).toEqual({ mcpServers: {} });
   });
 
@@ -45,13 +48,15 @@ describe('host commands', () => {
     const base = { model: 'gpt-6.1-terra', effort: 'medium', codexHome: '/h', catalogFile: '/h/c.json', serverEntry: '/r/dist/cli.js', nodePath: '/usr/bin/node' };
     const c = codexConfigToml({ ...base, arm: 'C' });
     expect(c).toContain('shell_tool = false');
+    for (const arm of ['A', 'B', 'C'] as const) expect(codexConfigToml({ ...base, arm })).toContain('apps = false');
     expect(c).toContain('[mcp_servers.agent-code-mode]');
     expect(c).toContain('default_tools_approval_mode = "approve"');
     expect(codexConfigToml({ ...base, arm: 'B', catalogFile: null })).not.toContain('model_catalog_json');
     const raw = JSON.stringify({ models: [{ slug: 'gpt-6.1-terra', tool_mode: 'code_mode_only', apply_patch_tool_type: 'freeform' }] });
     expect(catalogForArm('B', raw)).toBeNull();
     expect(JSON.parse(catalogForArm('A', raw) ?? '').models[0]).toMatchObject({ tool_mode: 'direct', apply_patch_tool_type: 'freeform' });
-    expect(JSON.parse(catalogForArm('C', raw) ?? '').models[0]).toMatchObject({ tool_mode: 'direct', apply_patch_tool_type: null });
+    expect(JSON.parse(catalogForArm('C', raw) ?? '').models[0]).toMatchObject({ tool_mode: 'direct', apply_patch_tool_type: null, supports_search_tool: false });
+    expect(JSON.parse(catalogForArm('A', raw) ?? '').models[0].supports_search_tool).toBeUndefined();
   });
 });
 

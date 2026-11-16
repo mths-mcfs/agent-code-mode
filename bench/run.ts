@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -6,7 +7,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
-import { claudeArgs, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
+import { claudeArgs, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
 import { catalogForArm, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
@@ -174,6 +175,31 @@ async function findFiles(dir: string, suffix: string): Promise<string[]> {
   return out.sort();
 }
 
+/** The user's Claude config dir (`$CLAUDE_CONFIG_DIR` when absolute, else `~/.claude`). */
+function sourceClaudeConfig(): string {
+  const env = process.env['CLAUDE_CONFIG_DIR'];
+  return env !== undefined && env !== '' && path.isAbsolute(env) ? env : path.join(os.homedir(), '.claude');
+}
+
+/**
+ * How Claude runs are isolated from the user's config. `--setting-sources project` keeps user settings
+ * out but not the user's CLAUDE.md: Claude walks up from the workspace and also loads
+ * `<ancestor>/.claude/CLAUDE.md`, which is the user memory whenever the workspace is under the home
+ * directory (checked with Claude Code 2.1.325). So: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 (no CLAUDE.md of any
+ * level; the fixture has none), auto memory off, and a temporary CLAUDE_CONFIG_DIR holding only a copy of
+ * the credentials file (same copy + hash + write-back rule as Codex). Without a credentials file (macOS
+ * keychain) the config dir is not replaced and the method says so.
+ */
+export function claudeIsolationMethod(hasCredentialsFile: boolean): string {
+  return [
+    '--setting-sources project',
+    '--strict-mcp-config',
+    'CLAUDE_CODE_DISABLE_CLAUDE_MDS=1',
+    'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1',
+    hasCredentialsFile ? 'temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)' : 'user CLAUDE_CONFIG_DIR (no credentials file to copy)',
+  ].join('; ');
+}
+
 function sourceCodexHome(): string {
   const env = process.env['CODEX_HOME'];
   return env !== undefined && env !== '' ? env : path.join(os.homedir(), '.codex');
@@ -218,6 +244,7 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
       args: claudeArgs({ arm: p.arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
       settings: claudeProjectSettings(task, fixture),
       mcp: claudeMcpConfig(p.arm, '<server>'),
+      isolation: claudeIsolationMethod(existsSync(path.join(sourceClaudeConfig(), '.credentials.json'))),
     };
   } else {
     const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
@@ -288,12 +315,25 @@ async function runClaude(ctx: Context, p: PlannedRun, runWork: string, ws: strin
   await writeFile(settingsFile, settings);
   await writeFile(mcpConfigFile, mcp);
   const args = claudeArgs({ arm: p.arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile, mcpConfigFile });
-  const configs = { 'claude-settings.json': settings, 'mcp-config.json': mcp, 'command.txt': `claude ${args.join(' ')}\n` };
+  const configs: Record<string, string> = { 'claude-settings.json': settings, 'mcp-config.json': mcp, 'command.txt': `claude ${args.map((a) => (a === '' ? '""' : a)).join(' ')}\n` };
   if (ctx.opts.dryRun) return { ...(await cannedTranscript('claude', p.arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
   const stdoutFile = path.join(runWork, 'stdout.jsonl');
   const stderrFile = path.join(runWork, 'stderr.txt');
-  const outcome = await runProcess({ command: 'claude', args, cwd: ws, env: hostEnv({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }), timeoutMs: ctx.opts.timeoutMin * 60_000, stdoutFile, stderrFile, stdin: task.prompt(fixture.facts) });
-  return { stdout: await readFile(stdoutFile, 'utf8'), stderr: await readFile(stderrFile, 'utf8'), requests: null, ...outcome, configs };
+  const configDir = path.join(runWork, 'claude-config');
+  const isolated = await exists(path.join(sourceClaudeConfig(), '.credentials.json'));
+  const env: Record<string, string> = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' };
+  try {
+    if (isolated) {
+      createCodexHome(configDir, sourceClaudeConfig(), '.credentials.json');
+      env['CLAUDE_CONFIG_DIR'] = configDir;
+    }
+    const outcome = await runProcess({ command: 'claude', args, cwd: ws, env: hostEnv(env), timeoutMs: ctx.opts.timeoutMin * 60_000, stdoutFile, stderrFile, stdin: task.prompt(fixture.facts) });
+    configs['auth.txt'] = isolated ? `.credentials.json: ${removeCodexHome(configDir)}\n` : 'no credentials file: user config dir used\n';
+    configs['isolation.txt'] = `${claudeIsolationMethod(isolated)}\n`;
+    return { stdout: await readFile(stdoutFile, 'utf8'), stderr: await readFile(stderrFile, 'utf8'), requests: null, ...outcome, configs };
+  } finally {
+    removeCodexHome(configDir);
+  }
 }
 
 async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string): Promise<HostOutput> {
@@ -382,6 +422,10 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     if (parsed.hostError !== null) invalidReasons.push(`host error: ${parsed.hostError}`);
     if (!ctx.opts.dryRun && parsed.model !== null && parsed.model !== model) invalidReasons.push(`model mismatch: ran ${parsed.model}, expected ${model}`);
     if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, p.arm, parsed.availableTools));
+    if (p.host === 'claude' && !ctx.opts.dryRun) {
+      if (parsed.hostContext === null) invalidReasons.push('Claude init event missing: isolation not observed');
+      else invalidReasons.push(...claudeIsolationIssues(parsed.hostContext));
+    }
     else if (!ctx.opts.dryRun) invalidReasons.push('tool surface not observed');
     const arm = checkArm(p.host, p.arm, parsed.toolCalls);
     fallback = arm.fallback;
@@ -550,6 +594,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   await mkdir(resultsDir, { recursive: true });
+  const claudeCredentials = await exists(path.join(sourceClaudeConfig(), '.credentials.json'));
   const git = gitInfo();
   await appendEnvironment(resultsDir, {
     startedAt: new Date().toISOString(),
@@ -565,7 +610,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       hosts.map((h) => [
         h,
         h === 'claude'
-          ? { version: versions['claude'], model: opts.claudeModel, effort: opts.claudeEffort, maxTurns: opts.maxTurns }
+          ? { version: versions['claude'], model: opts.claudeModel, effort: opts.claudeEffort, maxTurns: opts.maxTurns, isolation: claudeIsolationMethod(claudeCredentials) }
           : { version: versions['codex'], model: opts.codexModel, effort: opts.codexEffort, maxTurns: null, catalogSha256: rawCatalog === null ? null : sha256(rawCatalog) },
       ]),
     ),
