@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
 import { claudeArgs, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
 import { catalogForArm, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
-import { authWasReplaced, createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
+import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
 import { ARM_LABELS, checkArm, checkSurface, HOST_ARMS, RunRecordSchema, type ArmId, type ParsedRun, type RunRecord } from './lib/record.ts';
@@ -314,8 +314,7 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
     const configs: Record<string, string> = { 'codex-config.toml': config, 'command.txt': `codex ${args.join(' ')}\n` };
     if (hooks !== null) configs['codex-hooks.json'] = hooks;
     if (ctx.opts.dryRun) return { ...(await cannedTranscript('codex', p.arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
-    const authMode = createCodexHome(codexHome, sourceCodexHome());
-    configs['auth.txt'] = `auth.json ${authMode === 'symlink' ? 'linked to the user auth file (no copy)' : 'copied (symlinks unavailable)'}\n`;
+    createCodexHome(codexHome, sourceCodexHome());
     let availableTools: string[] | null = null;
     try {
       const promptInput = execFileSync('codex', ['debug', 'prompt-input'], { cwd: ws, encoding: 'utf8', env: hostEnv({ CODEX_HOME: codexHome }), timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
@@ -330,7 +329,8 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
     const rollouts = await findFiles(path.join(codexHome, 'sessions'), '.jsonl');
     let requests = '';
     for (const r of rollouts) requests += extractCodexRequests(await readFile(r, 'utf8'));
-    if (authWasReplaced(codexHome, authMode)) configs['auth.txt'] += 'Codex replaced the linked auth.json with a file during the run; it was deleted with the temp home.\n';
+    // Sync a refreshed token back to the real auth file (if it is still the copied version) and delete the home now.
+    configs['auth.txt'] = `auth.json: ${removeCodexHome(codexHome)}\n`;
     return { stdout: await readFile(stdoutFile, 'utf8'), stderr: await readFile(stderrFile, 'utf8'), requests: rollouts.length > 0 ? requests : null, ...outcome, configs, availableTools };
   } finally {
     // Signal handlers and the startup sweep cover the cases where this never runs.
@@ -360,7 +360,7 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     parseError = err instanceof Error ? err.message : String(err);
   }
   const answer = solutionAnswer ?? parsed?.finalAnswer ?? '';
-  const verify = await task.verify({ workspace: ws, answer, facts: workspace.fixture.facts, initial: workspace.initial });
+  const verify = await task.verify({ workspace: ws, answer, facts: workspace.fixture.facts, initial: workspace.initial, denials: ctx.opts.dryRun ? null : (parsed?.denials ?? null) });
 
   const model = p.host === 'claude' ? ctx.opts.claudeModel : ctx.opts.codexModel;
   let costUsd: number | null = null;
