@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -102,12 +102,26 @@ interface Lab {
   policy(permissions: Record<string, unknown>, mode?: string): Promise<{ adapter: ClaudeHostAdapter; policy: PolicySnapshot<ClaudePolicy>; ctx: SessionContext }>;
 }
 
+/** Whether names in `dir` are case-sensitive: a file created as `case-probe` is not found as `CASE-PROBE`. */
+async function isCaseSensitive(dir: string): Promise<boolean> {
+  const probe = path.join(dir, 'case-probe');
+  await writeFile(probe, '');
+  try {
+    return !(await access(path.join(dir, 'CASE-PROBE')).then(() => true, () => false));
+  } finally {
+    await rm(probe, { force: true });
+  }
+}
+
 async function makeLab(): Promise<Lab> {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'acm-expand-')));
   const ws = path.join(base, 'ws');
   const home = path.join(base, 'home');
   await mkdir(path.join(home, '.claude'), { recursive: true });
+  // `b.js` and `B.js` are one file where names ignore case (APFS, NTFS): keep only `B.js` there, which still orders differently by locale.
+  const caseSensitive = await isCaseSensitive(base);
   for (const rel of FILES) {
+    if (!caseSensitive && rel === 'b.js') continue;
     await mkdir(path.dirname(path.join(ws, rel)), { recursive: true });
     await writeFile(path.join(ws, rel), `content of ${rel}\nline 2\n`);
   }

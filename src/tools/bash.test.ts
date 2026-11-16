@@ -1,10 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from '../core/types.js';
+import { planGlobExpansion } from '../hosts/claude/expand.js';
 import { makeContext } from '../testing/context.js';
+import { findBash, globEnvironment } from './bash.js';
 import { NodeToolRuntime } from './runtime.js';
 import { containmentUnavailableReason } from './sandbox.js';
 
@@ -156,5 +159,131 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
     const r = await bash('sleep 100', { containment: readOnly, timeoutMs: 1000 });
     expect(r.timedOut, `sandboxed bash failed: exit ${r.exitCode} stderr ${r.stderr}`).toBe(true);
     expect(Date.now() - started).toBeLessThan(8000);
+  });
+});
+
+/**
+ * The glob expansion runs before authorization, so it must not run code
+ * whatever environment the server inherited. Property: for each environment
+ * that changes how bash behaves, preparing `cat *.txt` writes nothing and
+ * gives the same command as in a clean environment, or leaves the command
+ * as written (not expanded). And when the environment changes globbing in a
+ * way the expansion reproduces (glob options, `GLOBIGNORE`), it matches what
+ * the bash that runs the command would glob.
+ */
+describe.skipIf(IS_WINDOWS)('bash glob expansion environment', () => {
+  const GLOB_VARS = ['BASHOPTS', 'SHELLOPTS', 'PS4', 'IFS', 'PROMPT_COMMAND', 'BASH_XTRACEFD', 'CDPATH', 'BASH_ENV', 'ENV', 'GLOBIGNORE', 'GLOBSORT', 'BASH_COMPAT', 'POSIXLY_CORRECT', 'LOCPATH'];
+
+  async function prepareCat(env: Record<string, string>, command = 'cat *.txt'): Promise<string> {
+    const saved = { ...process.env };
+    for (const name of [...GLOB_VARS, ...Object.keys(process.env).filter((n) => n.startsWith('BASH_FUNC_'))]) delete process.env[name];
+    Object.assign(process.env, env);
+    try {
+      const rt = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
+      const policy: PolicySnapshot = { ...policyWith({ mode: 'none' }), planBashExpansion: planGlobExpansion };
+      const prepared = await rt.prepare({ id: `c${++seq}`, tool: 'bash', args: { command } }, ctx, policy);
+      if (prepared.tool !== 'bash') throw new Error('not a bash call');
+      return prepared.effect.command;
+    } finally {
+      for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];
+      Object.assign(process.env, saved);
+    }
+  }
+
+  function seed(): void {
+    for (const name of ['a.txt', 'b.txt', 'c d.txt', '.hidden.txt']) writeFileSync(path.join(ws, name), `${name}\n`);
+  }
+
+  it('runs no code and changes nothing for any environment that alters bash', async () => {
+    seed();
+    const clean = await prepareCat({});
+    expect(clean).toBe("cat -- 'a.txt' 'b.txt' 'c d.txt'");
+    const hit = path.join(base, 'hit');
+    const run = `echo EXECUTED >> ${hit}`;
+    const script = path.join(base, 'startup.sh');
+    writeFileSync(script, `${run}\n`);
+    const fn = (body: string): string => `() { ${run}; ${body}; }`;
+    const hostile: Record<string, Record<string, string>> = {
+      'function shopt': { 'BASH_FUNC_shopt%%': fn('builtin shopt "$@"') },
+      'function printf': { 'BASH_FUNC_printf%%': fn('builtin printf "$@"') },
+      'function builtin': { 'BASH_FUNC_builtin%%': fn('command builtin "$@"') },
+      'function for': { 'BASH_FUNC_for%%': fn('true') },
+      'function echo': { 'BASH_FUNC_echo%%': fn('true') },
+      'xtrace PS4': { SHELLOPTS: 'xtrace', PS4: `$(${run})` },
+      'verbose': { SHELLOPTS: 'verbose' },
+      'errexit': { SHELLOPTS: 'errexit' },
+      'xtrace verbose errexit': { SHELLOPTS: 'braceexpand:errexit:hashall:verbose:xtrace', PS4: `$(${run})+ ` },
+      'PS4 alone': { PS4: `$(${run})` },
+      'extdebug': { BASHOPTS: 'extdebug' },
+      'extdebug with a function': { BASHOPTS: 'extdebug:extglob', 'BASH_FUNC_shopt%%': fn('builtin shopt "$@"') },
+      'IFS dot': { IFS: '.' },
+      'IFS t': { IFS: 't' },
+      'PROMPT_COMMAND': { PROMPT_COMMAND: run },
+      'xtrace to stdout': { SHELLOPTS: 'xtrace', BASH_XTRACEFD: '1' },
+      'CDPATH': { CDPATH: base },
+      'BASH_ENV and ENV': { BASH_ENV: script, ENV: script },
+    };
+    hostile['all at once'] = Object.assign({}, ...Object.values(hostile));
+    const before = readdirSync(ws).sort();
+    for (const [label, env] of Object.entries(hostile)) {
+      const command = await prepareCat(env);
+      expect(existsSync(hit), label).toBe(false);
+      expect(readdirSync(ws).sort(), label).toEqual(before);
+      expect([clean, 'cat *.txt'], label).toContain(command);
+    }
+  });
+
+  /** What the bash that runs the command globs, in the server's environment plus `env`. */
+  function oracle(env: Record<string, string>, word: string): string[] {
+    const shell = findBash() ?? 'bash';
+    const out = spawnSync(shell, ['-c', `for f in ${word}; do printf '%s\\0' "$f"; done`], { cwd: ws, env: { ...process.env, ...env }, encoding: 'utf8' }).stdout;
+    return out.split('\0').slice(0, -1);
+  }
+
+  const quoted = (names: string[]): string => `cat -- ${names.map((n) => `'${n}'`).join(' ')}`;
+
+  it('globs as the bash running the command would under glob options and GLOBIGNORE from the environment', async () => {
+    seed();
+    const cases: Record<string, string>[] = [
+      { BASHOPTS: 'dotglob' },
+      { BASHOPTS: 'checkwinsize:cmdhist:complete_fullquote:dotglob:expand_aliases:extglob:globskipdots:progcomp:promptvars:sourcepath' },
+      { GLOBIGNORE: 'b*' },
+      { BASHOPTS: 'nocaseglob', GLOBIGNORE: '*d*' },
+    ];
+    for (const env of cases) {
+      const expected = oracle(env, '*.txt');
+      expect(expected.length, JSON.stringify(env)).toBeGreaterThan(0);
+      expect(await prepareCat(env), JSON.stringify(env)).toBe(quoted(expected));
+    }
+    // dotglob really reached the expansion: the hidden file is named.
+    expect(await prepareCat({ BASHOPTS: 'dotglob' })).toContain("'.hidden.txt'");
+  });
+
+  it('does not expand when the environment changes globbing in a way the expansion would not reproduce', async () => {
+    seed();
+    const diverging: Record<string, string>[] = [
+      { BASHOPTS: 'compat42' },
+      { BASHOPTS: 'dotglob:some_future_option' },
+      { SHELLOPTS: 'noglob' },
+      { SHELLOPTS: 'braceexpand:posix' },
+      { GLOBSORT: '-name' },
+      { BASH_COMPAT: '4.2' },
+      { POSIXLY_CORRECT: '1' },
+      { LOCPATH: base },
+    ];
+    for (const env of diverging) {
+      expect(globEnvironment(env), JSON.stringify(env)).toBeUndefined();
+      expect(await prepareCat(env), JSON.stringify(env)).toBe('cat *.txt');
+    }
+    // `noglob` shows why: the command's bash would not glob at all.
+    expect(oracle({ SHELLOPTS: 'noglob' }, '*.txt')).toEqual(['*.txt']);
+  });
+
+  it('passes the expanding bash only the locale, GLOBIGNORE and explicit glob options', () => {
+    const glob = globEnvironment({
+      LANG: 'C', LC_ALL: 'C', LC_COLLATE: 'C', LC_CTYPE: 'C', LC_MESSAGES: 'C', GLOBIGNORE: 'x*',
+      BASHOPTS: 'dotglob:extdebug:nullglob', SHELLOPTS: 'xtrace', PS4: '$(x)', 'BASH_FUNC_f%%': '() { :; }', IFS: '.', PATH: '/bin', HOME: '/', CDPATH: '/',
+    });
+    expect(glob).toEqual({ env: { LANG: 'C', LC_ALL: 'C', LC_COLLATE: 'C', LC_CTYPE: 'C', GLOBIGNORE: 'x*' }, shopts: ['dotglob', 'nullglob'] });
   });
 });
