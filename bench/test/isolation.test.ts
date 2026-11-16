@@ -207,6 +207,11 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
     try {
       expect(await readFile(h.realAuth, 'utf8')).toBe(ORIGINAL);
       expect(await findFile(path.join(h.root, 'results'), 'auth.txt')).toBe('auth.json: unchanged\n');
+      // A real (non-dry) Codex run whose tool surface was observed is a valid run.
+      const record = JSON.parse(await findFile(path.join(h.root, 'results'), 'record.json'));
+      expect(record.invalidReasons).toEqual([]);
+      expect(record.valid).toBe(true);
+      expect(record.parsed.availableTools).toContain('exec_command');
     } finally {
       await cleanup(h);
     }

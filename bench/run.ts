@@ -422,11 +422,11 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     if (parsed.hostError !== null) invalidReasons.push(`host error: ${parsed.hostError}`);
     if (!ctx.opts.dryRun && parsed.model !== null && parsed.model !== model) invalidReasons.push(`model mismatch: ran ${parsed.model}, expected ${model}`);
     if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, p.arm, parsed.availableTools));
+    else if (!ctx.opts.dryRun) invalidReasons.push('tool surface not observed');
     if (p.host === 'claude' && !ctx.opts.dryRun) {
       if (parsed.hostContext === null) invalidReasons.push('Claude init event missing: isolation not observed');
       else invalidReasons.push(...claudeIsolationIssues(parsed.hostContext));
     }
-    else if (!ctx.opts.dryRun) invalidReasons.push('tool surface not observed');
     const arm = checkArm(p.host, p.arm, parsed.toolCalls);
     fallback = arm.fallback;
     invalidReasons.push(...arm.reasons);
