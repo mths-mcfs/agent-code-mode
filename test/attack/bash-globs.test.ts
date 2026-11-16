@@ -68,11 +68,16 @@ describe.runIf(posix)('bash glob expansion (Claude)', () => {
     symlinkSync(path.join(lab.outside, 'secret.txt'), path.join(lab.ws, 'data', 'b.txt'));
     symlinkSync(lab.outside, path.join(lab.ws, 'data', 'dir'));
     server = await claudeServer(lab, { permissions: { allow: ALLOW } });
-    for (const command of ['cat data/*.txt', 'head -n 5 data/*', 'cat data/d*/*', 'ls data/*']) {
+    for (const command of ['cat data/*.txt', 'head -n 5 data/*', 'ls data/*', 'cat data/dir/*']) {
       const { text, value } = await bash(server, command);
       expect(value, command).toMatchObject({ ok: true, result: { error: expect.stringMatching(/^ToolError:outside-workspace:/) } });
       expect(text, command).not.toContain('outside secret');
+      expect(text, command).not.toContain(lab.outside); // the refusal never names what is outside
     }
+    // A glob before the last `/` is not expanded (bash would follow the directory link): the rules decide it as written.
+    const inner = await bash(server, 'cat data/d*/*');
+    expect(inner.value).toMatchObject({ ok: true, result: { error: expect.stringMatching(/^PermissionDenied:denied:.*names files only known at run time/) } });
+    expect(inner.text).not.toContain('outside secret');
     // bypassPermissions does not open it either: the jail refuses, not a rule.
     await server.close();
     server = await claudeServer(lab, { permissions: { defaultMode: 'bypassPermissions' } });

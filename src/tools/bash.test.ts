@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,7 +7,8 @@ import { ToolError } from '../core/errors.js';
 import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from '../core/types.js';
 import { planGlobExpansion } from '../hosts/claude/expand.js';
 import { makeContext } from '../testing/context.js';
-import { findBash, globEnvironment } from './bash.js';
+import { type BashVersion, bashVersion, expandBashGlobs, findBash, globEnvironment } from './bash.js';
+import { Jail } from './jail.js';
 import { NodeToolRuntime } from './runtime.js';
 import { containmentUnavailableReason } from './sandbox.js';
 
@@ -255,8 +256,10 @@ describe.skipIf(IS_WINDOWS)('bash glob expansion environment', () => {
       expect(expected.length, JSON.stringify(env)).toBeGreaterThan(0);
       expect(await prepareCat(env), JSON.stringify(env)).toBe(quoted(expected));
     }
-    // dotglob really reached the expansion: the hidden file is named.
-    expect(await prepareCat({ BASHOPTS: 'dotglob' })).toContain("'.hidden.txt'");
+    // dotglob reaches the expansion exactly when the command's bash reads it from BASHOPTS (bash 4.1 and later).
+    const dot = await prepareCat({ BASHOPTS: 'dotglob' });
+    if (oracle({ BASHOPTS: 'dotglob' }, '*.txt').includes('.hidden.txt')) expect(dot).toContain("'.hidden.txt'");
+    else expect(dot).not.toContain('.hidden.txt');
   });
 
   it('does not expand when the environment changes globbing in a way the expansion would not reproduce', async () => {
@@ -271,10 +274,14 @@ describe.skipIf(IS_WINDOWS)('bash glob expansion environment', () => {
       { POSIXLY_CORRECT: '1' },
       { LOCPATH: base },
     ];
+    // On the bash that runs the commands: refused, or (a variable that bash does not read) the same list as that bash.
+    const real = await realVersion();
     for (const env of diverging) {
-      expect(globEnvironment(env), JSON.stringify(env)).toBeUndefined();
-      expect(await prepareCat(env), JSON.stringify(env)).toBe('cat *.txt');
+      if (globEnvironment(env, real) === undefined) expect(await prepareCat(env), JSON.stringify(env)).toBe('cat *.txt');
+      else expect(await prepareCat(env), JSON.stringify(env)).toBe(quoted(oracle(env, '*.txt')));
     }
+    // On a bash that reads them all, every one is refused.
+    for (const env of diverging) expect(globEnvironment(env, { major: 5, minor: 3 }), JSON.stringify(env)).toBeUndefined();
     // `noglob` shows why: the command's bash would not glob at all.
     expect(oracle({ SHELLOPTS: 'noglob' }, '*.txt')).toEqual(['*.txt']);
   });
@@ -283,7 +290,134 @@ describe.skipIf(IS_WINDOWS)('bash glob expansion environment', () => {
     const glob = globEnvironment({
       LANG: 'C', LC_ALL: 'C', LC_COLLATE: 'C', LC_CTYPE: 'C', LC_MESSAGES: 'C', GLOBIGNORE: 'x*',
       BASHOPTS: 'dotglob:extdebug:nullglob', SHELLOPTS: 'xtrace', PS4: '$(x)', 'BASH_FUNC_f%%': '() { :; }', IFS: '.', PATH: '/bin', HOME: '/', CDPATH: '/',
-    });
+    }, { major: 5, minor: 3 });
     expect(glob).toEqual({ env: { LANG: 'C', LC_ALL: 'C', LC_COLLATE: 'C', LC_CTYPE: 'C', GLOBIGNORE: 'x*' }, shopts: ['dotglob', 'nullglob'] });
+  });
+
+  /** The version of the bash the commands run with. */
+  async function realVersion(): Promise<BashVersion> {
+    const v = await bashVersion(findBash() ?? 'bash');
+    if (v === null) throw new Error('bash version unknown');
+    return v;
+  }
+
+  it('applies what each bash version reads from the environment, and only that', () => {
+    const v = (major: number, minor: number): BashVersion => ({ major, minor });
+    // BASHOPTS is read from the environment from bash 4.1 (macOS ships 3.2): before, its options are not set.
+    expect(globEnvironment({ BASHOPTS: 'dotglob:extglob' }, v(3, 2))).toEqual({ env: {}, shopts: [] });
+    expect(globEnvironment({ BASHOPTS: 'dotglob:extglob' }, v(4, 0))).toEqual({ env: {}, shopts: [] });
+    expect(globEnvironment({ BASHOPTS: 'dotglob:extglob' }, v(4, 1))).toEqual({ env: {}, shopts: ['dotglob', 'extglob'] });
+    // An option unknown to this table is harmless where BASHOPTS is ignored, refused where it is read.
+    expect(globEnvironment({ BASHOPTS: 'compat42' }, v(3, 2))).toBeDefined();
+    expect(globEnvironment({ BASHOPTS: 'compat42' }, v(4, 1))).toBeUndefined();
+    // GLOBIGNORE and SHELLOPTS are read in every version.
+    expect(globEnvironment({ GLOBIGNORE: 'b*' }, v(3, 2))).toEqual({ env: { GLOBIGNORE: 'b*' }, shopts: [] });
+    expect(globEnvironment({ SHELLOPTS: 'noglob' }, v(3, 2))).toBeUndefined();
+    // GLOBSORT exists from 5.3, BASH_COMPAT from 4.3.
+    expect(globEnvironment({ GLOBSORT: '-name' }, v(5, 2))).toBeDefined();
+    expect(globEnvironment({ GLOBSORT: '-name' }, v(5, 3))).toBeUndefined();
+    expect(globEnvironment({ BASH_COMPAT: '4.2' }, v(4, 2))).toBeDefined();
+    expect(globEnvironment({ BASH_COMPAT: '4.2' }, v(4, 3))).toBeUndefined();
+    expect(globEnvironment({ POSIXLY_CORRECT: '1' }, v(3, 2))).toBeUndefined();
+  });
+
+  it('asks bash its version with an empty environment, and gives null when it cannot tell', async () => {
+    const shell = findBash() ?? 'bash';
+    const told = spawnSync(shell, ['-c', 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'], { env: {}, encoding: 'utf8' }).stdout.trim();
+    const saved = process.env['BASH_FUNC_builtin%%'];
+    process.env['BASH_FUNC_builtin%%'] = '() { echo 9.9; }';
+    try {
+      const v = await bashVersion(shell);
+      expect(v && `${v.major}.${v.minor}`).toBe(told);
+    } finally {
+      if (saved === undefined) delete process.env['BASH_FUNC_builtin%%'];
+      else process.env['BASH_FUNC_builtin%%'] = saved;
+    }
+    expect(await bashVersion(path.join(base, 'no-such-bash'))).toBeNull();
+    expect(await bashVersion(process.execPath)).toBeNull(); // runs, but does not answer as bash
+  });
+
+  it('does not expand when BASH_ENV is set: bash -c runs it before the command, and it may set glob options', async () => {
+    seed();
+    const startup = path.join(base, 'startup.sh');
+    writeFileSync(startup, 'shopt -s dotglob\n');
+    // The command's bash does see the hidden file: expanding without BASH_ENV would give it fewer files.
+    expect(oracle({ BASH_ENV: startup }, '*.txt')).toContain('.hidden.txt');
+    expect(await prepareCat({ BASH_ENV: startup })).toBe('cat *.txt');
+    // Empty, it is not read; ENV is read only by interactive shells, so the list is that of bash -c.
+    expect(await prepareCat({ BASH_ENV: '' })).toBe(quoted(oracle({ BASH_ENV: '' }, '*.txt')));
+    writeFileSync(path.join(base, 'env.sh'), 'shopt -s dotglob\n');
+    expect(await prepareCat({ ENV: path.join(base, 'env.sh') })).toBe(quoted(oracle({ ENV: path.join(base, 'env.sh') }, '*.txt')));
+    expect(globEnvironment({ BASH_ENV: startup }, { major: 3, minor: 2 })).toBeUndefined();
+  });
+});
+
+/**
+ * The expansion runs before authorization, so bash must not open anything
+ * outside the workspace, and a refusal must not name what is there.
+ */
+describe.skipIf(IS_WINDOWS)('bash glob expansion and the workspace', () => {
+  let outside: string;
+  beforeEach(() => {
+    outside = path.join(base, 'outside');
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, 'secret.txt'), 'SECRET\n');
+    writeFileSync(path.join(outside, 'x.txt'), 'X\n');
+    symlinkSync(outside, path.join(ws, 'link'));
+  });
+
+  async function expand(command: string) {
+    const plan = planGlobExpansion(command);
+    if (!plan) throw new Error(`no plan for ${command}`);
+    const jail = await Jail.create({ cwd: ws, roots: [ws], protectedPaths: [] });
+    return expandBashGlobs(plan, ws, jail, undefined);
+  }
+
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+  it.skipIf(asRoot)('refuses a glob in a directory link to outside without opening it', async () => {
+    // Unreadable: bash could not list it, so a refusal can only come from the check made before bash runs.
+    chmodSync(outside, 0o311);
+    try {
+      const err = await expand('cat link/*.txt').then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(ToolError);
+      expect(err).toMatchObject({ code: 'outside-workspace' });
+    } finally {
+      chmodSync(outside, 0o755);
+    }
+  });
+
+  it('never names a file outside the workspace in the refusal', async () => {
+    writeFileSync(path.join(ws, 'a.txt'), 'A\n');
+    symlinkSync(path.join(outside, 'secret.txt'), path.join(ws, 'b.txt'));
+    for (const command of ['cat link/*.txt', 'cat *.txt', 'cat link/s*']) {
+      const err = await expand(command).then(() => null, (e: unknown) => e);
+      expect(err, command).toMatchObject({ code: 'outside-workspace' });
+      const message = err instanceof Error ? err.message : '';
+      expect(message, command).not.toContain('secret');
+      expect(message, command).not.toContain(outside);
+    }
+  });
+
+  it('does not expand a glob before the last slash: bash would follow a directory link', async () => {
+    mkdirSync(path.join(ws, 'a1', 'b'), { recursive: true });
+    writeFileSync(path.join(ws, 'a1', 'b', 'c.js'), 'C\n');
+    for (const command of ['cat */x.txt', 'cat l*/x.txt', 'cat a*/b/*.js', 'cat ?ink/*.txt', 'cat [l]ink/secret.txt']) {
+      expect(await expand(command), command).toBeUndefined();
+    }
+  });
+
+  it('still expands in a literal directory inside the workspace, quoted or through a link that stays inside', async () => {
+    mkdirSync(path.join(ws, 'da ta'));
+    mkdirSync(path.join(ws, 'd*'));
+    writeFileSync(path.join(ws, 'da ta', 'a.txt'), 'A\n');
+    writeFileSync(path.join(ws, 'd*', 'b.txt'), 'B\n');
+    symlinkSync(path.join(ws, 'da ta'), path.join(ws, 'inner'));
+    expect((await expand(`cat "da ta"/*.txt`))?.command).toBe("cat -- 'da ta/a.txt'");
+    expect((await expand(`cat da\\ ta/*.txt`))?.command).toBe("cat -- 'da ta/a.txt'");
+    expect((await expand(`cat 'd*'/*.txt`))?.command).toBe("cat -- 'd*/b.txt'");
+    expect((await expand('cat inner/*.txt'))?.command).toBe("cat -- 'inner/a.txt'");
+    // A directory that does not exist: nothing matches, the command stays as written.
+    expect(await expand('cat nowhere/*.txt')).toBeUndefined();
   });
 });

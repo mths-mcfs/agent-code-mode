@@ -198,10 +198,30 @@ const INERT_SHOPTS = new Set([
   'restricted_shell', 'shift_verbose', 'sourcepath', 'varredir_close', 'xpg_echo',
 ]);
 
-/** Variables that change globbing in a way the expanding bash does not reproduce. */
-const DIVERGING_VARS = ['GLOBSORT', 'BASH_COMPAT', 'POSIXLY_CORRECT', 'LOCPATH'] as const;
+/** A bash version, `BASH_VERSINFO[0]` and `[1]`. */
+export interface BashVersion {
+  readonly major: number;
+  readonly minor: number;
+}
 
-/** `SHELLOPTS` options that change globbing: `noglob` turns it off, `posix` may change it. */
+function atLeast(v: BashVersion, major: number, minor: number): boolean {
+  return v.major > major || (v.major === major && v.minor >= minor);
+}
+
+/**
+ * Variables that change globbing in a way the expanding bash does not
+ * reproduce, with the version from which bash reads them: `GLOBSORT` 5.3,
+ * `BASH_COMPAT` 4.3; `POSIXLY_CORRECT` (posix mode) and `LOCPATH` (glibc,
+ * the collation) in every version.
+ */
+const DIVERGING_VARS: readonly (readonly [string, number, number])[] = [
+  ['GLOBSORT', 5, 3],
+  ['BASH_COMPAT', 4, 3],
+  ['POSIXLY_CORRECT', 0, 0],
+  ['LOCPATH', 0, 0],
+];
+
+/** `SHELLOPTS` options (read from the environment in every bash) that change globbing: `noglob` turns it off, `posix` may change it. */
 const DIVERGING_SHELLOPTS = new Set(['noglob', 'posix']);
 
 /** The environment and `shopt -s` options that expand a glob as the command's bash would. */
@@ -213,16 +233,26 @@ interface GlobEnvironment {
 /**
  * Builds the expanding bash's environment from nothing: the locale,
  * `GLOBIGNORE` and the glob options of `BASHOPTS`, never anything bash reads
- * code from (`BASH_FUNC_*`, `SHELLOPTS`, `PS4`, `BASH_ENV`, ...). Undefined
- * when `from` holds something that changes globbing which this environment
- * would not reproduce: the expansion could then differ from what the command
- * gets, so it is not done.
+ * code from (`BASH_FUNC_*`, `SHELLOPTS`, `PS4`, `BASH_ENV`, ...). The command
+ * runs with the same bash binary (`version`), so the defaults of each option
+ * (`globasciiranges` from 4.3, on by default from 5.0; `globskipdots` from
+ * 5.2) are the same in both; only what that bash reads from the environment
+ * is reproduced: `GLOBIGNORE` in every version, `BASHOPTS` from 4.1 (an older
+ * bash ignores it, so its options are not set). An option the binary lacks
+ * fails the same way in both (`shopt -s` is silenced, the import ignores it).
+ * Undefined when `from` holds something that changes globbing which this
+ * environment would not reproduce (`BASH_ENV`, which `bash -c` runs, among
+ * them): the expansion could then differ from what
+ * the command gets, so it is not done.
  */
-export function globEnvironment(from: NodeJS.ProcessEnv): GlobEnvironment | undefined {
-  if (DIVERGING_VARS.some((name) => from[name] !== undefined)) return undefined;
+export function globEnvironment(from: NodeJS.ProcessEnv, version: BashVersion): GlobEnvironment | undefined {
+  // `bash -c` (the command) runs `BASH_ENV` first, which may set glob options; `ENV` is read only by interactive shells.
+  if ((from['BASH_ENV'] ?? '') !== '') return undefined;
+  if (DIVERGING_VARS.some(([name, major, minor]) => from[name] !== undefined && atLeast(version, major, minor))) return undefined;
   if ((from['SHELLOPTS'] ?? '').split(':').some((o) => DIVERGING_SHELLOPTS.has(o))) return undefined;
   const shopts: string[] = [];
-  for (const option of (from['BASHOPTS'] ?? '').split(':')) {
+  const bashopts = atLeast(version, 4, 1) ? (from['BASHOPTS'] ?? '') : '';
+  for (const option of bashopts.split(':')) {
     if (option === '' || INERT_SHOPTS.has(option)) continue;
     if (!GLOB_SHOPTS.has(option)) return undefined;
     shopts.push(option);
@@ -235,17 +265,42 @@ export function globEnvironment(from: NodeJS.ProcessEnv): GlobEnvironment | unde
   return { env, shopts };
 }
 
+const versions = new Map<string, Promise<BashVersion | null>>();
+
+/**
+ * The version of the bash at `shell`, asked of it with an empty environment
+ * (so nothing from the server's environment runs); cached by path. Null when
+ * it cannot be told.
+ */
+export function bashVersion(shell: string): Promise<BashVersion | null> {
+  let found = versions.get(shell);
+  if (found === undefined) {
+    found = new Promise((resolve) => {
+      const script = `builtin printf '%s.%s' "\${BASH_VERSINFO[0]}" "\${BASH_VERSINFO[1]}"`;
+      execFile(shell, ['--noprofile', '--norc', '-c', script], { env: {}, encoding: 'utf8', timeout: 10_000, windowsHide: true }, (err, stdout) => {
+        const m = err ? null : /^(\d+)\.(\d+)$/.exec(stdout);
+        resolve(m ? { major: Number(m[1]), minor: Number(m[2]) } : null);
+      });
+    });
+    versions.set(shell, found);
+  }
+  return found;
+}
+
 /**
  * Matches of one glob word in `cwd`, as the bash that runs the command gives
  * them: same locale, `GLOBIGNORE` and glob options, so the same words in the
- * same order. Undefined when that cannot be guaranteed (`globEnvironment`).
+ * same order. Undefined when that cannot be guaranteed (the version of
+ * `shell` is unknown, or `globEnvironment` refuses).
  * The word holds only literal text, quotes and glob characters (the planner
  * refused anything else), and the environment is built from nothing, so
  * expanding it runs no code. Empty when nothing matches.
  */
-function bashGlob(raw: string, cwd: string, shell: string): Promise<string[] | undefined> {
-  const glob = globEnvironment(process.env);
-  if (glob === undefined) return Promise.resolve(undefined);
+async function bashGlob(raw: string, cwd: string, shell: string): Promise<string[] | undefined> {
+  const version = await bashVersion(shell);
+  if (version === null) return undefined;
+  const glob = globEnvironment(process.env, version);
+  if (glob === undefined) return undefined;
   const enable = glob.shopts.map((o) => `builtin shopt -s ${o} 2>/dev/null; `).join('');
   const script = `${enable}builtin shopt -u failglob 2>/dev/null; builtin shopt -s nullglob; for f in ${raw}; do builtin printf '%s\\0' "$f"; done`;
   return new Promise((resolve, reject) => {
@@ -261,6 +316,81 @@ function bashGlob(raw: string, cwd: string, shell: string): Promise<string[] | u
   });
 }
 
+/** One character of a glob word after quote removal, and whether it was quoted. */
+interface WordChar {
+  readonly c: string;
+  readonly quoted: boolean;
+}
+
+/**
+ * The characters of a glob word as the planner writes it (literal text,
+ * backslash escapes, single and double quotes); undefined on anything else,
+ * so an unexpected word is not expanded.
+ */
+function wordChars(raw: string): WordChar[] | undefined {
+  const out: WordChar[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i] ?? '';
+    if (c === '\\') {
+      const next = raw[++i];
+      if (next === undefined) return undefined;
+      if (next !== '\n') out.push({ c: next, quoted: true });
+    } else if (c === "'") {
+      const end = raw.indexOf("'", i + 1);
+      if (end < 0) return undefined;
+      for (const q of raw.slice(i + 1, end)) out.push({ c: q, quoted: true });
+      i = end;
+    } else if (c === '"') {
+      for (i++; ; i++) {
+        const q = raw[i];
+        if (q === undefined || q === '$' || q === '`') return undefined;
+        if (q === '"') break;
+        const next = raw[i + 1];
+        if (q === '\\' && next !== undefined && '$`"\\\n'.includes(next)) {
+          i++;
+          if (next !== '\n') out.push({ c: next, quoted: true });
+        } else out.push({ c: q, quoted: true });
+      }
+    } else if (c === '$' || c === '`') {
+      return undefined;
+    } else out.push({ c, quoted: false });
+  }
+  return out;
+}
+
+/**
+ * The literal directory a glob word matches in (relative to the cwd; `''`
+ * for the cwd itself): every segment before the last must be free of glob
+ * characters, since bash would follow a directory link a glob segment
+ * matched, outside the workspace, before any match could be checked.
+ * Undefined when the word is absolute, has a glob in an inner segment, or
+ * cannot be read.
+ */
+function literalDirectory(raw: string): string | undefined {
+  const chars = wordChars(raw);
+  if (chars === undefined) return undefined;
+  const segments: WordChar[][] = [[]];
+  for (const ch of chars) {
+    if (ch.c === '/') segments.push([]);
+    else segments[segments.length - 1]?.push(ch);
+  }
+  const dirs = segments.slice(0, -1);
+  if (dirs[0]?.length === 0) return undefined;
+  if (dirs.some((seg) => seg.some((ch) => !ch.quoted && (ch.c === '*' || ch.c === '?' || ch.c === '[')))) return undefined;
+  return dirs.map((seg) => seg.map((ch) => ch.c).join('')).join('/');
+}
+
+/** Real path of `dir`, or null when it does not exist (nothing can match in it). */
+async function realDirectory(dir: string): Promise<string | null> {
+  try {
+    return await fs.realpath(dir);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw new ToolError('tool-error', `cannot resolve the directory of a glob: ${code ?? String(err)}`);
+  }
+}
+
 /** An expanded command and the identity of each entry it names. */
 export interface ExpandedCommand {
   readonly command: string;
@@ -272,8 +402,11 @@ export interface ExpandedCommand {
  * Undefined when a glob matches nothing (bash would pass it as written, so
  * the command stays as it is) or when the server's environment changes
  * globbing in a way the expansion would not reproduce (`globEnvironment`;
- * the command stays as written and the rules decide it). Throws `ToolError` when a match is outside the
- * workspace (symbolic links resolved), is not a regular file (or a directory,
+ * the command stays as written and the rules decide it), or when a glob has
+ * glob characters before its last `/` (bash would follow directory links).
+ * Throws `ToolError` when the directory a glob lists, or a match, is outside
+ * the workspace (symbolic links resolved; the outside path is never named),
+ * is not a regular file (or a directory,
  * where the reader lists directories), names a directory the host's Read rules
  * refuse to list, or there are too many matches.
  */
@@ -291,7 +424,19 @@ export async function expandBashGlobs(
   const lists: string[][] = [];
   const entries: BashExpandedEntry[] = [];
   for (const glob of plan.globs) {
+    // bash must not open a directory outside the workspace: the directory it lists is checked first.
+    const dir = literalDirectory(glob.raw);
+    if (dir === undefined) return undefined;
+    const dirAbs = path.resolve(cwd, dir);
+    const realDir = await realDirectory(dirAbs);
+    if (realDir === null) return undefined;
+    if (jail.rootOf(realDir) === undefined) {
+      throw new ToolError('outside-workspace', `${glob.raw}: ${JSON.stringify(dir)} leads outside the workspace`);
+    }
     const matches = await bashGlob(glob.raw, cwd, shell);
+    if (await realDirectory(dirAbs) !== realDir) {
+      throw new ToolError('stale', `${glob.raw}: ${JSON.stringify(dir)} changed while it was being expanded`);
+    }
     if (matches === undefined || matches.length === 0) return undefined;
     if (entries.length + matches.length > MAX_EXPANDED_ENTRIES) {
       throw new ToolError('invalid-args', `the globs of this command match more than ${MAX_EXPANDED_ENTRIES} entries; narrow them or use glob()`);
@@ -309,6 +454,8 @@ export async function expandBashGlobs(
         throw new ToolError('not-found', `${shown} (matched by ${glob.raw}) cannot be read: ${errnoCode(err) ?? String(err)}`);
       }
       const real = await jail.resolve(abs).catch((err: unknown) => {
+        // Never the target's path: it names what is outside the workspace.
+        if (err instanceof ToolError && err.code === 'outside-workspace') throw new ToolError(err.code, `${shown} (matched by ${glob.raw}) leads outside the workspace`);
         if (err instanceof ToolError) throw new ToolError(err.code, `${shown} (matched by ${glob.raw}): ${err.message}`);
         throw err;
       });
