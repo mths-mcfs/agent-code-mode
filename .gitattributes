@@ -1,0 +1,6 @@
+# Bench task fixtures and recorded parser inputs are read byte for byte (hidden tests compare trap files
+# exactly, the verifier tests edit exact snippets): keep them LF on every OS, whatever core.autocrlf says.
+bench/tasks/** text eol=lf
+bench/parser-fixtures/** text eol=lf
+# Shell scripts (test hook fixtures, e2e scripts) run under bash, which rejects CRLF.
+*.sh text eol=lf

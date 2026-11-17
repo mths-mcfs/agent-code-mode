@@ -199,6 +199,7 @@ describe('hidden-test tasks', () => {
     expect(symptom.details.join('\n')).toMatch(/FAIL hidden tests pass/);
   });
 
+  // Six workspaces and six hidden-test runs in one test: past the 20 s default on the slower Windows file system.
   it('T9-T11 and T13-T15 never leave hidden tests in the workspace', async () => {
     for (const id of ['T9', 'T10', 'T11', 'T13', 'T14', 'T15'] as const) {
       const ws = await workspace(id);
@@ -206,7 +207,7 @@ describe('hidden-test tasks', () => {
       expect(await readdir(ws.dir)).not.toContain('hidden-tests');
       for (const f of ws.initial.keys()) expect(f.startsWith('hidden-tests/')).toBe(false);
     }
-  });
+  }, 120_000);
 
   it('T10 fails when one caller keeps the positional form or the public API drops it', async () => {
     const ws = await workspace('T10');
