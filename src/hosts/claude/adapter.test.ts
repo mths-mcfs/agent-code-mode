@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { Dispatcher } from '../../core/dispatcher.js';
 import type { Decision, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
 import { MemoryToolRuntime, makeContext } from '../../testing/index.js';
-import { ClaudeHostAdapter, type ClaudePolicy, RUNTIME_FILES_HINT, protectedPathHit } from './adapter.js';
+import { ClaudeHostAdapter, type ClaudePolicy, RUNTIME_FILES_HINT, protectedPathHit, realpathOfPosix } from './adapter.js';
 import { findMatchingPattern } from '../../core/paths.js';
 
 const posix = process.platform !== 'win32';
@@ -704,6 +704,20 @@ describe('protected paths on Windows (win32 semantics, on any OS)', () => {
     }
     expect(protectedPathHit('/c/Users/a/proj/src/x.ts', patterns, 'win32')).toBeUndefined();
     expect(protectedPathHit('/d/Users/a/state/x', patterns, 'win32')).toBeUndefined();
+  });
+
+  it('resolves a rule anchor written through a link by its native path, giving it back in POSIX form', async () => {
+    const seen: string[] = [];
+    const fakeRealpath = async (p: string): Promise<string> => {
+      seen.push(p);
+      if (p === 'C:\\Users\\a\\alias') return 'D:\\real\\secrets';
+      throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
+    };
+    // A rule anchor `/c/Users/a/alias` (POSIX form): Windows only resolves `C:\Users\a\alias`.
+    expect(await realpathOfPosix('/c/Users/a/alias', 'win32', fakeRealpath)).toBe('/d/real/secrets');
+    expect(seen).toEqual(['C:\\Users\\a\\alias']);
+    // POSIX: unchanged.
+    expect(await realpathOfPosix('/tmp/x', 'linux', async (p) => `${p}-real`)).toBe('/tmp/x-real');
   });
 });
 
