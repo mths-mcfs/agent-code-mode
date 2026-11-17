@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BashAnalyzer } from './bash.js';
-import { compilePathSpec, matchesBashSpec, matchesPath, parseRule, splitRule, splitToolList, toPosixPath } from './rules.js';
+import { compilePathSpec, matchesBashSpec, matchesPath, parseRule, splitRule, splitToolList, toNativePath, toPosixPath } from './rules.js';
 
 describe('matchesBashSpec (documented wildcard table)', () => {
   it.each([
@@ -113,6 +113,10 @@ describe('path rules', () => {
   it('normalizes Windows paths to POSIX form', () => {
     expect(toPosixPath('C:\\Users\\a\\.env', 'win32')).toBe('/c/Users/a/.env');
     expect(toPosixPath('/tmp/back\\slash', 'linux')).toBe('/tmp/back\\slash');
+    expect(toNativePath('/c/Users/a/.env', 'win32')).toBe('C:\\Users\\a\\.env');
+    expect(toNativePath('/c', 'win32')).toBe('C:\\');
+    expect(toNativePath(toPosixPath('D:\\w\\x', 'win32'), 'win32')).toBe('D:\\w\\x');
+    expect(toNativePath('/tmp/x', 'linux')).toBe('/tmp/x');
     const m = compilePathSpec('//c/**/.env', 'deny', anchors);
     // Native Windows paths are rewritten only on Windows; on POSIX a backslash is part of the name.
     expect(m.type === 'path' && matchesPath('C:\\Users\\a\\.env', m.patterns, true)).toBe(process.platform === 'win32');
