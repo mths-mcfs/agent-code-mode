@@ -325,7 +325,7 @@ describe('Bash files outside the working directories (measured on the host)', ()
     const prefix = await setup({ user: { permissions: { allow: ['mkdir', 'touch', 'echo', 'cat', 'cp', 'mv', 'rm', 'sed'].map((c) => `Bash(${c}:*)`) } } });
     const none = await setup({});
     for (const s of [prefix, none]) {
-      for (const command of outsideCommands(path.join(s.base, 'elsewhere'))) expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+      for (const command of outsideCommands(shellPath(path.join(s.base, 'elsewhere')))) expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
     }
     expect(check(prefix, bash('touch inside.txt', prefix.project))).toBe('allow');
     expect(check(none, bash('touch inside.txt', none.project))).toBe('ask');
