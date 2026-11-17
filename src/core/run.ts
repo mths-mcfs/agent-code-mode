@@ -265,14 +265,17 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     await active.stop(stopReason ?? 'finished', graceMs);
 
     const error = runError(stopReason, outcome, denied, timeoutMs);
-    const warnings = [...active.warnings];
     let rolledBack: RollbackReport | undefined;
+    const rollbackWarnings: string[] = [];
     if (tx && error) {
-      rolledBack = await rollbackBounded(tx, rollbackMs, warnings);
+      rolledBack = await rollbackBounded(tx, rollbackMs, rollbackWarnings);
       if (active.bashCommits > 0) {
-        warnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
+        rollbackWarnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
       }
     }
+    // Last look at the protected paths (after the last bash call and any rollback), before the response is built.
+    await active.finishRun();
+    const warnings = [...active.warnings, ...rollbackWarnings];
 
     const base = {
       logs: logs.finish(),
@@ -286,8 +289,10 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     return { ok: true, result: outcome.ok ? (outcome.value ?? null) : null, ...base };
   } catch (err) {
     if (dispatcher) await dispatcher.stop(stopReason ?? 'finished', graceMs);
-    const warnings = dispatcher ? [...dispatcher.warnings] : [];
-    const rolledBack = tx ? await rollbackBounded(tx, rollbackMs, warnings) : undefined;
+    const rollbackWarnings: string[] = [];
+    const rolledBack = tx ? await rollbackBounded(tx, rollbackMs, rollbackWarnings) : undefined;
+    if (dispatcher) await dispatcher.finishRun();
+    const warnings = [...(dispatcher ? dispatcher.warnings : []), ...rollbackWarnings];
     return {
       ok: false,
       error: { kind: 'internal', name: 'InternalError', message: errorMessage(err) },
