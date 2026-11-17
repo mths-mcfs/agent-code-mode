@@ -54,7 +54,7 @@ describe('paired schedule', () => {
       expect(bs).toHaveLength(c.runs * c.hosts.length * c.tasks.length);
       for (const b of bs) {
         const host = b[0]?.host ?? 'claude';
-        const expected = host === 'claude' ? (c.baseline ? ['A', 'B', 'B0', 'C'] : ['A', 'B', 'C']) : c.baseline ? ['A', 'B', 'C', 'C0'] : ['A', 'B', 'C'];
+        const expected = host === 'claude' ? (c.baseline ? ['A', 'B', 'B0', 'C', 'D'] : ['A', 'B', 'C', 'D']) : c.baseline ? ['A', 'B', 'C', 'C0'] : ['A', 'B', 'C'];
         expect(b.map((p) => p.arm).sort()).toEqual(expected);
         expect(b.map((p) => p.position)).toEqual(expected.map((_a, i) => i));
       }
@@ -101,7 +101,7 @@ describe('paired schedule', () => {
   it('warms every host x arm of the plan once, on the warmup task', () => {
     const plan = planRuns(['claude', 'codex'], ['T5', 'T9'], undefined, 3, 7, true);
     const warm = planWarmup(plan, 7);
-    expect(warm.map((p) => `${p.host}${p.arm}`).sort()).toEqual(['claudeA', 'claudeB', 'claudeB0', 'claudeC', 'codexA', 'codexB', 'codexC', 'codexC0']);
+    expect(warm.map((p) => `${p.host}${p.arm}`).sort()).toEqual(['claudeA', 'claudeB', 'claudeB0', 'claudeC', 'claudeD', 'codexA', 'codexB', 'codexC', 'codexC0']);
     expect(warm.every((p) => p.task === WARMUP_TASK && p.warmup === true)).toBe(true);
   });
 });
@@ -209,15 +209,15 @@ describe('dry run', () => {
       process.stdout.write = orig;
     }
     const text = writes.join('');
-    expect(text.match(/^(claude|codex) T\d+ \w+ r1: pass, valid/gm)).toHaveLength(12);
+    expect(text.match(/^(claude|codex) T\d+ \w+ r1: pass, valid/gm)).toHaveLength(14);
     // One warmup per host x arm before the matrix; none on the resume, which has nothing left to run.
-    expect(text.match(/^warmup (claude|codex) T1 \w+ r1: pass, valid/gm)).toHaveLength(6);
-    expect(text.match(/^skip /gm)).toHaveLength(12);
+    expect(text.match(/^warmup (claude|codex) T1 \w+ r1: pass, valid/gm)).toHaveLength(7);
+    expect(text.match(/^skip /gm)).toHaveLength(14);
     const summary = JSON.parse(await readFile(path.join(out, '2026-01-02', 'summary.json'), 'utf8'));
     expect(summary.dryRun).toBe(true);
-    expect(summary.groups).toHaveLength(12);
-    expect(summary.warmup.runs).toBe(6);
-    expect(text).toMatch(/Warmup: 6 run\(s\)/);
+    expect(summary.groups).toHaveLength(14);
+    expect(summary.warmup.runs).toBe(7);
+    expect(text).toMatch(/Warmup: 7 run\(s\)/);
     // No copy of an auth file may survive a run.
     const left = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => f.endsWith('auth.json'));
     expect(left).toEqual([]);
@@ -241,7 +241,7 @@ describe('baseline build arm', () => {
       const summary = JSON.parse(await readFile(path.join(out, '2026-01-04', 'summary.json'), 'utf8'));
       const builds = new Set(summary.groups.filter((g: { arm: string }) => g.arm !== 'A').map((g: { arm: string; config: { acmBuild: string } }) => `${g.arm}:${g.config.acmBuild}`));
       expect([...builds].sort()).toEqual(expect.arrayContaining(['B:checkout', 'C:checkout', expect.stringMatching(/^B0:dist:[0-9a-f]{12}$/)]));
-      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', 'B-B0', 'B0-A', 'C-A']);
+      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', 'B-B0', 'B0-A', 'C-A', 'D-A']);
       // Canned transcripts: B and B0 are identical, so the cost difference is exactly 0 and the interval says so.
       const bb0 = summary.comparisons.find((c: { arm: string; reference: string }) => c.arm === 'B' && c.reference === 'B0');
       expect(bb0.costUsd).toMatchObject({ estimate: 0, lo: 0, hi: 0, crossesZero: true, tasks: 3 });
@@ -317,7 +317,7 @@ describe('workspace isolation from the checkout', () => {
     try {
       expect((await quiet(() => main(['--dry-run', '--tasks', 'T9,T10', '--runs', '1', '--seed', '2', '--work-dir', work, '--out', out, '--date', '2026-01-06']))).value).toBe(0);
       const wss = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => path.basename(f) === 'ws').map((f) => path.join(work, 'runs', f));
-      expect(wss.length).toBe(2 * 3 + 2 * 3 + 6); // matrix + warmups
+      expect(wss.length).toBe(2 * 4 + 2 * 3 + 7); // matrix (Claude A-D, Codex A-C) + warmups
       for (const ws of wss) {
         expect(insideRepo(ws)).toBe(false);
         for (const dir of ancestors(ws)) expect(existsSync(path.join(dir, 'bench', 'tasks')), dir).toBe(false);

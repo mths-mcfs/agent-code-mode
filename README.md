@@ -120,7 +120,7 @@ Output is capped below the hosts' MCP limits (about 30,000 characters, less for 
 
 ## Benchmark
 
-`bench/` runs the same eight tasks on one fixture repository through each host with different tool surfaces, three runs per arm, and checks every result with a verifier. Claude Code: A = native tools, B = agent-code-mode only. Codex: A = native tools (forced through a custom model catalog), B = Codex's own code mode (the default in Codex 0.169), C = agent-code-mode only.
+`bench/` runs the same eight tasks on one fixture repository through each host with different tool surfaces, three runs per arm, and checks every result with a verifier. Claude Code: A = native tools, B = agent-code-mode only, C = native tools plus agent-code-mode, D = Claude Code's own experimental Code Mode (it exists only in an interactive session, so D runs in tmux and its cost is computed from the session transcript's usage with `bench/pricing.json`; needs `tmux`). Codex: A = native tools (forced through a custom model catalog), B = Codex's own code mode (the default in Codex 0.169), C = agent-code-mode only.
 
 Run of 2026-11-16 on this branch at 35260ce: Claude Code 2.1.325 with `claude-sonnet-5-5`, Codex CLI 0.169.0 with `gpt-6.1-terra`, both at medium effort, seed 20261115. 120 runs, all valid, all passing; US$ 2.85 in total. Raw results, transcripts and the full table: [`bench/results/2026-11-16/`](bench/results/2026-11-16/) ([`summary.md`](bench/results/2026-11-16/summary.md)).
 
