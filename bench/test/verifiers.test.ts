@@ -9,7 +9,7 @@ import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
-// About 50 workspaces, each a git repo of 340-560 entries (T12 adds 80 log files): some 17k. Deleting them takes
+// About 85 workspaces, each a git repo of 340-560 entries (T12 adds 80 log files): some 17k. Deleting them takes
 // longer than the 10 s hook default on Windows, where every delete is scanned and a file still held
 // open fails with EBUSY for a moment, so the cleanup gets its own timeout and retries.
 afterAll(async () => {
@@ -199,8 +199,8 @@ describe('hidden-test tasks', () => {
     expect(symptom.details.join('\n')).toMatch(/FAIL hidden tests pass/);
   });
 
-  it('T9-T11 never leave hidden tests in the workspace', async () => {
-    for (const id of ['T9', 'T10', 'T11'] as const) {
+  it('T9-T11 and T13-T15 never leave hidden tests in the workspace', async () => {
+    for (const id of ['T9', 'T10', 'T11', 'T13', 'T14', 'T15'] as const) {
       const ws = await workspace(id);
       await TASKS[id].verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
       expect(await readdir(ws.dir)).not.toContain('hidden-tests');
@@ -245,6 +245,183 @@ describe('hidden-test tasks', () => {
     const result = await TASKS.T11.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.details[0]).toMatch(/^ok node --test passes/);
     expect(result.details.join("\n")).toMatch(/FAIL hidden tests pass \(pass \d+, fail \d+: [^)]*exact for the largest safe totals/);
+  });
+
+  /** Replaces `from` (which must be there, once) with `to` in a workspace file. */
+  async function edit(dir: string, rel: string, from: string, to: string): Promise<void> {
+    const file = path.join(dir, ...rel.split('/'));
+    const text = await readFile(file, 'utf8');
+    expect(text.split(from).length, `${rel} has ${JSON.stringify(from)} once`).toBe(2);
+    await writeFile(file, text.replace(from, () => to));
+  }
+
+  // The two planted T13 bugs as one-step fixes, and the partial fixes an agent is likely to try.
+  const T13_SLOT_FIX = ['src/jobs/retry.js', '  release();\n', ''] as const;
+  const T13_KEY_FIX = ['src/jobs/queue.js', 'job.reject = reject;', 'job.reject = (err) => { keys.release(key); reject(err); };'] as const;
+  const T13_PARTIAL: readonly { readonly name: string; readonly edits: readonly (readonly [string, string, string])[]; readonly caught: RegExp }[] = [
+    { name: 'only the slot is fixed', edits: [T13_SLOT_FIX], caught: /a key that gave up is free again/ },
+    { name: 'only the key is fixed', edits: [T13_KEY_FIX], caught: /a job in backoff frees exactly one slot.*the limit holds for jobs added after a retry/ },
+    {
+      name: 'the slot count is clamped instead of released once',
+      edits: [T13_KEY_FIX, ['src/jobs/slots.js', 'else active -= 1;', 'else active = Math.max(0, active - 1);']],
+      caught: /a job in backoff frees exactly one slot/,
+    },
+    {
+      name: 'the key is freed on every failed attempt, not when the job settles',
+      edits: [T13_SLOT_FIX, ['src/jobs/queue.js', '    } catch (err) {\n', '    } catch (err) {\n      keys.release(job.key);\n']],
+      caught: /a pending key is de-duplicated while waiting, running and in backoff/,
+    },
+    {
+      name: 'the key is freed only after the handlers of the promise ran',
+      edits: [T13_SLOT_FIX, ['src/jobs/queue.js', '    keys.hold(key, promise);\n', '    keys.hold(key, promise);\n    promise.catch(() => {}).finally(() => keys.release(key));\n']],
+      caught: /the key is already free inside the handlers of the promise/,
+    },
+  ];
+
+  it('T13 accepts the two one-step fixes together', async () => {
+    const ws = await workspace('T13');
+    for (const [rel, from, to] of [T13_SLOT_FIX, T13_KEY_FIX]) await edit(ws.dir, rel, from, to);
+    const result = await TASKS.T13.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.details.filter((d) => d.startsWith('FAIL'))).toEqual([]);
+  });
+
+  it.each(T13_PARTIAL)('T13 rejects a partial fix: $name', async ({ edits, caught }) => {
+    const ws = await workspace('T13');
+    for (const [rel, from, to] of edits) await edit(ws.dir, rel, from, to);
+    const result = await TASKS.T13.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.pass).toBe(false);
+    expect(result.details[0]).toMatch(/^ok node --test passes/);
+    const hidden = result.details.find((d) => d.startsWith('FAIL hidden tests pass')) ?? '';
+    expect(hidden).toMatch(caught);
+  });
+
+  // T14: the reference parser with one chunk-boundary or end-of-input rule dropped.
+  const T14_LOOP = '    for (let i = 0; i < chunk.length; i += 1) {\n';
+  const T14_PARTIAL: readonly { readonly name: string; readonly from: string; readonly to: string; readonly caught: RegExp }[] = [
+    {
+      name: 'a carriage return at the end of a chunk ends the record',
+      from: T14_LOOP,
+      to: `    if (state === CR && chunk.length > 0) endRecord();\n${T14_LOOP}`,
+      caught: /rule 4: push returns the records completed by the chunk; rule 1: a chunk may end anywhere.*fuzz: built records/,
+    },
+    {
+      name: 'a quote at the end of a chunk always closes the field',
+      from: T14_LOOP,
+      to: `    if (state === QUOTE && chunk[0] === '"') fail('unexpected character after a closing quote');\n${T14_LOOP}`,
+      caught: /rule 1: a chunk may end anywhere.*fuzz: built records/,
+    },
+    { name: 'a final newline creates an empty record', from: 'if (state !== RECORD_START) {', to: '{', caught: /rule 5: end returns the unterminated last record/ },
+    { name: 'a lone carriage return at the end of the input is accepted', from: "    if (state === CR) fail('carriage return without a line feed');\n", to: '', caught: /rule 6: invalid input throws CsvError/ },
+  ];
+
+  it.each(T14_PARTIAL)('T14 rejects a parser where $name', async ({ from, to, caught }) => {
+    const ws = await workspace('T14');
+    await TASKS.T14.solution(ws.dir, ws.fixture.facts);
+    await edit(ws.dir, 'src/lib/csv.js', from, to);
+    const result = await TASKS.T14.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.pass).toBe(false);
+    const hidden = result.details.find((d) => d.startsWith('FAIL hidden tests pass')) ?? '';
+    expect(hidden).toMatch(caught);
+  });
+
+  /** A T15 workspace with the reference solution applied, to break in one place. */
+  async function solvedT15() {
+    const ws = await workspace('T15');
+    await TASKS.T15.solution(ws.dir, ws.fixture.facts);
+    const verify = () => TASKS.T15.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    const restore = async (rel: string): Promise<void> => {
+      await writeFile(path.join(ws.dir, ...rel.split('/')), ws.initial.get(rel) ?? '');
+    };
+    return { ws, verify, restore };
+  }
+  const hiddenLine = (details: readonly string[]): string => details.find((d) => d.startsWith('FAIL hidden tests pass')) ?? '';
+
+  // One caller per import shape left on the old API (with the old module kept, so that it still runs).
+  it.each([
+    { shape: 'named import', file: 'src/services/catalog/products.js' },
+    { shape: 'aliased import', file: 'src/services/users/search.js' },
+    { shape: 'namespace import', file: 'src/services/orders/cancel.js' },
+    { shape: 'aliased legacyJson', file: 'src/services/shipping/zones.js' },
+  ])('T15 rejects a migration that missed the $shape', async ({ file }) => {
+    const { verify, restore } = await solvedT15();
+    await restore(file);
+    await restore('src/lib/legacy-http.js');
+    const result = await verify();
+    expect(result.pass).toBe(false);
+    expect(result.details[0]).toMatch(/^ok node --test passes/);
+    expect(hiddenLine(result.details)).toMatch(/static: src\/lib\/legacy-http\.js is deleted; static: no file imports legacy-http; static: every former caller imports/);
+  });
+
+  // The reference solution with one mapping rule of the MIGRATION notes dropped in one caller.
+  const T15_WRONG_RULE: readonly { readonly name: string; readonly file: string; readonly from: string; readonly to: string }[] = [
+    { name: 'a timeout is left in seconds', file: 'catalog/search.js', from: 'timeoutMs: 3000', to: 'timeoutMs: 3' },
+    { name: 'a method keeps its lower case', file: 'billing/dunning.js', from: 'method: String(method).toUpperCase(),', to: 'method,' },
+    { name: 'a JSON body goes without its content-type', file: 'notifications/email.js', from: "    headers: { 'content-type': 'application/json' },\n", to: '' },
+    { name: 'a JSON body is sent as a string', file: 'users/invites.js', from: 'body: { email, role },', to: 'body: JSON.stringify({ email, role }),' },
+    { name: 'the query is dropped', file: 'shipping/tracking.js', from: ", query: { events: 'last' }", to: '' },
+    { name: 'an undefined timeout is multiplied', file: 'notifications/webhooks.js', from: 'if (hook.timeoutSeconds !== undefined) options.timeoutMs', to: 'options.timeoutMs' },
+    { name: 'an error status the caller handled now throws', file: 'shipping/pickups.js', from: 'if (err instanceof HttpError) return false;', to: '' },
+    { name: 'every error is swallowed, not only HttpError', file: 'users/preferences.js', from: 'if (err instanceof HttpError) return false;\n    throw err;', to: 'return false;' },
+    { name: 'the result still reads data', file: 'orders/export.js', from: 'return res.body;', to: 'return res.data;' },
+  ];
+
+  it.each(T15_WRONG_RULE)('T15 rejects a migration where $name', async ({ file, from, to }) => {
+    const { ws, verify } = await solvedT15();
+    await edit(ws.dir, `src/services/${file}`, from, to);
+    const result = await verify();
+    expect(result.pass).toBe(false);
+    expect(result.details[0]).toMatch(/^ok node --test passes/);
+    expect(hiddenLine(result.details)).toBe(`FAIL hidden tests pass (pass 40, fail 1: behaviour: ${file})`);
+  });
+
+  it('T15 rejects a shim: the old helper kept as a wrapper over request', async () => {
+    const { ws, verify } = await solvedT15();
+    await writeFile(
+      path.join(ws.dir, 'src', 'lib', 'http-compat.js'),
+      "import { request } from './http.js';\nexport const legacyFetch = async (url, opts = {}) => {\n  const res = await request({ url, query: opts.qs });\n  return { status: res.status, data: res.body };\n};\n",
+    );
+    await writeFile(
+      path.join(ws.dir, 'src', 'services', 'catalog', 'products.js'),
+      (ws.initial.get('src/services/catalog/products.js') ?? '').replace('../../lib/legacy-http.js', '../../lib/http-compat.js'),
+    );
+    const result = await verify();
+    expect(result.pass).toBe(false);
+    expect(result.details[0]).toMatch(/^ok node --test passes/);
+    expect(hiddenLine(result.details)).toMatch(/static: every former caller imports src\/lib\/http\.js and calls request itself; static: the old helpers are not recreated/);
+    // The same wrapper under another name is still caught: its caller does not call request itself.
+    await edit(ws.dir, 'src/lib/http-compat.js', 'export const legacyFetch =', 'export const fetchCompat =');
+    await edit(ws.dir, 'src/services/catalog/products.js', 'import { legacyFetch }', 'import { fetchCompat as legacyFetch }');
+    await edit(ws.dir, 'src/services/catalog/products.js', "import { API } from '../config.js';", "import { API } from '../config.js';\nimport { request } from '../../lib/http.js';");
+    const renamed = await verify();
+    expect(hiddenLine(renamed.details)).toMatch(/static: the old helpers are not recreated/);
+  });
+
+  it('T15 rejects a migration that also rewrote a look-alike, and any deletion but the old module', async () => {
+    const trap = await solvedT15();
+    await edit(trap.ws.dir, 'src/services/billing/tax-rules.js', 'legacyFetch(url)', 'request(options)');
+    const rewritten = await trap.verify();
+    expect(rewritten.pass).toBe(false);
+    expect(rewritten.details.filter((d) => d.startsWith('FAIL'))).toEqual(['FAIL files that are not callers of legacy-http changed: src/services/billing/tax-rules.js']);
+
+    const vendor = await solvedT15();
+    await edit(vendor.ws.dir, 'src/services/users/session-cache.js', "import * as cache from '../../vendor/cache/legacy.js';", "import * as cache from '../../vendor/cache/legacy.js'; // not HTTP");
+    expect((await vendor.verify()).details.join('\n')).toMatch(/FAIL files that are not callers of legacy-http changed: src\/services\/users\/session-cache\.js/);
+
+    const deleted = await solvedT15();
+    await rm(path.join(deleted.ws.dir, 'src', 'services', 'config.js'));
+    await rm(path.join(deleted.ws.dir, 'src', 'lib', 'dates.js'));
+    expect((await deleted.verify()).details.join('\n')).toMatch(/FAIL changed outside the task: deleted src\/lib\/dates\.js, deleted src\/services\/config\.js/);
+
+    const http = await solvedT15();
+    await edit(http.ws.dir, 'src/lib/http.js', "const DEFAULT_TIMEOUT_MS = 30000;", "const DEFAULT_TIMEOUT_MS = 30_000;");
+    expect((await http.verify()).details.join('\n')).toMatch(/FAIL changed outside the task: modified src\/lib\/http\.js/);
+  });
+
+  it('a deletion stays out of scope for the tasks that allow none, inside their own directory too', async () => {
+    const ws = await workspace('T13');
+    await rm(path.join(ws.dir, 'src', 'jobs', 'clock.js'));
+    const result = await TASKS.T13.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.details.join('\n')).toMatch(/FAIL changed outside the task: deleted src\/jobs\/clock\.js/);
   });
 
   it('T12 checks both the request id and the caller, and is deterministic for the fixture seed', async () => {

@@ -11,7 +11,7 @@ import { StaticHostAdapter } from '../testing/static-host-adapter.js';
 import { ClaudeContextProvider } from '../hosts/claude/context.js';
 import { CodexContextProvider } from '../hosts/codex/context.js';
 import { GenericContextProvider } from './context.js';
-import { createMcpServer } from './mcp.js';
+import { createMcpServer, HYBRID_GUIDANCE, RUN_DESCRIPTION } from './mcp.js';
 import type { Runtime } from './runtime.js';
 
 const root = os.tmpdir();
@@ -20,7 +20,7 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic' } = {}) {
+async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; hybrid?: boolean } = {}) {
   const seen: SessionContext[] = [];
   const tools = new MemoryToolRuntime({ root, files: { 'notes.txt': 'hello\n' } });
   const adapter = new StaticHostAdapter({
@@ -46,6 +46,7 @@ async function connect(opts: { env?: Record<string, string>; host?: 'claude' | '
     stateDir: `${root}/acm-test-state`,
     createRuntime: runtime,
     ...(opts.host ? { host: opts.host } : {}),
+    ...(opts.hybrid === undefined ? {} : { hybrid: opts.hybrid }),
   });
   const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
   client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(root).href }] }));
@@ -67,6 +68,22 @@ function textOf(result: unknown): string {
 }
 
 describe('MCP server', () => {
+  it('appends the hybrid guidance to the run description only with the hybrid option', async () => {
+    const plain = (await (await connect()).client.listTools()).tools;
+    const off = (await (await connect({ hybrid: false })).client.listTools()).tools;
+    const hybrid = (await (await connect({ hybrid: true })).client.listTools()).tools;
+    expect(plain[0]?.description).toBe(RUN_DESCRIPTION);
+    expect(off).toEqual(plain);
+    expect(plain[0]?.description).not.toContain('Native file and shell tools');
+    expect(hybrid).toHaveLength(1);
+    expect(hybrid[0]?.description).toBe(`${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}`);
+    expect(hybrid[0]?.description?.split('\n').at(-1)).toBe(
+      'Native file and shell tools are also available: use them for a single read, edit or command; use run when a step needs 3+ file/shell calls, a loop over files, or filtering a large output.',
+    );
+    // Only the description differs.
+    expect({ ...hybrid[0], description: '' }).toEqual({ ...plain[0], description: '' });
+  });
+
   it('lists the run tool with annotations and _meta, and documents the bindings in its description (no server instructions)', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();

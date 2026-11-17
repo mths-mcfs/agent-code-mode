@@ -21,7 +21,7 @@ import { TASKS } from './tasks/index.ts';
 import { TASK_IDS, type TaskId } from './tasks/types.ts';
 
 /**
- * Benchmark runner: `npm run bench -- --host claude --arms A,B --tasks T1,T5 --runs 3`.
+ * Benchmark runner: `npm run bench -- --host claude --arms A,B,C --tasks T1,T5 --runs 3`.
  * Resumable (a run whose record.json exists is skipped), `--dry-run` uses reference solutions and
  * canned transcripts instead of model calls. `--acm-ref <commit>` or `--acm-dist <dir>` adds a baseline
  * arm (Claude B0, Codex C0) that runs another agent-code-mode build in the same matrix.
