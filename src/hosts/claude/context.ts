@@ -43,21 +43,23 @@ export function contextDir(stateDir: string): string {
 
 /**
  * What the protected-path watch treats as routine in the context directory:
- * the companion hook creating it (mode 0700), its temporary files, a new
- * record that is well formed (`<tool_use_id>.json`, mode 0600, valid content
+ * the companion hook creating it (mode 0700 outside Windows), its temporary files, a new
+ * record that is well formed (`<tool_use_id>.json`, mode 0600 outside Windows, valid content
  * naming the same id), and records going away (consumed or pruned; a missing
  * record only makes the server fall back to conservative defaults). A record
  * that already existed and changed, or a malformed new file, is reported: a
  * new record forged by bash would need the id of a tool call the host has not
  * issued yet, which it cannot know.
  */
-export function contextRecordFilter(ctxDir: string): (change: WatchedChange) => Promise<boolean> {
+export function contextRecordFilter(ctxDir: string, platform: NodeJS.Platform = process.platform): (change: WatchedChange) => Promise<boolean> {
+  // Windows has no POSIX modes (stat reports 0666 or, read-only, 0444): the hook's 0700/0600 can be checked only elsewhere.
+  const modeIs = (mode: number, expected: number): boolean => platform === 'win32' || (mode & 0o777) === expected;
   return async ({ path: p, before, after }) => {
-    if (p === ctxDir) return before === undefined && after?.type === 'dir' && (after.mode & 0o777) === 0o700;
+    if (p === ctxDir) return before === undefined && after?.type === 'dir' && modeIs(after.mode, 0o700);
     if (path.dirname(p) !== ctxDir) return false;
     const name = path.basename(p);
     if (after === undefined) return before?.type === 'file';
-    if (before !== undefined || after.type !== 'file' || (after.mode & 0o777) !== 0o600) return false;
+    if (before !== undefined || after.type !== 'file' || !modeIs(after.mode, 0o600)) return false;
     if (/^\.[^/]+\.tmp$/.test(name)) return true;
     const id = /^(.+)\.json$/.exec(name)?.[1];
     if (id === undefined || id.startsWith('.')) return false;
