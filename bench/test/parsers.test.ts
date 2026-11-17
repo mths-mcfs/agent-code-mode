@@ -16,8 +16,11 @@ describe('Claude transcript parser', () => {
     expect(p.turns).toBe(2);
     expect(p.requests).toBe(2);
     expect(p.hostDurationMs).toBe(2414);
-    expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0 });
+    // Cache writes split by TTL: Claude Code writes 1-hour entries.
+    expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0, cacheCreation5m: 0, cacheCreation1h: 2187 });
     expect(p.hostCostUsd).toBeCloseTo(0.0116847, 10);
+    // The usage priced with pricing.json (TTL split) is the host-reported cost.
+    expect(costFromUsage(loadPricing(), 'claude-sonnet-5-5', p.usage ?? { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, reasoning: null })).toBeCloseTo(0.0116847, 10);
     expect(p.model).toBe('claude-sonnet-5-5');
     expect(p.finalAnswer).toMatch(/ANSWER: 7$/);
     expect(p.toolCalls).toEqual({ native: 1, run: 0, codeMode: 0, other: 0, byName: { Read: 1 } });

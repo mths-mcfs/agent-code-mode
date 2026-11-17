@@ -1,7 +1,7 @@
 {
   "currency": "USD",
   "unit": "per 1M tokens",
-  "note": "Codex cost is computed from these prices: uncached input at `input`, cached input at `cachedInput`, cache writes at `input` (no separate OpenAI price), output (reasoning included) at `output`; prices for prompts up to 272K tokens. Claude cost is the host-reported `total_cost_usd`; it equals these prices with cache writes split by TTL: Claude Code writes its prompt cache with the 1-hour TTL (`cacheWrite1h`, 2x input), not the 5-minute one (`cacheWrite5m`, 1.25x input).",
+  "note": "Codex cost is computed from these prices: uncached input at `input`, cached input at `cachedInput`, cache writes at `input` (no separate OpenAI price), output (reasoning included) at `output`; prices for prompts up to 272K tokens. Claude `-p` cost is the host-reported `total_cost_usd`; it equals these prices with cache writes split by TTL: Claude Code writes its prompt cache with the 1-hour TTL (`cacheWrite1h`, 2x input), not the 5-minute one (`cacheWrite5m`, 1.25x input). Claude interactive runs (arm D and the interactive pilot) report no cost: it is computed from the transcript's per-request usage with the same prices and the same TTL split.",
   "models": {
     "gpt-6.1-terra": {
       "input": 1.0,
@@ -55,6 +55,15 @@
       "date": "2026-11-15",
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
       "cacheWrite1h": 0.2
+    },
+    "claude-opus-5-5": {
+      "input": 4.0,
+      "cachedInput": 0.2,
+      "cacheWrite5m": 5.0,
+      "cacheWrite1h": 8.0,
+      "output": 20.0,
+      "date": "2026-11-17",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
     }
   }
 }

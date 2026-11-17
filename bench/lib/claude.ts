@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
+import type { ArmId, ParsedRun, ToolCalls, Usage } from './record.ts';
 import { runInnerCalls } from './run-result.ts';
 
 /** Native file and shell tools of Claude Code. Using one of them in the strict agent-code-mode arm is a fallback. */
@@ -50,11 +50,12 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
 }
 
 /**
- * The `--mcp-config` content for an arm: no servers for A, the agent-code-mode server for B and, started
+ * The `--mcp-config` content for an arm: no servers for A and D, the agent-code-mode server for B and, started
  * with `--hybrid` (the `run` description then says when to batch and when to use a native tool), for C.
  */
 export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
-  if (arm === 'A') return { mcpServers: {} };
+  // A and D (Claude Code Mode) run no MCP server.
+  if (arm === 'A' || arm === 'D') return { mcpServers: {} };
   const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : [])];
   return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
 }
@@ -64,8 +65,27 @@ const UsageEvent = z.object({
   output_tokens: z.number(),
   cache_creation_input_tokens: z.number().optional(),
   cache_read_input_tokens: z.number().optional(),
-  output_tokens_details: z.object({ thinking_tokens: z.number().optional() }).passthrough().optional(),
+  output_tokens_details: z.object({ thinking_tokens: z.number().optional() }).passthrough().nullable().optional(),
+  /** Cache writes by TTL (Claude Code writes 1-hour entries). */
+  cache_creation: z.object({ ephemeral_5m_input_tokens: z.number().nonnegative(), ephemeral_1h_input_tokens: z.number().nonnegative() }).passthrough().nullable().optional(),
 }).passthrough();
+export type ClaudeUsageEvent = z.infer<typeof UsageEvent>;
+
+/** Usage of one request (or a `-p` result) in the bench's form, with the cache writes split by TTL when reported. */
+export function claudeUsage(u: ClaudeUsageEvent): Usage {
+  const usage: Usage = {
+    input: u.input_tokens,
+    output: u.output_tokens,
+    cacheCreation: u.cache_creation_input_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    reasoning: u.output_tokens_details?.thinking_tokens ?? null,
+  };
+  if (u.cache_creation != null) {
+    usage.cacheCreation5m = u.cache_creation.ephemeral_5m_input_tokens;
+    usage.cacheCreation1h = u.cache_creation.ephemeral_1h_input_tokens;
+  }
+  return usage;
+}
 
 const ResultEvent = z.object({
   type: z.literal('result'),
@@ -218,13 +238,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     turns: r.num_turns,
     requests: requestIds.size === 0 ? null : requestIds.size,
     hostDurationMs: r.duration_ms,
-    usage: {
-      input: r.usage.input_tokens,
-      output: r.usage.output_tokens,
-      cacheCreation: r.usage.cache_creation_input_tokens ?? 0,
-      cacheRead: r.usage.cache_read_input_tokens ?? 0,
-      reasoning: r.usage.output_tokens_details?.thinking_tokens ?? null,
-    },
+    usage: claudeUsage(r.usage),
     hostCostUsd: r.total_cost_usd,
     model: model ?? (r.modelUsage ? (Object.keys(r.modelUsage)[0] ?? null) : null),
     finalAnswer: r.result ?? '',
