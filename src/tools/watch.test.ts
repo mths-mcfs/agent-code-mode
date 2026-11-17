@@ -197,8 +197,27 @@ describe('protected-path watch', () => {
     await writeFile(f, '{}', { mode: 0o600 });
     await recordOwnFile(f, sha256('{}'));
     expect(await changedWatched(before, await snapshotWatched(l.patterns, before))).toEqual([]);
-    await chmod(f, 0o777);
-    expect(await changedWatched(before, await snapshotWatched(l.patterns, before))).toEqual([f]);
+    // Read-only is the one mode change every platform reports (Windows maps chmod to its read-only flag).
+    await chmod(f, 0o444);
+    try {
+      expect(await changedWatched(before, await snapshotWatched(l.patterns, before))).toEqual([f]);
+    } finally {
+      await chmod(f, 0o600);
+    }
+  });
+
+  it('context records: POSIX modes are required only where they exist (win32 semantics checked on any OS)', async () => {
+    const l = await lab();
+    const ctx = path.join(l.state, 'ctx');
+    const before = await snapshotWatched(l.patterns);
+    await mkdir(ctx, { mode: 0o755 });
+    await chmod(ctx, 0o755);
+    await writeFile(path.join(ctx, 'toolu_w.json'), JSON.stringify({ tool_use_id: 'toolu_w', session_id: 's' }), { mode: 0o644 });
+    await chmod(path.join(ctx, 'toolu_w.json'), 0o644);
+    const after = await snapshotWatched(l.patterns, before);
+    // Windows reports 0666-style modes: a genuine record there is routine whatever its mode.
+    expect(await changedWatched(before, after, contextRecordFilter(ctx, 'win32'))).toEqual([]);
+    if (posix) expect(await changedWatched(before, after, contextRecordFilter(ctx, 'linux'))).toEqual([ctx, path.join(ctx, 'toolu_w.json')]);
   });
 
   it("context records: a new well-formed one is routine, a changed or ill-formed one is reported", async () => {
