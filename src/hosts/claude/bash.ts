@@ -58,6 +58,11 @@ export interface FileTarget {
   readonly path: string | undefined;
   /** For a glob (path undefined): the pattern as bash sees it, before expansion. */
   readonly pattern?: string;
+  /**
+   * Written only if this path (as written) is a directory when the command
+   * runs: `cp src dest` writes `dest/src` when `dest` is one.
+   */
+  readonly whenDirectory?: string;
 }
 
 export interface BashAnalysis {
@@ -114,10 +119,66 @@ const FILE_READERS = new Set([
 ]);
 
 /** Commands that write (or delete) the files they name, for Edit rules. */
-const FILE_WRITERS = new Set(['tee', 'touch', 'truncate', 'rm', 'rmdir', 'unlink', 'shred', 'mkdir', 'chmod', 'chown', 'chgrp', 'ln']);
+const FILE_WRITERS = new Set(['tee', 'touch', 'truncate', 'rm', 'rmdir', 'unlink', 'shred', 'mkdir', 'chmod', 'chown', 'chgrp']);
 
-/** Commands that read some operands and write others: every operand is both. */
-const FILE_COPIERS = new Set(['cp', 'mv', 'rsync', 'install', 'scp', 'dd']);
+/** Commands that read some operands and write others: every operand is both (dd: `if=` read, `of=` written). */
+// Rule: acm asks for writes into sensitive locations even where the host's parser misses them (`-t`, `dd of=`, rsync into .git).
+const FILE_COPIERS = new Set(['rsync', 'scp', 'dd']);
+
+/**
+ * Commands of the form `cmd [opts] SOURCE... DEST` or `cmd [opts] -t DIR SOURCE...`.
+ * Every operand is read and written, as Claude Code checks them (measured on
+ * 2.1.326: `cp .git/config /tmp/x` asks for `.git/config`); the `-t` directory,
+ * in any spelling, is written. For each, its short options that take a value.
+ */
+interface SourceDestSpec {
+  /** Short options without a value. */
+  readonly shortFlags: string;
+  /** Short options taking a value (`-tDIR`, `-t DIR`, `-rt DIR`). */
+  readonly shortValue: string;
+  /** Long options and their argument: none, optional (`=` only) or required (`=` or the next word). */
+  readonly long: Readonly<Record<string, 'none' | 'optional' | 'required'>>;
+}
+const COMMON_LONG = { backup: 'optional', suffix: 'required', 'target-directory': 'required', 'no-target-directory': 'none', verbose: 'none', help: 'none', version: 'none', debug: 'none' } as const;
+const SOURCE_DEST: ReadonlyMap<string, SourceDestSpec> = new Map<string, SourceDestSpec>([
+  ['cp', { shortFlags: 'abdfHilLnPpRrsTuvxZ', shortValue: 'St', long: { ...COMMON_LONG, archive: 'none', 'attributes-only': 'none', 'copy-contents': 'none', dereference: 'none', force: 'none', interactive: 'none', link: 'none', 'no-dereference': 'none', 'no-clobber': 'none', 'no-preserve': 'required', 'one-file-system': 'none', parents: 'none', preserve: 'optional', recursive: 'none', reflink: 'optional', 'remove-destination': 'none', sparse: 'required', 'strip-trailing-slashes': 'none', 'symbolic-link': 'none', update: 'optional', 'keep-directory-symlink': 'none', context: 'optional', exchange: 'none' } }],
+  ['mv', { shortFlags: 'bfinTuvZ', shortValue: 'St', long: { ...COMMON_LONG, force: 'none', interactive: 'none', 'no-clobber': 'none', 'no-copy': 'none', 'strip-trailing-slashes': 'none', update: 'optional', context: 'none', exchange: 'none' } }],
+  ['ln', { shortFlags: 'bdFfiLnPrsTv', shortValue: 'St', long: { ...COMMON_LONG, directory: 'none', force: 'none', interactive: 'none', logical: 'none', 'no-dereference': 'none', physical: 'none', relative: 'none', symbolic: 'none' } }],
+  ['install', { shortFlags: 'bcCdDpsTvZ', shortValue: 'gmoSt', long: { ...COMMON_LONG, compare: 'none', directory: 'none', group: 'required', mode: 'required', owner: 'required', 'preserve-timestamps': 'none', 'preserve-context': 'none', strip: 'none', 'strip-program': 'required', context: 'optional' } }],
+]);
+
+/**
+ * The GNU long option a word names: an exact name, or a prefix of exactly
+ * one of `names` (getopt accepts any unambiguous abbreviation). Undefined
+ * when it names none, or several.
+ */
+function longOption(name: string, names: readonly string[]): string | undefined {
+  if (names.includes(name)) return name;
+  const hits = names.filter((n) => n.startsWith(name));
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/**
+ * Where GNU sed may write the backup of `file` for an in-place suffix: `file`
+ * + suffix; with `*` in the suffix, each `*` replaced by the file name as
+ * written (GNU sed 4.9: `bak-*` on `sub/f` renames to `bak-sub/f`, relative
+ * to the working directory). Other versions and the documentation use the
+ * base name, placed in the working directory or next to the file; all
+ * readings are returned (a superset is safe). The suffix is not
+ * shell-expanded, so a leading `~` is a plain name.
+ */
+export function sedBackups(file: string, suffix: string): string[] {
+  const literal = (p: string): string => (p.startsWith('~') ? `./${p}` : p);
+  if (!suffix.includes('*')) return [literal(file + suffix)];
+  const slash = file.lastIndexOf('/');
+  const dir = slash === -1 ? '' : file.slice(0, slash + 1);
+  const byBase = suffix.split('*').join(file.slice(slash + 1));
+  const byName = suffix.split('*').join(file);
+  return [...new Set([literal(byName), literal(byBase), byBase.startsWith('/') ? byBase : literal(dir + byBase)])];
+}
+
+/** GNU sed's long options; `expression`, `file` and `line-length` take a value, `in-place` an optional `=SUFFIX`. */
+const SED_LONG = ['quiet', 'silent', 'debug', 'expression', 'file', 'follow-symlinks', 'in-place', 'line-length', 'posix', 'regexp-extended', 'separate', 'sandbox', 'unbuffered', 'null-data', 'binary', 'zero-terminated', 'help', 'version'];
 
 /** Wrapper levels stripped before the command is reported as uncertain. */
 const MAX_WRAPPER_LEVELS = 64;
@@ -497,9 +558,16 @@ export class BashAnalyzer {
   }
 
   #fileOperands(base: string, operands: readonly WordValue[]): void {
+    if (SOURCE_DEST.has(base)) {
+      this.#sourceDestOperands(base, operands);
+      return;
+    }
+    if (base === 'sed') {
+      this.#sedOperands(operands);
+      return;
+    }
     const reads = FILE_READERS.has(base) || FILE_COPIERS.has(base);
-    let writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base);
-    if (base === 'sed' && operands.some((o) => o.value !== undefined && (o.value === '-i' || o.value.startsWith('--in-place') || /^-[a-zA-Z]*i/.test(o.value)))) writes = true;
+    const writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base);
     if (!reads && !writes) return;
     let endOfOptions = false;
     for (let k = 0; k < operands.length; k++) {
@@ -520,17 +588,230 @@ export class BashAnalyzer {
         if (eq === -1) continue;
         value = value.slice(eq + 1);
       }
+      let access: { read: boolean; write: boolean } = { read: reads, write: writes };
       if (base === 'dd' && value !== undefined) {
         const m = /^(if|of)=(.*)$/s.exec(value);
         if (!m) continue;
         value = m[2];
+        access = { read: m[1] === 'if', write: m[1] === 'of' };
       }
-      const path = value !== undefined && !operand.glob ? value : undefined;
-      const pattern = operand.glob && value !== undefined ? { pattern: value } : {};
-      if (reads) this.#files.push({ access: 'read', path, ...pattern });
-      if (writes) this.#files.push({ access: 'write', path, ...pattern });
+      this.#pushFile(operand, value, access);
     }
   }
+
+  /**
+   * GNU `sed`: the script (the first operand, unless `-e`/`-f` gave one) and
+   * a `-f` script file are read; the other operands are read, and written
+   * with `-i`/`--in-place`. Option values are taken as getopt does: `-l 5`,
+   * `-f1`, `-ne SCRIPT`, `-i.bak` (an attached in-place suffix), abbreviated
+   * long options.
+   */
+  #sedOperands(operands: readonly WordValue[]): void {
+    let inPlace = false;
+    const suffixes: string[] = [];
+    let scriptByOption = false;
+    let endOfOptions = false;
+    const positional: { operand: WordValue; value: string | undefined }[] = [];
+    const scriptFiles: { operand: WordValue; value: string | undefined }[] = [];
+    for (let k = 0; k < operands.length; k++) {
+      const operand = operands[k];
+      if (!operand) continue;
+      if (operand.raw.startsWith('<(') || operand.raw.startsWith('>(')) continue;
+      const value = operand.value;
+      if (endOfOptions || value === undefined || !value.startsWith('-') || value === '-') {
+        positional.push({ operand, value });
+        continue;
+      }
+      if (value === '--') {
+        endOfOptions = true;
+        continue;
+      }
+      const next = operands[k + 1];
+      if (value.startsWith('--')) {
+        const eq = value.indexOf('=');
+        const name = longOption(value.slice(2, eq === -1 ? undefined : eq), SED_LONG);
+        if (name === 'in-place') {
+          inPlace = true;
+          if (eq !== -1 && eq + 1 < value.length) suffixes.push(value.slice(eq + 1));
+        }
+        if (name !== 'expression' && name !== 'file' && name !== 'line-length') continue;
+        const given = eq === -1 ? next : { ...operand, value: value.slice(eq + 1) };
+        if (eq === -1) k++;
+        if (name !== 'line-length') scriptByOption = true;
+        if (name === 'file' && given !== undefined) scriptFiles.push({ operand: given, value: given.value });
+        continue;
+      }
+      // A short cluster: `i` takes the rest as its suffix; `e`, `f`, `l` take the rest or the next word.
+      for (let c = 1; c < value.length; c++) {
+        const letter = value[c] ?? '';
+        if (letter === 'i') {
+          inPlace = true;
+          if (c + 1 < value.length) suffixes.push(value.slice(c + 1));
+          break;
+        }
+        if (letter !== 'e' && letter !== 'f' && letter !== 'l') continue;
+        const rest = value.slice(c + 1);
+        const given = rest !== '' ? { ...operand, value: rest } : next;
+        if (rest === '') k++;
+        if (letter !== 'l') scriptByOption = true;
+        if (letter === 'f' && given !== undefined) scriptFiles.push({ operand: given, value: given.value });
+        break;
+      }
+    }
+    // Without `-e`/`-f`, the first operand is the script: a word such as `$S` could be anything, so it stays a file.
+    const first = positional[0];
+    const files = !scriptByOption && first !== undefined && first.value !== undefined ? positional.slice(1) : positional;
+    for (const f of scriptFiles) this.#pushFile(f.operand, f.value, { read: true, write: false });
+    for (const f of files) {
+      this.#pushFile(f.operand, f.value, { read: true, write: inPlace });
+      for (const suffix of inPlace ? suffixes : []) {
+        if (f.value === undefined || f.operand.glob) {
+          this.#files.push({ access: 'write', path: undefined });
+          continue;
+        }
+        for (const backup of sedBackups(f.value, suffix)) this.#files.push({ access: 'write', path: backup });
+      }
+    }
+  }
+
+  #pushFile(operand: WordValue, value: string | undefined, access: { readonly read: boolean; readonly write: boolean }): void {
+    const path = value !== undefined && !operand.glob ? value : undefined;
+    const pattern = operand.glob && value !== undefined ? { pattern: value } : {};
+    if (access.read) this.#files.push({ access: 'read', path, ...pattern });
+    if (access.write) this.#files.push({ access: 'write', path, ...pattern });
+  }
+
+  /**
+   * `cp`, `mv`, `ln`, `install`: every operand is read and written, and so is
+   * every value any `-t`/`--target-directory` occurrence could take (a union:
+   * a later `-t` never hides an earlier one). Options are read as GNU getopt
+   * does; where the arity of a long option is not known for sure, the next
+   * word is read both as its value and as an operand. A symbolic `ln` with an
+   * explicit link name does not write its targets (host row: `ln -s .git
+   * gitlink` is allowed), but only when nothing in the parse is ambiguous.
+   */
+  #sourceDestOperands(base: string, operands: readonly WordValue[]): void {
+    const spec = SOURCE_DEST.get(base);
+    if (spec === undefined) return;
+    const files: { operand: WordValue; value: string | undefined }[] = [];
+    const targets: { operand: WordValue; value: string | undefined }[] = [];
+    let symbolic = false;
+    let ambiguous = false;
+    let endOfOptions = false;
+    // Backups: `-b`, `--backup[=CONTROL]`, `-S`/`--suffix` (which implies one).
+    let backupAsked = false;
+    let control: string | undefined;
+    let suffix: { value: string | undefined } | undefined;
+    let backupUnclear = false;
+    const longNames = Object.keys(spec.long);
+    for (let k = 0; k < operands.length; k++) {
+      const operand = operands[k];
+      if (!operand) continue;
+      const value = operand.value;
+      if (endOfOptions || value === undefined || !value.startsWith('-') || value === '-') {
+        // A word only known at run time may be an option: it stays a file (path unknown), so the call cannot be approved by rule.
+        if (value === undefined) ambiguous = true;
+        files.push({ operand, value });
+        continue;
+      }
+      if (value === '--') {
+        endOfOptions = true;
+        continue;
+      }
+      const next = operands[k + 1];
+      const nextWord = next === undefined ? undefined : { operand: next, value: next.value };
+      if (value.startsWith('--')) {
+        const eq = value.indexOf('=');
+        const name = value.slice(2, eq === -1 ? undefined : eq);
+        const candidates = longNames.filter((n) => n === name || n.startsWith(name));
+        const exact = longNames.includes(name) ? name : candidates.length === 1 ? candidates[0] : undefined;
+        if (exact === undefined) {
+          // Unknown or ambiguous: any reading may hold.
+          ambiguous = true;
+          if (candidates.includes('backup') || candidates.includes('suffix')) backupUnclear = true;
+          if (candidates.includes('target-directory')) {
+            if (eq !== -1) targets.push({ operand, value: value.slice(eq + 1) });
+            else if (nextWord !== undefined) targets.push(nextWord);
+          }
+          continue;
+        }
+        if (exact === 'symbolic' || exact === 'symbolic-link') symbolic = base === 'ln' || symbolic;
+        if (exact === 'backup') {
+          backupAsked = true;
+          control = eq === -1 ? undefined : value.slice(eq + 1);
+        }
+        if (spec.long[exact] !== 'required') continue;
+        const given = eq !== -1 ? { operand, value: value.slice(eq + 1) } : nextWord;
+        if (eq === -1) k++;
+        if (exact === 'target-directory' && given !== undefined) targets.push(given);
+        if (exact === 'suffix') suffix = { value: given?.value };
+        continue;
+      }
+      // A short option cluster: the first option taking a value takes the rest of the word, or the next word.
+      for (let c = 1; c < value.length; c++) {
+        const letter = value[c] ?? '';
+        if (base === 'ln' && letter === 's') symbolic = true;
+        if (spec.shortValue.includes(letter)) {
+          const rest = value.slice(c + 1);
+          const given = rest !== '' ? { operand, value: rest } : nextWord;
+          if (rest === '') k++;
+          if (letter === 't' && given !== undefined) targets.push(given);
+          if (letter === 'S') suffix = { value: given?.value };
+          break;
+        }
+        if (letter === 'b') {
+          backupAsked = true;
+          control = undefined;
+        }
+        if (!spec.shortFlags.includes(letter)) ambiguous = true;
+      }
+    }
+    // A symbolic link with an explicit link name (`ln -s TARGET... NAME`): the targets are only named, never written.
+    const linkTargets = base === 'ln' && symbolic && !ambiguous && targets.length === 0 && files.length >= 2 ? files.slice(0, -1) : [];
+    for (const f of files) this.#pushFile(f.operand, f.value, { read: true, write: !linkTargets.includes(f) });
+    for (const t of targets) this.#pushFile(t.operand, t.value, { read: false, write: true });
+    const simple = control === 'simple' || control === 'never';
+    const off = control === 'none' || control === 'off';
+    const backup = {
+      // `none`/`off` disable backups, even with a suffix (GNU makes none).
+      on: backupUnclear || (!off && (suffix !== undefined || backupAsked)),
+      // Numbered or `existing` control: `.~N~`, a name that depends on what exists. Without `-S`, SIMPLE_BACKUP_SUFFIX
+      // picks the suffix. With `-S` and no control, the simple `<dest><suffix>` (host row rCpSuffix allows `cp --suffix=.git`).
+      unknown: backupUnclear || suffix?.value === undefined || (control !== undefined && !simple && !off),
+      suffix: suffix?.value,
+    };
+    // What the command creates: the destination, and `<dir>/<basename(source)>` when it is a directory.
+    const created: FileTarget[] = [];
+    const inside = (dir: string | undefined, source: { operand: WordValue; value: string | undefined }, whenDirectory?: string): FileTarget => {
+      const name = source.value === undefined || source.operand.glob ? undefined : (source.value.replace(/\/+$/, '').split('/').pop() ?? '');
+      const path = dir === undefined || name === undefined || name === '' ? undefined : `${dir.replace(/\/+$/, '')}/${name}`;
+      return { access: 'write', path, ...(whenDirectory === undefined ? {} : { whenDirectory }) };
+    };
+    if (targets.length > 0) {
+      for (const t of targets) for (const f of files) created.push(inside(t.operand.glob ? undefined : t.value, f));
+    } else if (files.length >= 2) {
+      const dest = files[files.length - 1];
+      const sources = files.slice(0, -1);
+      if (dest !== undefined) {
+        const destPath = dest.operand.glob ? undefined : dest.value;
+        created.push({ access: 'write', path: destPath });
+        // A trailing slash or several sources: certainly a directory. Otherwise only if it is one when the command runs.
+        const certain = sources.length > 1 || (destPath?.endsWith('/') ?? false);
+        for (const f of sources) created.push(inside(destPath, f, certain || destPath === undefined ? undefined : destPath));
+      }
+    } else if (base === 'ln' && files[0] !== undefined) {
+      // `ln -s /x/y` makes `./y`.
+      created.push(inside('.', files[0]));
+    }
+    for (const c of created) {
+      if (c !== created[0] || targets.length > 0 || files.length < 2) this.#files.push(c);
+      if (!backup.on) continue;
+      // `.~N~` (numbered), the default suffix (`SIMPLE_BACKUP_SUFFIX`) or an unknown control: the name cannot be known.
+      if (backup.unknown || c.path === undefined) this.#files.push({ access: 'write', path: undefined });
+      if (c.path !== undefined) this.#files.push({ ...c, path: c.path + (backup.suffix ?? '~') });
+    }
+  }
+
 
   #addCommand(raw: string, words: readonly WordValue[], hasAssigns: boolean, ctx: Ctx): void {
     const denyForms = new Set<string>([raw]);

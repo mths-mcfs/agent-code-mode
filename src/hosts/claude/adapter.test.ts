@@ -183,8 +183,11 @@ describe('Bash rules', () => {
       const decision = s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy);
       expect(decision).toMatchObject({ kind: 'ask', reason: `Bash needs approval in default mode: ${RUNTIME_FILES_HINT}` });
     }
-    // A substitution or a glob outside the working directories: naming the files would not help, so no hint.
-    for (const command of ['head -c 9 src/$(ls src | head -1)', 'cat /etc/*.conf', 'cat ../*']) {
+    // The rule approves literal files outside the working directories too, so a glob there gets the hint.
+    const outside = s.adapter.checkStatic(bash('cat /etc/*.conf', s.project), s.ctx, s.policy);
+    expect(outside).toMatchObject({ kind: 'ask', reason: `Bash needs approval in default mode: ${RUNTIME_FILES_HINT}` });
+    // A substitution, or a glob climbing with `..`: naming the files would not help, so no hint.
+    for (const command of ['head -c 9 src/$(ls src | head -1)', 'cat ../*']) {
       const decision = s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy);
       expect(decision.kind).not.toBe('allow');
       expect('reason' in decision ? decision.reason : '').not.toContain('name each file literally');
@@ -283,6 +286,405 @@ describe('path rules', () => {
     const s = await setup({ user: { permissions: { allow: ['Read(//opt/shared/**)'] } } });
     expect(check(s, read('/opt/shared/a'))).toBe('allow');
     expect(check(s, read('/opt/shared/link', '/etc/passwd'))).toBe('ask');
+  });
+});
+
+/**
+ * Bash commands that name files outside the working directories. Each
+ * expectation is a row measured against Claude Code 2.1.326 (`claude -p`,
+ * default mode unless stated, no interactive channel).
+ */
+describe('Bash files outside the working directories (measured on the host)', () => {
+  const outsideCommands = (out: string): string[] => [
+    `mkdir -p ${out}/sub`,
+    `touch ${out}/f.txt`,
+    `echo x > ${out}/f.txt`,
+    `cat > ${out}/f.mjs <<'EOF'\nconsole.log(1)\nEOF`,
+    `mkdir -p ${out}/q && cat > ${out}/q/check.mjs <<'EOF'\nconsole.log(1)\nEOF`,
+    `cp src.txt ${out}/f.txt`,
+    `mv src.txt ${out}/f.txt`,
+    `rm ${out}/f.txt`,
+    `rm -rf ${out}/sub`,
+    `sed -i 's/a/b/' ${out}/f.txt`,
+    `cat ${out}/f.txt`,
+  ];
+
+  it('an allow-all Bash rule approves literal files outside, as the host does', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    for (const command of outsideCommands(out)) expect([command, check(s, bash(command, s.project))]).toEqual([command, 'allow']);
+  });
+
+  it('prefix rules and no rule still ask for files outside, as the host does', async () => {
+    const prefix = await setup({ user: { permissions: { allow: ['mkdir', 'touch', 'echo', 'cat', 'cp', 'mv', 'rm', 'sed'].map((c) => `Bash(${c}:*)`) } } });
+    const none = await setup({});
+    for (const s of [prefix, none]) {
+      for (const command of outsideCommands(path.join(s.base, 'elsewhere'))) expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+    expect(check(prefix, bash('touch inside.txt', prefix.project))).toBe('allow');
+    expect(check(none, bash('touch inside.txt', none.project))).toBe('ask');
+  });
+
+  it('a deny rule still wins over the allow-all rule outside', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'], deny: ['Bash(rm:*)'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    expect(check(s, bash(`rm ${out}/f.txt`, s.project))).toBe('deny');
+    expect(check(s, bash(`rm -rf ${out}/sub`, s.project))).toBe('deny');
+    expect(check(s, bash(`touch ${out}/f.txt`, s.project))).toBe('allow');
+  });
+
+  it('stays stricter than the host where the target is only known at run time', async () => {
+    // The host allows both; agent-code-mode cannot resolve the target statically.
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    expect(check(s, bash(`d=${out}; touch $d/f.txt`, s.project))).toBe('ask');
+    expect(check(s, bash(`cd ${out} && touch f.txt`, s.project))).toBe('ask');
+  });
+
+  const sensitive = [
+    '.git/config', '.git/hooks/pre-commit', '.git/newfile', '.Git/config', 'sub/.git/config', '.claude/settings.json', '.claude/settings.local.json',
+    '.claude/commands/x.md', '.claude/agents/x.md', '.claude/skills/x/SKILL.md', '.claude/hooks/x.sh', '.claude/other.txt', '.vscode/settings.json',
+    '.idea/x.xml', '.husky/pre-commit', '.config/git/config', '.gitconfig', '.gitmodules', '.bashrc', 'sub/.bashrc', '.bash_profile', '.bash_login',
+    '.bash_logout', '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.profile', '.envrc', '.npmrc', '.ripgreprc', '.mcp.json', '.claude.json',
+  ];
+  const plain = ['.gitignore', '.gitattributes', '.env', '.ssh/authorized_keys', '.github/workflows/x.yml', '.gitlab-ci.yml', '.claude/worktrees/x',
+    '.cursor/x', 'a.git/config', '.gitx/config', '.claude-x/f', '.tcshrc', '.cshrc', '.inputrc', '.config/fish/config.fish'];
+
+  it('writing a sensitive file asks whatever allow rule covers the command, inside or outside', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    // The project's own settings, hooks, agents and .mcp.json are also paths agent-code-mode protects: refused.
+    const protectedHere = new Set(['.claude/settings.json', '.claude/settings.local.json', '.claude/agents/x.md', '.claude/hooks/x.sh', '.mcp.json']);
+    for (const rel of sensitive) {
+      expect([rel, check(s, bash(`echo x > ${rel}`, s.project))]).toEqual([rel, protectedHere.has(rel) ? 'deny' : 'ask']);
+      expect([rel, check(s, bash(`echo x > ${out}/${rel}`, s.project))]).toEqual([rel, 'ask']);
+    }
+    expect(check(s, bash(`echo x > ${out}/.git`, s.project))).toBe('ask');
+    for (const command of ["sed -i 's/a/b/' .git/config", 'touch .git/x', 'rm .claude/other.txt']) expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    expect(check(s, bash('rm .claude/settings.json', s.project))).toBe('deny');
+    for (const rel of plain) expect([rel, check(s, bash(`echo x > ${rel}`, s.project))]).toEqual([rel, 'allow']);
+    // Reading one is fine.
+    expect(check(s, bash('cat .git/config', s.project))).toBe('allow');
+    // A prefix rule does not approve it either.
+    const prefix = await setup({ user: { permissions: { allow: ['Bash(echo:*)'] } } });
+    expect(check(prefix, bash('echo x > .git/config', prefix.project))).toBe('ask');
+  });
+
+  it('a path agent-code-mode protects is refused, even outside', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    expect(check(s, bash(`touch ${path.join(s.base, 'state', 'planted')}`, s.project))).toBe('deny');
+  });
+
+  it('bypassPermissions writes sensitive files; dontAsk denies them', async () => {
+    const bypass = await setup({ user: { permissions: { allow: ['Bash'] } }, mode: 'bypassPermissions' });
+    expect(check(bypass, bash('echo x > .git/config', bypass.project))).toBe('allow');
+    expect(check(bypass, bash(`echo x > ${path.join(bypass.base, 'elsewhere')}/.bashrc`, bypass.project))).toBe('allow');
+    const dontAsk = await setup({ user: { permissions: { allow: ['Bash'] } }, mode: 'dontAsk' });
+    expect(check(dontAsk, bash('echo x > .git/config', dontAsk.project))).toBe('deny');
+  });
+
+  it.skipIf(!posix)('a target named inside that resolves outside through a symlink asks; one named outside does not', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    await mkdir(path.join(out, '.claude'), { recursive: true });
+    await writeFile(path.join(out, '.claude', 'settings.json'), '{}');
+    await symlink(out, path.join(s.project, 'link'));
+    await symlink(out, `${out}.lnk`);
+    await symlink(path.join(out, '.claude', 'settings.json'), path.join(s.project, 'plain.json'));
+    expect(check(s, bash('echo x > link/f.txt', s.project))).toBe('allow');
+    expect(await authorize(s, bash('echo x > link/f.txt', s.project))).toMatchObject({ kind: 'ask', reason: expect.stringContaining('resolves through a symlink') });
+    expect(await authorize(s, bash('echo x > plain.json', s.project))).toMatchObject({ kind: 'ask' });
+    expect(await authorize(s, bash(`echo x > ${out}.lnk/f.txt`, s.project))).toEqual({ kind: 'allow' });
+    // A prefix rule: the same symlink asks.
+    const prefix = await setup({ user: { permissions: { allow: ['Bash(echo:*)'] } } });
+    await symlink(out, path.join(prefix.project, 'link'));
+    expect(await authorize(prefix, bash('echo x > link/f.txt', prefix.project))).toMatchObject({ kind: 'ask' });
+    // Reading through it: the allow-all rule approves, a prefix rule asks.
+    await writeFile(path.join(out, 'r.txt'), 'r');
+    expect(await authorize(s, bash('cat link/r.txt', s.project))).toEqual({ kind: 'allow' });
+    const catOnly = await setup({ user: { permissions: { allow: ['Bash(cat:*)'] } } });
+    await symlink(out, path.join(catOnly.project, 'link'));
+    expect(check(catOnly, bash('cat link/r.txt', catOnly.project))).toBe('allow');
+    expect(await authorize(catOnly, bash('cat link/r.txt', catOnly.project))).toMatchObject({ kind: 'ask', reason: expect.stringContaining('resolves through a symlink') });
+    // bypassPermissions follows the symlink without asking.
+    const bypass = await setup({ user: { permissions: { allow: ['Bash'] } }, mode: 'bypassPermissions' });
+    await symlink(out, path.join(bypass.project, 'link'));
+    expect(await authorize(bypass, bash('echo x > link/f.txt', bypass.project))).toEqual({ kind: 'allow' });
+  });
+});
+
+describe('which operands a bash command writes (review findings)', () => {
+  it('a destination given with -t or --target-directory is a write', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    for (const command of [
+      'cp -t.git src.txt', 'cp --target-directory=.git src.txt', 'cp --target-directory .git src.txt', 'cp -t .git src.txt', 'cp -rt.git src.txt',
+      'mv -t.git src.txt', 'mv -t .git src.txt', 'install -t.git src.txt', 'install -t .git src.txt', 'ln -s -t.git src.txt', 'ln -st .git src.txt',
+    ]) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+  });
+
+  it('every operand of cp, mv, install and ln counts as written, as the host checks them', async () => {
+    // Measured: the host asks for `cp .git/config /tmp/x` (".git/config ... is a sensitive file").
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    for (const command of [`cp .git/config ${out}/x`, `mv .git/config ${out}/x`, `cp ${out}/x .git/config`, `cp -t ${out} .git/config`, `ln .git/config ${out}/l`]) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+    // An option value that is not a target directory is not a file.
+    expect(check(s, bash(`cp --suffix=.git src.txt ${out}/x`, s.project))).toBe('allow');
+    expect(check(s, bash(`install -m 644 src.txt ${out}/x`, s.project))).toBe('allow');
+  });
+
+  it('dd writes only of=, and the sed script is not a file it writes', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    expect(check(s, bash('dd if=.git/config of=copy.txt', s.project))).toBe('allow');
+    expect(check(s, bash('dd if=src.txt of=.git/x', s.project))).toBe('ask');
+    expect(check(s, bash("sed -i 's/.git/x/' src.txt", s.project))).toBe('allow');
+    expect(check(s, bash("sed -i.bak 's/a/b/' .git/config", s.project))).toBe('ask');
+    expect(check(s, bash("sed -i -e 's/a/b/' .git/config", s.project))).toBe('ask');
+    expect(check(s, bash("sed -i -e 's/.git/x/' src.txt", s.project))).toBe('allow');
+    expect(check(s, bash('echo x | tee -a .git/x', s.project))).toBe('ask');
+  });
+
+  it.skipIf(!posix)('a write through a symlink whose target misses several parents resolves outside and asks', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    await mkdir(out, { recursive: true });
+    await symlink(path.join(out, 'a', 'b', 'c'), path.join(s.project, 'deep'));
+    for (const command of ['echo x > deep/f', 'mkdir -p deep/x/y', 'touch deep/x/y/z']) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'allow']);
+      expect([command, await authorize(s, bash(command, s.project))]).toMatchObject([command, { kind: 'ask', reason: expect.stringContaining('resolves through a symlink') }]);
+    }
+    // A sensitive directory reached through a symlinked parent several levels down.
+    await symlink(path.join(out, 'repo'), path.join(s.project, 'repo-link'));
+    expect(await authorize(s, bash('mkdir -p repo-link/.git/hooks', s.project))).toMatchObject({ kind: 'ask' });
+    await mkdir(path.join(s.project, '.git'), { recursive: true });
+    await symlink(path.join(s.project, '.git'), path.join(s.project, 'gitlink'));
+    expect(await authorize(s, bash('echo x > gitlink/new/deeper/f', s.project))).toMatchObject({ kind: 'ask', reason: expect.stringContaining('sensitive') });
+  });
+});
+
+describe('second review findings (oracle: the host truth table)', () => {
+  it('sed in-place with a script file whose name looks like a number still writes its operands', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    for (const command of ['sed -i -f 1 .git/config', 'sed -i -l 5 -e s/a/b/ .git/config', 'sed -n -i -e s/a/b/ .git/config', 'sed --in-pl s/a/b/ .git/config',
+      'sed --in-place=.bak -e s/a/b/ .git/config', 'sed -i --expr=s/a/b/ .git/config', 'sed -i --fi script.sed .git/config', 'sed -i -fscript.sed .git/config', 'sed -i -e s/a/b/ -- .git/config']) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+    // The script itself, given by option or first, is not written; a line length is not a file.
+    for (const command of ["sed -i --expr='s/.git/x/' src.txt", 'sed -i -l 5 s/.git/x/ src.txt', 'sed -i -f .git/script.sed src.txt']) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'allow']);
+    }
+  });
+
+  it.skipIf(!posix)('`..` after a symlink climbs from where the link points, as the kernel does', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const out = path.join(s.base, 'elsewhere');
+    await mkdir(path.join(out, 'child'), { recursive: true });
+    await symlink(path.join(out, 'child'), path.join(s.project, 'link'));
+    // Host rows rDotDot1 and rDotDot3: named inside (lexically), real path outside.
+    await mkdir(path.join(out, 'a', 'child'), { recursive: true });
+    await symlink(path.join(out, 'a', 'child'), path.join(s.project, 'link2'));
+    for (const command of ['echo x > link/../f', 'echo x > link2/../../project/f2', 'mkdir -p link/../new/dir']) {
+      expect([command, await authorize(s, bash(command, s.project))]).toMatchObject([command, { kind: 'ask', reason: expect.stringContaining('resolves through a symlink') }]);
+    }
+    // Host row rDotDot2: named outside already, so allowed like any literal path outside.
+    expect(await authorize(s, bash('echo x > link/../../elsewhere/f', s.project))).toEqual({ kind: 'allow' });
+    // Without a symlink, `..` stays where it is written.
+    await mkdir(path.join(s.project, 'plain'));
+    expect(await authorize(s, bash('echo x > plain/../f', s.project))).toEqual({ kind: 'allow' });
+  });
+
+  it('a unique prefix of --target-directory is the destination (acm keeps asking for writes the host parser misses)', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    for (const command of ['cp --target-dir=.git src.txt', 'cp --target=.git src.txt', 'cp --t=.git src.txt', 'mv --target-dir=.git src.txt', 'install --target-dir .git src.txt',
+      'ln -s --target-dir=.git src.txt']) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+  });
+
+  it('a path agent-code-mode protects is refused in every mode, as write and edit are', async () => {
+    for (const mode of ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      const state = path.join(s.base, 'state');
+      for (const command of [`touch ${state}/planted`, `echo x > ${state}/planted`, `echo '{}' > ${path.join(s.home, '.claude', 'settings.json')}`, 'echo x > .mcp.json']) {
+        expect([mode, command, s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy)]).toMatchObject([mode, command, { kind: 'deny', reason: expect.stringContaining('protected host policy path') }]);
+      }
+    }
+  });
+
+  it.skipIf(!posix)('a protected path reached through a symlink is refused in every mode', async () => {
+    for (const mode of ['default', 'bypassPermissions', 'auto']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      await mkdir(path.join(s.base, 'state'), { recursive: true });
+      await symlink(path.join(s.base, 'state'), path.join(s.project, 'st'));
+      expect([mode, await authorize(s, bash('touch st/planted', s.project))]).toMatchObject([mode, { kind: 'deny' }]);
+    }
+  });
+
+  it('the target of a symbolic ln is not written; the link name, a hard link and the -t directory are', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    // Host row rSymParent: allowed.
+    expect(check(s, bash('ln -s .git gitlink && echo x > gitlink/x', s.project))).toBe('allow');
+    expect(check(s, bash('ln --symbolic .git/config cfg', s.project))).toBe('allow');
+    expect(check(s, bash('ln -sf .git/config cfg', s.project))).toBe('allow');
+    // Not measured on the host: kept as before.
+    for (const command of ['ln .git/config cfg', 'ln -s src.txt .git/hooks/pre-commit', 'ln -s -t .git src.txt', 'ln -s .git']) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+  });
+});
+
+describe('third review findings: misread options over-approximate in the safe direction', () => {
+  const tools = ['cp', 'mv', 'install', 'ln'];
+
+  it('every -t value is a destination, never last-wins, even after an option of unknown arity', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    const state = path.join(s.base, 'state');
+    for (const tool of tools) {
+      for (const command of [`${tool} -t .git --suffix -tplain src.txt`, `${tool} -t .git -t plain src.txt`, `${tool} --target-dir=.git --target-directory plain src.txt`]) {
+        expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+      }
+      const command = `${tool} -t ${state} --suffix -tplain src.txt`;
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'deny']);
+    }
+  });
+
+  it('ln is taken as symbolic only when the parse is unambiguous', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'], deny: ['Edit(./locked/**)'] } } });
+    // `--suffix` takes `-s`: a hard link.
+    expect(check(s, bash('ln --suffix -s locked/f copy', s.project))).toBe('deny');
+    expect(check(s, bash('ln --suffix -s .git/config copy', s.project))).toBe('ask');
+    expect(check(s, bash('ln --suf -s .git/config copy', s.project))).not.toBe('allow');
+    expect(check(s, bash('ln --frobnicate -s .git/config copy', s.project))).not.toBe('allow');
+    expect(check(s, bash('ln -S -s .git/config copy', s.project))).not.toBe('allow');
+    // Unambiguous symbolic links keep the oracle exception (host row rSymParent).
+    expect(check(s, bash('ln -s .git/config copy', s.project))).toBe('allow');
+    expect(check(s, bash('ln -sf --symbolic .git/config copy', s.project))).toBe('allow');
+    expect(check(s, bash('ln --backup=none -s .git/config copy', s.project))).toBe('allow');
+    // A numbered backup of `copy`: its name is not known, so no rule approves.
+    expect(check(s, bash('ln --backup=numbered -s .git/config copy', s.project))).toBe('ask');
+  });
+
+  it('sed -i with a suffix writes the backup GNU sed makes', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    for (const command of ["sed -i'.git/*' 's/a/b/' src.txt", "sed --in-place='.git/*' 's/a/b/' src.txt", "sed -i'.git/bak-*' -e 's/a/b/' sub/src.txt", "sed -i'/.bashrc' 's/a/b/' src.txt"]) {
+      expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
+    }
+    for (const mode of ['default', 'auto', 'bypassPermissions']) {
+      const m = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      for (const command of [`sed -i'../state/*' 's/a/b/' src.txt`, `sed -i'${path.join(m.base, 'state')}/*' 's/a/b/' src.txt`]) {
+        expect([mode, command, check(m, bash(command, m.project))]).toEqual([mode, command, 'deny']);
+      }
+    }
+    // A plain suffix next to the file stays allowed.
+    expect(check(s, bash("sed -i.bak 's/a/b/' src.txt", s.project))).toBe('allow');
+    expect(check(s, bash("sed -i'bak-*' 's/a/b/' src.txt", s.project))).toBe('allow');
+    // GNU sed 4.9 replaces `*` with the name as written: `*` on `<state>/x` renames to `<state>/x` itself.
+    expect(check(s, bash("sed -i'.git/*' 's/a/b/' sub/src.txt", s.project))).toBe('ask');
+    expect(check(s, bash(`sed -i'*' 's/a/b/' ${path.join(s.base, 'state')}/x`, s.project))).toBe('deny');
+  });
+
+  it.skipIf(!posix)('a backslash in a command path or a rule is a file name character on POSIX', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'], deny: ['Edit(./locked/**)', 'Edit(./a\\b)'] } } });
+    // `locked/x\..\..\f` is one file name inside locked/ on POSIX, not a climb out of it.
+    expect(check(s, bash("echo x > 'locked/x\\..\\..\\f'", s.project))).toBe('deny');
+    expect(check(s, bash("echo x > 'a\\b'", s.project))).toBe('deny');
+    expect(check(s, bash("echo x > 'a\\c'", s.project))).toBe('allow');
+  });
+
+  it.skipIf(!posix)('a backslash in a symlink target is a file name character on POSIX', async () => {
+    for (const mode of ['default', 'auto', 'bypassPermissions']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      const state = path.join(s.base, 'state');
+      await mkdir(state, { recursive: true });
+      // As reported: alias -> back\slash -> ../state, both in the workspace.
+      await symlink('../state', path.join(s.project, 'back\\slash'));
+      await symlink('back\\slash', path.join(s.project, 'alias'));
+      expect([mode, await authorize(s, bash('echo x > alias/f', s.project))]).toMatchObject([mode, { kind: 'deny' }]);
+    }
+  });
+});
+
+describe('fourth review findings', () => {
+  const kind = (s: Setup, command: string): Decision['kind'] => check(s, bash(command, s.project));
+
+  it('a destination directory makes <dir>/<basename(source)> a written target', async () => {
+    for (const mode of ['default', 'auto', 'bypassPermissions']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      for (const command of ['ln -s settings.json .claude/', 'ln -s settings.json .claude', 'cp settings.json .claude', 'mv x/settings.json .claude/', 'install settings.json .claude',
+        'cp a.txt settings.json .claude', 'ln -s ../x/settings.json -t .claude', 'cp --target-directory=.claude settings.json']) {
+        expect([mode, command, kind(s, command)]).toEqual([mode, command, 'deny']);
+      }
+    }
+    const d = await setup({ user: { permissions: { allow: ['Bash'], deny: ['Edit(./plain/.bashrc)'] } } });
+    for (const command of ['ln -s .bashrc plain/', 'ln -s .bashrc plain', 'cp .bashrc plain', 'ln -s a .bashrc plain']) expect([command, kind(d, command)]).toEqual([command, 'deny']);
+    // A trailing slash or several sources: certainly a directory, so a sensitive generated name asks.
+    const plain = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    for (const command of ['ln -s .git plain/', 'ln -s .bashrc plain/', 'ln -s .git .bashrc plain/', 'cp a .bashrc plain']) expect([command, kind(plain, command)]).toEqual([command, 'ask']);
+    // Host row rSymParent: `gitlink` is not a directory, so `gitlink/.git` is not written.
+    expect(kind(d, 'ln -s .git gitlink && echo x > gitlink/x')).toBe('allow');
+    expect(await authorize(d, bash('ln -s .git gitlink && echo x > gitlink/x', d.project))).toEqual({ kind: 'allow' });
+  });
+
+  it('an existing directory at check time is a destination directory for the host-sensitive check too', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    await mkdir(path.join(s.project, 'plain'));
+    expect(kind(s, 'ln -s .bashrc plain')).toBe('allow');
+    expect(await authorize(s, bash('ln -s .bashrc plain', s.project))).toMatchObject({ kind: 'ask', reason: expect.stringContaining('sensitive') });
+    expect(await authorize(s, bash('ln -s .bashrc notadir', s.project))).toEqual({ kind: 'allow' });
+  });
+
+  it('backups (-b, --backup, -S, --suffix) are written targets', async () => {
+    for (const mode of ['default', 'auto', 'bypassPermissions']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      for (const command of ['cp --backup=simple --suffix=.json src.txt .claude/settings', 'mv -b -S .json src.txt .claude/settings', 'install --backup=simple -S .json src.txt .claude/settings',
+        'ln -f -b --suffix=.json src.txt .claude/settings', 'cp --backup=simple --suffix=.json settings src.txt .claude/', 'cp -S .json src.txt .claude/settings']) {
+        expect([mode, command, kind(s, command)]).toEqual([mode, command, 'deny']);
+      }
+    }
+    const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
+    // The default `~` suffix, or a numbered backup: the name depends on the environment or on what exists, so no rule approves.
+    for (const command of ['cp -b src.txt dst.txt', 'cp --backup=numbered src.txt dst.txt', 'cp --backup src.txt dst.txt', 'mv --backup=existing a b']) {
+      expect([command, kind(s, command)]).toEqual([command, 'ask']);
+    }
+    expect(kind(s, 'cp --backup=simple -S .bak src.txt dst.txt')).toBe('allow');
+    // `none`/`off` disable backups even with a suffix (GNU makes none).
+    for (const mode of ['default', 'bypassPermissions']) {
+      const m = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      for (const tool of ['cp', 'mv', 'install', 'ln']) {
+        for (const control of ['none', 'off']) {
+          const command = `${tool} --backup=${control} --suffix=.json src.txt .claude/settings`;
+          expect([mode, command, kind(m, command)]).toEqual([mode, command, mode === 'default' ? 'ask' : 'allow']);
+        }
+      }
+    }
+    expect(kind(s, 'cp --backup=none src.txt dst.txt')).toBe('allow');
+  });
+
+  it.skipIf(!posix)('a backslash in a written path is a file name character for the protected patterns on POSIX', async () => {
+    for (const mode of ['default', 'auto', 'bypassPermissions']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
+      expect([mode, kind(s, "echo x > '.claude/settings\\extra.json'")]).toEqual([mode, 'deny']);
+    }
+  });
+
+  it('a protected write is denied before any ask rule, in every mode', async () => {
+    for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk']) {
+      const s = await setup({ user: { permissions: { allow: ['Bash'], ask: ['Bash'] } }, mode });
+      expect([mode, s.adapter.checkStatic(bash('echo x > ../state/f', s.project), s.ctx, s.policy)]).toMatchObject([mode, { kind: 'deny', reason: expect.stringContaining('protected') }]);
+    }
+  });
+
+  it.skipIf(!posix)('a protected write through a symlink is denied before any ask rule', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash'], ask: ['Bash(echo:*)'] } } });
+    await mkdir(path.join(s.base, 'state'), { recursive: true });
+    await symlink(path.join(s.base, 'state'), path.join(s.project, 'alias'));
+    expect(s.adapter.checkStatic(bash('echo x > alias/f', s.project), s.ctx, s.policy).kind).toBe('ask');
+    // The dispatcher runs checkResolved before checkStatic: the deny wins over the ask rule.
+    expect(await s.adapter.checkResolved(bash('echo x > alias/f', s.project), s.ctx, s.policy)).toMatchObject({ kind: 'deny', reason: expect.stringContaining('protected') });
+    expect(await authorize(s, bash('echo x > alias/f', s.project))).toMatchObject({ kind: 'deny', reason: expect.stringContaining('protected') });
   });
 });
 

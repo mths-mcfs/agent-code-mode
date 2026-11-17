@@ -575,6 +575,12 @@ export interface HostAdapter<P = unknown> {
    */
   checkStatic(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<P>): Decision;
   /**
+   * Optional refusals that need I/O (symlinks resolved): runs before
+   * `checkStatic`, so an ask rule cannot turn them into a question. Resolves
+   * to a `deny` or to undefined; anything else is treated as a deny.
+   */
+  checkResolved?(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<P>): Promise<Decision | undefined>;
+  /**
    * Runs the host's PreToolUse hooks on the prepared call. Must honor
    * `signal` (kill running hooks). Only called after `checkStatic` allowed.
    */

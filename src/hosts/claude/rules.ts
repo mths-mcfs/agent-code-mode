@@ -69,7 +69,9 @@ const PARAM_FIELDS: Record<string, ReadonlySet<string>> = {
 };
 
 /** Converts a native path to POSIX form for matching: `C:\x` → `/c/x`. */
-export function toPosixPath(p: string): string {
+export function toPosixPath(p: string, platform: NodeJS.Platform = process.platform): string {
+  // On POSIX a backslash is an ordinary file-name character: only Windows paths are rewritten.
+  if (platform !== 'win32') return p;
   const slashed = p.replace(/\\/g, '/');
   const drive = /^([A-Za-z]):(\/|$)/.exec(slashed);
   if (drive?.[1]) return `/${drive[1].toLowerCase()}${slashed.slice(2) || '/'}`;
@@ -152,7 +154,8 @@ export function compilePathSpec(spec: string, kind: RuleKind, anchors: RuleAncho
     rest = s;
     anchored = false;
   }
-  rest = rest.replace(/\\/g, '/');
+  // Windows rules may use `\`; on POSIX it is part of a name, as in the paths matched against the rule.
+  if (process.platform === 'win32') rest = rest.replace(/\\/g, '/');
   let dirOnly = false;
   while (rest.endsWith('/') && rest.length > 1) {
     rest = rest.slice(0, -1);
