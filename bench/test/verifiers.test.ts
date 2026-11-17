@@ -1,12 +1,15 @@
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_FIXTURE_SEED } from '../fixture/generate.ts';
 import { createWorkspace } from '../lib/workspace.ts';
 import { TASKS } from '../tasks/index.ts';
 import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
+
+// Every case builds git workspaces and runs node --test on them: past the 20 s default on the slower Windows runner.
+vi.setConfig({ testTimeout: 120_000 });
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
 // About 85 workspaces, each a git repo of 340-560 entries (T12 adds 80 log files): some 17k. Deleting them takes
@@ -199,7 +202,6 @@ describe('hidden-test tasks', () => {
     expect(symptom.details.join('\n')).toMatch(/FAIL hidden tests pass/);
   });
 
-  // Six workspaces and six hidden-test runs in one test: past the 20 s default on the slower Windows file system.
   it('T9-T11 and T13-T15 never leave hidden tests in the workspace', async () => {
     for (const id of ['T9', 'T10', 'T11', 'T13', 'T14', 'T15'] as const) {
       const ws = await workspace(id);
@@ -207,7 +209,7 @@ describe('hidden-test tasks', () => {
       expect(await readdir(ws.dir)).not.toContain('hidden-tests');
       for (const f of ws.initial.keys()) expect(f.startsWith('hidden-tests/')).toBe(false);
     }
-  }, 120_000);
+  });
 
   it('T10 fails when one caller keeps the positional form or the public API drops it', async () => {
     const ws = await workspace('T10');
