@@ -504,6 +504,15 @@ function literalHead(pattern: string): { head: string; rest: string } {
   return { head: segments.slice(0, cut).join('/'), rest: segments.slice(cut).join('/') };
 }
 
+/**
+ * The real path of a POSIX-form path (`/c/x` on Windows), in POSIX form: the
+ * file system is asked with the native path, or `realpath` fails on Windows
+ * and a rule written through a link or junction loses its real location.
+ */
+export async function realpathOfPosix(p: string, platform: NodeJS.Platform = process.platform, rp: (native: string) => Promise<string> = realpath): Promise<string> {
+  return toPosixPath(await rp(toNativePath(p, platform)), platform);
+}
+
 /** Adds the real location of rules written through a symlinked directory (`//etc/**` → `/private/etc/**`). */
 async function withRealAnchors(rule: Rule): Promise<Rule> {
   if (rule.matcher.type !== 'path' || rule.kind === 'allow') return rule;
@@ -513,7 +522,7 @@ async function withRealAnchors(rule: Rule): Promise<Rule> {
     const { head, rest } = literalHead(p.pattern);
     const dir = path.posix.join(p.anchor, head);
     try {
-      const real = toPosixPath(await realpath(dir));
+      const real = await realpathOfPosix(dir);
       if (real !== dir && rest !== '') extra.push({ anchor: real, pattern: rest });
       else if (real !== dir) extra.push({ anchor: path.posix.dirname(real), pattern: path.posix.basename(real) });
     } catch {
