@@ -111,9 +111,11 @@ describe('path rules', () => {
   });
 
   it('normalizes Windows paths to POSIX form', () => {
-    expect(toPosixPath('C:\\Users\\a\\.env')).toBe('/c/Users/a/.env');
+    expect(toPosixPath('C:\\Users\\a\\.env', 'win32')).toBe('/c/Users/a/.env');
+    expect(toPosixPath('/tmp/back\\slash', 'linux')).toBe('/tmp/back\\slash');
     const m = compilePathSpec('//c/**/.env', 'deny', anchors);
-    expect(m.type === 'path' && matchesPath('C:\\Users\\a\\.env', m.patterns, true)).toBe(true);
+    // Native Windows paths are rewritten only on Windows; on POSIX a backslash is part of the name.
+    expect(m.type === 'path' && matchesPath('C:\\Users\\a\\.env', m.patterns, true)).toBe(process.platform === 'win32');
   });
 });
 

@@ -1,7 +1,8 @@
-import { realpath } from 'node:fs/promises';
+import { lstat, readlink, realpath, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { errorMessage } from '../../core/errors.js';
+import { findMatchingPattern } from '../../core/paths.js';
 import { stateDirPath } from '../../core/state-dir.js';
 import type {
   BashContainment,
@@ -163,6 +164,10 @@ interface BashFile {
   readonly path: string | undefined;
   /** For a glob target: the glob as written, before expansion. */
   readonly pattern?: string;
+  /** `path` before `..` is collapsed (absolute): what the kernel walks, symlinks first. */
+  readonly spelled?: string;
+  /** Written only if this (absolute) path is a directory when the command runs. */
+  readonly whenDirectory?: string;
 }
 
 function pathRuleVerdict(patterns: readonly PathPattern[], paths: readonly string[], kind: RuleKind): Verdict {
@@ -221,6 +226,52 @@ function insideWorkingDirs(paths: readonly string[], dirs: readonly string[]): b
   return paths.length > 0 && paths.every((p) => dirs.some((d) => isInsidePath(p, d)));
 }
 
+/**
+ * What Claude Code calls sensitive files (measured on Claude Code 2.1.326): a
+ * bash command that writes one asks, wherever the file is and whatever allow
+ * rule covers the command, in every mode but bypassPermissions. A directory
+ * name counts at any depth, a file name as the last segment, both compared
+ * case-insensitively; `.claude/worktrees/...` is the one exception.
+ */
+const SENSITIVE_DIRS = new Set(['.git', '.claude', '.vscode', '.idea', '.husky']);
+const SENSITIVE_FILES = new Set([
+  '.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.zshrc', '.zprofile', '.zshenv', '.zlogin',
+  '.profile', '.envrc', '.npmrc', '.ripgreprc', '.mcp.json', '.claude.json',
+]);
+
+function isSensitivePath(p: string): boolean {
+  const segments = toPosixPath(p).toLowerCase().split('/').filter((seg) => seg !== '');
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i] ?? '';
+    if (seg === '.claude' && segments[i + 1] === 'worktrees' && i + 2 < segments.length) continue;
+    if (SENSITIVE_DIRS.has(seg)) return true;
+    if (seg === '.config' && segments[i + 1] === 'git') return true;
+  }
+  return SENSITIVE_FILES.has(segments.at(-1) ?? '');
+}
+
+/** Modes in which Claude Code checks a bash command's file targets (sensitive files, symlinks) after an allow rule approved it. */
+function checksBashTargets(mode: PermissionMode): boolean {
+  // bypassPermissions skips both checks (measured); auto leaves the call to its classifier.
+  return mode !== 'bypassPermissions' && mode !== 'auto';
+}
+
+/**
+ * Why writing one of the files needs approval: a sensitive file. A target
+ * written only if its destination is a directory counts here only once that
+ * is known (host row: `ln -s .git gitlink` is allowed, `gitlink` being no directory).
+ */
+function sensitiveWrite(files: readonly BashFile[]): string | undefined {
+  const hit = files.find((f) => f.access === 'write' && f.whenDirectory === undefined && f.path !== undefined && isSensitivePath(f.path));
+  return hit === undefined ? undefined : `the command writes ${hit.path ?? ''}, which is a sensitive file`;
+}
+
+/** Why one of the files must not be written: a path agent-code-mode protects (as write() and edit() refuse it). */
+function protectedWrite(files: readonly BashFile[], protectedPaths: readonly string[]): string | undefined {
+  const hit = files.find((f) => f.access === 'write' && f.path !== undefined && findMatchingPattern(f.path, protectedPaths) !== undefined);
+  return hit === undefined ? undefined : `the command writes ${hit.path ?? ''}, which is a protected host policy path`;
+}
+
 /** Whether allow rules approve the call. */
 function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePolicy): boolean {
   const { prepared, native } = view;
@@ -230,8 +281,9 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
     if (!analysis || analysis.uncertain.length > 0 || analysis.commands.length === 0) {
       return applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all');
     }
-    if (applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all') && view.bashFiles.length === 0) return true;
-    // Every subcommand must be approved; files it names must be inside the working directories.
+    // An allow-all Bash rule approves files named literally anywhere, as Claude Code does (sensitive files and symlinks are checked apart).
+    if (applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all') && view.bashFiles.every((f) => f.path !== undefined)) return true;
+    // Every subcommand must be approved by a specific rule; files it names must be inside the working directories.
     const everyCommand = analysis.commands.every((cmd) => {
       const form = cmd.allowForm;
       if (form === undefined) return false;
@@ -357,18 +409,62 @@ function criticalRemoval(view: CallView, policy: ClaudePolicy): string | undefin
   return undefined;
 }
 
-/** Resolves symlinks of a command's file target; for a missing file, of its directory. */
+/**
+ * Resolves a command's file target the way the kernel walks it: component by
+ * component from `/`, following each symlink (dangling ones too) before the
+ * next `..`, so `link/../f` climbs from where `link` points. Components past
+ * the first missing one (`mkdir -p link/a/b`) are appended as written. A
+ * symlink loop gives the path back unresolved (the kernel refuses it: ELOOP).
+ */
+/** The `code` of a Node system error, when there is one. */
+function errnoOf(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('code' in err)) return undefined;
+  return typeof err.code === 'string' ? err.code : undefined;
+}
+
 async function realTarget(p: string): Promise<string> {
   if (process.platform === 'win32') return p;
-  try {
-    return toPosixPath(await realpath(p));
-  } catch {
-    try {
-      return path.posix.join(toPosixPath(await realpath(path.posix.dirname(p))), path.posix.basename(p));
-    } catch {
-      return p;
+  const queue = toPosixPath(p).split('/');
+  let current = '/';
+  let missing = false;
+  let hops = 0;
+  while (queue.length > 0) {
+    const seg = queue.shift() ?? '';
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      current = path.posix.dirname(current);
+      continue;
     }
+    const next = path.posix.join(current, seg);
+    if (missing) {
+      current = next;
+      continue;
+    }
+    // Only a component that does not exist (ENOENT; ENOTDIR: a file where a directory would be) ends the walk.
+    // Any other error leaves the real target unknown: fail closed.
+    const isLink = await lstat(next).then(
+      (st) => st.isSymbolicLink(),
+      (err: unknown) => {
+        const code = errnoOf(err);
+        if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+        throw new Error(`cannot resolve ${next}: ${code ?? errorMessage(err)}`);
+      },
+    );
+    if (isLink === undefined) {
+      missing = true;
+      current = next;
+      continue;
+    }
+    if (!isLink) {
+      current = next;
+      continue;
+    }
+    if (++hops > 40) return path.posix.normalize(toPosixPath(p));
+    const link = toPosixPath(await readlink(next));
+    if (link.startsWith('/')) current = '/';
+    queue.unshift(...link.split('/'));
   }
+  return current;
 }
 
 function describe(rule: Rule): string {
@@ -602,7 +698,11 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       const relative = !(f.path.startsWith('/') || f.path.startsWith('~') || path.isAbsolute(f.path));
       // After a `cd`, a relative target cannot be resolved statically.
       if (relative && analysis.changesDirectory) return { access: f.access, path: undefined };
-      return { access: f.access, path: resolveCommandPath(f.path, prepared.effect.cwd, policy.home) };
+      const posixPath = toPosixPath(f.path);
+      const home = toPosixPath(policy.home);
+      const spelled = posixPath === '~' ? home : posixPath.startsWith('~/') ? `${home}/${posixPath.slice(2)}` : posixPath.startsWith('/') ? posixPath : `${toPosixPath(prepared.effect.cwd)}/${posixPath}`;
+      const whenDirectory = f.whenDirectory === undefined ? {} : { whenDirectory: resolveCommandPath(f.whenDirectory, prepared.effect.cwd, policy.home) };
+      return { access: f.access, path: resolveCommandPath(f.path, prepared.effect.cwd, policy.home), spelled, ...whenDirectory };
     });
     return { prepared, native, paths, analysis, bashFiles };
   }
@@ -631,14 +731,16 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     return undefined;
   }
 
-  /** Deny and ask rules. Undefined when none decides. */
-  #restrictions(view: CallView, policy: ClaudePolicy): Decision | undefined {
+  /**
+   * Deny rules, then the paths agent-code-mode protects (refused in every
+   * mode, before any ask rule can turn the refusal into a question), then
+   * ask rules. Undefined when none decides.
+   */
+  #restrictions(view: CallView, policy: ClaudePolicy, protectedPaths: readonly string[]): Decision | undefined {
     const askOrDeny = (reason: string): Decision =>
       policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
-    for (const rule of policy.rules.deny) {
-      const v = restrictVerdict(rule, view);
-      if (v === 'match') return { kind: 'deny', source: 'rule', reason: `denied by ${describe(rule)}` };
-    }
+    const denied = this.#denials(view, policy, protectedPaths);
+    if (denied) return denied;
     // A deny rule that may match once run-time values are known: cannot be settled statically.
     for (const rule of policy.rules.deny) {
       if (restrictVerdict(rule, view) === 'maybe') return askOrDeny(`${describe(rule)} may match parts of the command that are only known at run time`);
@@ -650,19 +752,64 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     return undefined;
   }
 
+  /** Deny rules, then the paths agent-code-mode protects: the refusals no ask rule or mode can soften. */
+  #denials(view: CallView, policy: ClaudePolicy, protectedPaths: readonly string[]): Decision | undefined {
+    for (const rule of policy.rules.deny) {
+      if (restrictVerdict(rule, view) === 'match') return { kind: 'deny', source: 'rule', reason: `denied by ${describe(rule)}` };
+    }
+    const protectedHit = protectedWrite(view.bashFiles, protectedPaths);
+    return protectedHit === undefined ? undefined : { kind: 'deny', source: 'rule', reason: protectedHit };
+  }
+
+  /** A bash call's file targets with symlinks resolved, as the kernel walks them. */
+  async #realBashFiles(view: CallView): Promise<BashFile[]> {
+    return Promise.all(
+      view.bashFiles.map(async (f): Promise<BashFile> => {
+        const { spelled: _spelled, ...rest } = f;
+        return f.path === undefined ? rest : { ...rest, path: await realTarget(f.spelled ?? f.path) };
+      }),
+    );
+  }
+
+  /**
+   * The refusals that need the real paths of a bash call's targets (deny
+   * rules and the paths agent-code-mode protects, reached through a
+   * symlink). The dispatcher runs this before `checkStatic`, so an ask rule
+   * cannot turn the refusal into a question.
+   */
+  async checkResolved(prepared: PreparedCall, _ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Promise<Decision | undefined> {
+    if (prepared.tool !== 'bash') return undefined;
+    const policy = snapshot.payload;
+    const view = this.#view(prepared, policy);
+    let real: BashFile[];
+    try {
+      real = await this.#realBashFiles(view);
+    } catch (err) {
+      // A target whose real path cannot be known may be anything, a protected path included.
+      return { kind: 'deny', source: 'rule', reason: `the real path of a file the command names cannot be checked: ${errorMessage(err)}` };
+    }
+    if (real.every((f, i) => f.path === view.bashFiles[i]?.path)) return undefined;
+    const denied = this.#denials({ ...view, bashFiles: real }, policy, snapshot.protectedPaths);
+    return denied === undefined ? undefined : { ...denied, reason: `${denied.reason} (through a symlink)` };
+  }
+
   checkStatic(prepared: PreparedCall, _ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
     const policy = snapshot.payload;
     const view = this.#view(prepared, policy);
     const askOrDeny = (reason: string): Decision =>
       policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
-    const restricted = this.#restrictions(view, policy) ?? this.#originalRestrictions(prepared, policy);
+    // Deny rules, the paths agent-code-mode protects (as write() and edit() refuse them, in every mode), then ask rules.
+    const restricted = this.#restrictions(view, policy, snapshot.protectedPaths) ?? this.#originalRestrictions(prepared, policy);
     if (restricted) return restricted;
     if (view.analysis && view.analysis.uncertain.length > 0) {
       return askOrDeny(`the command cannot be checked statically (${view.analysis.uncertain.join('; ')})`);
     }
     const critical = criticalRemoval(view, policy);
     if (critical !== undefined) return askOrDeny(`${critical}; no rule or mode approves it`);
-    if (allowedByRule(view, policy.rules.allow, policy)) return { kind: 'allow' };
+    if (allowedByRule(view, policy.rules.allow, policy)) {
+      const sensitive = checksBashTargets(policy.mode) ? sensitiveWrite(view.bashFiles) : undefined;
+      return sensitive === undefined ? { kind: 'allow' } : askOrDeny(`${sensitive}; Claude Code asks before such a write`);
+    }
     const decision = modeDecision(view, policy);
     // Same decision, with the cause the script can act on, when acting on it would get the command approved.
     if (decision.kind !== 'allow' && view.bashFiles.some((f) => f.path === undefined) && literalFormAllowed(view, policy)) {
@@ -673,14 +820,44 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
 
   /**
    * Re-checks a bash command's file targets after resolving symlinks (I/O,
-   * so not in `checkStatic`): `cat link` where `link -> .env` is denied.
+   * so not in `checkStatic`): `cat link` where `link -> .env` is denied, and,
+   * as Claude Code does, a target named inside the working directories that
+   * resolves outside them, or to a sensitive or protected file, needs approval.
    */
-  async #realFiles(prepared: PreparedCall, policy: ClaudePolicy): Promise<Decision | undefined> {
+  async #realFiles(prepared: PreparedCall, snapshot: PolicySnapshot<ClaudePolicy>): Promise<Decision | undefined> {
     if (prepared.tool !== 'bash') return undefined;
+    const policy = snapshot.payload;
     const view = this.#view(prepared, policy);
-    const real = await Promise.all(view.bashFiles.map(async (f) => ({ access: f.access, path: f.path === undefined ? undefined : await realTarget(f.path) })));
+    // A target written only into a destination directory: a sensitive one asks once the destination is a directory now.
+    if (checksBashTargets(policy.mode)) {
+      for (const f of view.bashFiles) {
+        if (f.whenDirectory === undefined || f.path === undefined || f.access !== 'write' || !isSensitivePath(f.path)) continue;
+        const isDir = await stat(f.whenDirectory).then((st) => st.isDirectory(), () => false);
+        if (!isDir) continue;
+        const reason = `the command writes ${f.path} (into the directory ${f.whenDirectory}), which is a sensitive file; Claude Code asks before such a write`;
+        return policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
+      }
+    }
+    const real = await this.#realBashFiles(view);
     if (real.every((f, i) => f.path === view.bashFiles[i]?.path)) return undefined;
-    return this.#restrictions({ ...view, bashFiles: real }, policy);
+    const restricted = this.#restrictions({ ...view, bashFiles: real }, policy, snapshot.protectedPaths);
+    if (restricted) return restricted.kind === 'deny' && restricted.reason.includes('protected host policy path') ? { ...restricted, reason: `${restricted.reason} (through a symlink)` } : restricted;
+    if (!checksBashTargets(policy.mode)) return undefined;
+    const askOrDeny = (reason: string): Decision =>
+      policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
+    const dirs = [...policy.workingDirs, ...(await Promise.all(policy.workingDirs.map(realTarget)))];
+    const changed = real.filter((f, i) => f.path !== view.bashFiles[i]?.path);
+    // Measured: an allow-all Bash rule still asks for a write (not a read) named inside that resolves outside;
+    // a specific rule needs every real target inside, as it does every named one.
+    const realAllowed = allowedByRule({ ...view, bashFiles: real }, policy.rules.allow, policy);
+    for (const [i, f] of real.entries()) {
+      const written = view.bashFiles[i]?.path;
+      if (f.path === undefined || written === undefined || f.path === written) continue;
+      if (!policy.workingDirs.some((d) => isInsidePath(written, d)) || dirs.some((d) => isInsidePath(f.path ?? '', d))) continue;
+      if (f.access === 'write' || !realAllowed) return askOrDeny(`${written} resolves through a symlink to ${f.path}, which is outside the working directories`);
+    }
+    const sensitive = sensitiveWrite(changed);
+    return sensitive === undefined ? undefined : askOrDeny(`${sensitive} (through a symlink); Claude Code asks before such a write`);
   }
 
   #select(hooks: readonly CompiledHook[], view: CallView, policy: ClaudePolicy): CompiledHook[] {
@@ -729,7 +906,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
 
   async authorize(prepared: PreparedCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<Decision> {
     const policy = snapshot.payload;
-    const realFiles = await this.#realFiles(prepared, policy);
+    const realFiles = await this.#realFiles(prepared, snapshot);
     if (realFiles) return realFiles;
     const view = this.#view(prepared, policy);
     const hooks = this.#select(policy.preHooks, view, policy);
@@ -764,7 +941,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
           // The dispatcher re-checks the rewrite statically; the symlink check needs I/O, so it runs here.
           const command = mapped.args.command;
           const rewritten: PreparedCall = { ...prepared, args: { ...prepared.args, command }, effect: { ...prepared.effect, command } };
-          const again = await this.#realFiles(rewritten, policy);
+          const again = await this.#realFiles(rewritten, snapshot);
           if (again) return again.kind === 'deny' ? again : { kind: 'ask', reason: `hook rewrite: ${again.reason}` };
         }
         return { kind: 'allow', updatedArgs: mapped.args, ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
