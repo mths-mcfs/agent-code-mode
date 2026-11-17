@@ -499,6 +499,21 @@ export interface PolicySnapshot<P = unknown> {
    */
   readonly protectedPaths: readonly string[];
   /**
+   * Absolute path patterns (same syntax as `protectedPaths`) the tool runtime
+   * fingerprints around every `bash` call, to report changes there in
+   * `warnings`: the host policy files the adapter reads and the server state
+   * dir. Absent: `protectedPaths`. Each pattern must start with a literal
+   * absolute directory, and the set must stay small (it is read before every
+   * `bash` call); detection only, it never blocks a write.
+   */
+  readonly watchedPaths?: readonly string[];
+  /**
+   * Changes in the watched paths that are routine for this host and not worth
+   * a warning (Claude: a new, well-formed companion-hook context record).
+   * Called only for changes agent-code-mode's own writes do not explain.
+   */
+  readonly isRoutineWatchedChange?: (change: WatchedChange) => Promise<boolean>;
+  /**
    * The host's additional working directories (e.g. Claude
    * `permissions.additionalDirectories`, `--add-dir`): absolute directories
    * the tools may touch besides the session cwd and roots.
@@ -519,6 +534,13 @@ export interface PolicySnapshot<P = unknown> {
    */
   readonly planBashExpansion?: (command: string) => BashGlobPlan | undefined;
   readonly payload: P;
+}
+
+/** One path that differs between two snapshots of the watched paths (undefined side: absent). */
+export interface WatchedChange {
+  readonly path: string;
+  readonly before?: { readonly type: 'file' | 'dir' | 'symlink' | 'other'; readonly mode: number };
+  readonly after?: { readonly type: 'file' | 'dir' | 'symlink' | 'other'; readonly mode: number };
 }
 
 /** Returned by `HostAdapter.loadPolicy` when the host config cannot be understood. Every call is then denied with `unsupported-config`. */
@@ -635,9 +657,21 @@ export interface ToolRuntime<P = unknown> {
    * `tx` is given, file changes are journaled in it. Must honor `signal`:
    * not start when already aborted, and stop a running `bash`.
    */
-  commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult>;
+  commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction, observer?: CommitObserver): Promise<ToolResult>;
   /** Starts a journal for one transactional run. */
   beginTransaction(): Transaction;
+  /**
+   * Optional end-of-run check: compares the watched paths with what the last
+   * `bash` call of the run (the one committed with `observer`) left, and
+   * reports differences through `observer.warn`. Never throws.
+   */
+  finishRun?(observer: CommitObserver): Promise<void>;
+}
+
+/** What a commit may report besides its result (one per run). */
+export interface CommitObserver {
+  /** Adds a line to the run's `warnings`. */
+  warn(message: string): void;
 }
 
 // ---------------------------------------------------------------------------

@@ -156,6 +156,26 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       path.join(config.projectRoot, '.mcp.json'),
     ]);
 
+    // What the bash watch fingerprints: the policy files Codex reads (config, hooks and exec-policy rules of every
+    // config folder, the system requirements) and the state dir, not the rest of ~/.codex (sessions, logs, caches).
+    const policyFolders = unique([
+      config.codexHome,
+      homeCodex,
+      io.systemDir,
+      ...config.layers.flatMap((l) => (l.folder === null ? [] : [l.folder])),
+      ...config.untrustedProjectFolders,
+      path.join(config.cwd, '.codex'),
+      path.join(config.projectRoot, '.codex'),
+    ]);
+    const watchedPaths = unique([
+      `${stateDir}/**`,
+      ...policyFolders.flatMap((f) => [path.join(f, 'config.toml'), path.join(f, 'hooks.json'), path.join(f, 'rules', '*.rules')]),
+      path.join(io.systemDir, 'requirements.toml'),
+      path.join(io.systemDir, 'managed_config.toml'),
+      path.join(config.cwd, '.mcp.json'),
+      path.join(config.projectRoot, '.mcp.json'),
+    ]);
+
     // The configured writable roots (`sandbox_workspace_write.writable_roots`) are where Codex lets
     // file edits land besides the cwd, so the tools jail must reach them too (real paths, like the jail's).
     const additionalRoots =
@@ -165,6 +185,7 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       host: 'codex',
       bashContainment,
       protectedPaths,
+      watchedPaths,
       ...(additionalRoots.length > 0 ? { additionalRoots } : {}),
       payload: {
         sandboxMode,

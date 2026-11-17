@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { ToolError, errorMessage } from '../core/errors.js';
+import { recordOwnDir, recordOwnFile, recordOwnWrite } from '../core/own-writes.js';
 import type { RollbackReport, Transaction } from '../core/types.js';
 import {
   type RegularFile,
@@ -132,14 +133,20 @@ export class FileTransaction implements Transaction {
   }
 
   async #persist(): Promise<void> {
+    // Every change here is recorded as agent-code-mode's own, so the protected-path watch does not report it.
     if (!this.#created) {
       await fs.mkdir(path.dirname(this.dir), { recursive: true, mode: 0o700 });
+      await recordOwnDir(path.dirname(this.dir));
       await fs.mkdir(this.dir, { mode: 0o700 });
+      await recordOwnDir(this.dir);
       this.#created = true;
     }
     const next = path.join(this.dir, `${MANIFEST}.next`);
-    await writeDurable(next, JSON.stringify(this.#manifest()));
+    const text = JSON.stringify(this.#manifest());
+    await writeDurable(next, text);
     await fs.rename(next, path.join(this.dir, MANIFEST));
+    recordOwnWrite(next, { kind: 'absent' });
+    await recordOwnFile(path.join(this.dir, MANIFEST), sha256(text));
     await syncDir(this.dir);
   }
 
@@ -186,6 +193,7 @@ export class FileTransaction implements Transaction {
         if (!this.#created) await this.#persist();
         blob = `${this.#entries.size}.bin`;
         await writeDurable(path.join(this.dir, blob), before.bytes);
+        await recordOwnFile(path.join(this.dir, blob), sha256(before.bytes));
       }
       this.#bytes += size;
       for (const d of createdDirs) if (!this.#dirs.includes(d)) this.#dirs.push(d);
@@ -259,6 +267,7 @@ export class FileTransaction implements Transaction {
   async #removeRecord(): Promise<void> {
     if (!this.#created) return;
     await fs.rm(this.dir, { recursive: true, force: true });
+    recordOwnWrite(this.dir, { kind: 'tree-absent' });
     this.#created = false;
   }
 }

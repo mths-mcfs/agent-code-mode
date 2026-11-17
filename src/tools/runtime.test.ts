@@ -395,3 +395,58 @@ describe.skipIf(IS_WINDOWS)('bash cwd', () => {
     expect(same.tool === 'bash' && same.effect.command).toBe('pwd');
   });
 });
+
+describe.runIf(!IS_WINDOWS)('protected-path watch around bash', () => {
+  const observe = () => {
+    const warnings: string[] = [];
+    return { warnings, observer: { warn: (m: string) => warnings.push(m) } };
+  };
+  const signal = () => new AbortController().signal;
+
+  it('warns when a watched file changes during bash and keeps the result', async () => {
+    const o = observe();
+    mkdirSync(path.join(ws, '.claude'));
+    const p = await prep('bash', { command: `printf hi; node -e "require('fs').writeFileSync('.claude/settings.local.json', '{}')"` });
+    const result = await rt.commit(p, signal(), undefined, o.observer);
+    expect(result).toMatchObject({ exitCode: 0, stdout: 'hi' });
+    expect(o.warnings).toEqual([`protected path changed during bash call ${p.id}: ${path.join(ws, '.claude', 'settings.local.json')}`]);
+  });
+
+  it('checks after a failing or timed-out command too', async () => {
+    const o = observe();
+    mkdirSync(path.join(ws, '.claude'));
+    const p = await prep('bash', { command: `touch .claude/settings.json; sleep 5`, timeoutMs: 300 });
+    const result = await rt.commit(p, signal(), undefined, o.observer);
+    expect(result).toMatchObject({ timedOut: true });
+    expect(o.warnings.join('\n')).toContain('protected path changed during bash call');
+  });
+
+  it('reports what changed between bash calls and at the end of the run', async () => {
+    const o = observe();
+    mkdirSync(path.join(ws, '.claude'));
+    await rt.commit(await prep('bash', { command: 'true' }), signal(), undefined, o.observer);
+    writeFileSync(path.join(ws, '.mcp.json'), '{}');
+    const second = await prep('bash', { command: 'true' });
+    await rt.commit(second, signal(), undefined, o.observer);
+    writeFileSync(path.join(ws, '.claude', 'settings.json'), '{}');
+    await rt.finishRun(o.observer);
+    expect(o.warnings).toEqual([
+      `protected path changed during the run, after bash call ${second.id.replace(/\d+$/, (n) => String(Number(n) - 1))}: ${path.join(ws, '.mcp.json')}`,
+      `protected path changed during the run, after bash call ${second.id}: ${path.join(ws, '.claude', 'settings.json')}`,
+    ]);
+  });
+
+  it('refuses the command when the watched paths cannot be fingerprinted before it runs', async () => {
+    policy = { ...policy, watchedPaths: [`${path.parse(ws).root}**/.codex/**`] };
+    const p = await prep('bash', { command: 'touch ran.txt' });
+    expect(await code(rt.commit(p, signal(), undefined, observe().observer))).toBe('containment-unavailable');
+    expect(existsSync(path.join(ws, 'ran.txt'))).toBe(false);
+  });
+
+  it('a bash call with nothing watched changed adds no warning', async () => {
+    const o = observe();
+    await rt.commit(await prep('bash', { command: 'echo x > plain.txt' }), signal(), undefined, o.observer);
+    await rt.finishRun(o.observer);
+    expect(o.warnings).toEqual([]);
+  });
+});
