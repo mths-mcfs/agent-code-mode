@@ -68,6 +68,13 @@ const PARAM_FIELDS: Record<string, ReadonlySet<string>> = {
   Glob: new Set(['pattern']),
 };
 
+/** The native path for a POSIX-form one, for file-system calls: `/c/x` → `C:\x` on Windows. */
+export function toNativePath(p: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32') return p;
+  const drive = /^\/([A-Za-z])(\/|$)/.exec(p);
+  return drive?.[1] ? `${drive[1].toUpperCase()}:\\${p.slice(3).replace(/\//g, '\\')}` : p.replace(/\//g, '\\');
+}
+
 /** Converts a native path to POSIX form for matching: `C:\x` → `/c/x`. */
 export function toPosixPath(p: string, platform: NodeJS.Platform = process.platform): string {
   // On POSIX a backslash is an ordinary file-name character: only Windows paths are rewritten.

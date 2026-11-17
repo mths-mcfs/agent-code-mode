@@ -40,6 +40,7 @@ import {
   matchesToolName,
   parseRule,
   resolveCommandPath,
+  toNativePath,
   toPosixPath,
   type NativeToolName,
   type PathPattern,
@@ -266,9 +267,19 @@ function sensitiveWrite(files: readonly BashFile[]): string | undefined {
   return hit === undefined ? undefined : `the command writes ${hit.path ?? ''}, which is a sensitive file`;
 }
 
+/**
+ * The protected pattern a command target matches. Targets are in POSIX form
+ * (`/c/x` on Windows) and the host lists native paths (`C:\x\**`): both are
+ * compared in the POSIX form, or nothing would ever match on Windows.
+ */
+export function protectedPathHit(posixPath: string, protectedPaths: readonly string[], platform: NodeJS.Platform = process.platform): string | undefined {
+  const caseInsensitive = platform === 'win32' || platform === 'darwin';
+  return protectedPaths.find((pattern) => findMatchingPattern(posixPath, [toPosixPath(pattern, platform)], caseInsensitive) !== undefined);
+}
+
 /** Why one of the files must not be written: a path agent-code-mode protects (as write() and edit() refuse it). */
 function protectedWrite(files: readonly BashFile[], protectedPaths: readonly string[]): string | undefined {
-  const hit = files.find((f) => f.access === 'write' && f.path !== undefined && findMatchingPattern(f.path, protectedPaths) !== undefined);
+  const hit = files.find((f) => f.access === 'write' && f.path !== undefined && protectedPathHit(f.path, protectedPaths) !== undefined);
   return hit === undefined ? undefined : `the command writes ${hit.path ?? ''}, which is a protected host policy path`;
 }
 
@@ -832,7 +843,11 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     if (checksBashTargets(policy.mode)) {
       for (const f of view.bashFiles) {
         if (f.whenDirectory === undefined || f.path === undefined || f.access !== 'write' || !isSensitivePath(f.path)) continue;
-        const isDir = await stat(f.whenDirectory).then((st) => st.isDirectory(), () => false);
+        // Not there (ENOENT, ENOTDIR): no directory. Any other error: it may be one, so the write counts (fail closed).
+        const isDir = await stat(toNativePath(f.whenDirectory)).then(
+          (st) => st.isDirectory(),
+          (err: unknown) => !['ENOENT', 'ENOTDIR'].includes(errnoOf(err) ?? ''),
+        );
         if (!isDir) continue;
         const reason = `the command writes ${f.path} (into the directory ${f.whenDirectory}), which is a sensitive file; Claude Code asks before such a write`;
         return policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };

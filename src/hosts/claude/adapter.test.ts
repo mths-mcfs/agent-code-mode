@@ -7,7 +7,8 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { Dispatcher } from '../../core/dispatcher.js';
 import type { Decision, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
 import { MemoryToolRuntime, makeContext } from '../../testing/index.js';
-import { ClaudeHostAdapter, type ClaudePolicy, RUNTIME_FILES_HINT } from './adapter.js';
+import { ClaudeHostAdapter, type ClaudePolicy, RUNTIME_FILES_HINT, protectedPathHit } from './adapter.js';
+import { findMatchingPattern } from '../../core/paths.js';
 
 const posix = process.platform !== 'win32';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -102,6 +103,11 @@ function grep(root: string): PreparedCall {
 }
 function glob(root: string): PreparedCall {
   return { id: 'c1', tool: 'glob', args: { pattern: '**/*.ts', path: root }, effect: { absRoot: root, pattern: '**/*.ts', maxResults: 50 } };
+}
+
+/** A native path as a bash word: `/` separators (Git Bash reads `C:/x`; an unquoted `C:\x` loses its backslashes). */
+function shellPath(p: string): string {
+  return p.split(path.sep).join('/');
 }
 
 function check(s: Setup, prepared: PreparedCall): Decision['kind'] {
@@ -311,7 +317,7 @@ describe('Bash files outside the working directories (measured on the host)', ()
 
   it('an allow-all Bash rule approves literal files outside, as the host does', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     for (const command of outsideCommands(out)) expect([command, check(s, bash(command, s.project))]).toEqual([command, 'allow']);
   });
 
@@ -327,7 +333,7 @@ describe('Bash files outside the working directories (measured on the host)', ()
 
   it('a deny rule still wins over the allow-all rule outside', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'], deny: ['Bash(rm:*)'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     expect(check(s, bash(`rm ${out}/f.txt`, s.project))).toBe('deny');
     expect(check(s, bash(`rm -rf ${out}/sub`, s.project))).toBe('deny');
     expect(check(s, bash(`touch ${out}/f.txt`, s.project))).toBe('allow');
@@ -336,7 +342,7 @@ describe('Bash files outside the working directories (measured on the host)', ()
   it('stays stricter than the host where the target is only known at run time', async () => {
     // The host allows both; agent-code-mode cannot resolve the target statically.
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     expect(check(s, bash(`d=${out}; touch $d/f.txt`, s.project))).toBe('ask');
     expect(check(s, bash(`cd ${out} && touch f.txt`, s.project))).toBe('ask');
   });
@@ -352,7 +358,7 @@ describe('Bash files outside the working directories (measured on the host)', ()
 
   it('writing a sensitive file asks whatever allow rule covers the command, inside or outside', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     // The project's own settings, hooks, agents and .mcp.json are also paths agent-code-mode protects: refused.
     const protectedHere = new Set(['.claude/settings.json', '.claude/settings.local.json', '.claude/agents/x.md', '.claude/hooks/x.sh', '.mcp.json']);
     for (const rel of sensitive) {
@@ -372,20 +378,20 @@ describe('Bash files outside the working directories (measured on the host)', ()
 
   it('a path agent-code-mode protects is refused, even outside', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    expect(check(s, bash(`touch ${path.join(s.base, 'state', 'planted')}`, s.project))).toBe('deny');
+    expect(check(s, bash(`touch ${shellPath(path.join(s.base, 'state', 'planted'))}`, s.project))).toBe('deny');
   });
 
   it('bypassPermissions writes sensitive files; dontAsk denies them', async () => {
     const bypass = await setup({ user: { permissions: { allow: ['Bash'] } }, mode: 'bypassPermissions' });
     expect(check(bypass, bash('echo x > .git/config', bypass.project))).toBe('allow');
-    expect(check(bypass, bash(`echo x > ${path.join(bypass.base, 'elsewhere')}/.bashrc`, bypass.project))).toBe('allow');
+    expect(check(bypass, bash(`echo x > ${shellPath(path.join(bypass.base, 'elsewhere'))}/.bashrc`, bypass.project))).toBe('allow');
     const dontAsk = await setup({ user: { permissions: { allow: ['Bash'] } }, mode: 'dontAsk' });
     expect(check(dontAsk, bash('echo x > .git/config', dontAsk.project))).toBe('deny');
   });
 
   it.skipIf(!posix)('a target named inside that resolves outside through a symlink asks; one named outside does not', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     await mkdir(path.join(out, '.claude'), { recursive: true });
     await writeFile(path.join(out, '.claude', 'settings.json'), '{}');
     await symlink(out, path.join(s.project, 'link'));
@@ -427,7 +433,7 @@ describe('which operands a bash command writes (review findings)', () => {
   it('every operand of cp, mv, install and ln counts as written, as the host checks them', async () => {
     // Measured: the host asks for `cp .git/config /tmp/x` (".git/config ... is a sensitive file").
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     for (const command of [`cp .git/config ${out}/x`, `mv .git/config ${out}/x`, `cp ${out}/x .git/config`, `cp -t ${out} .git/config`, `ln .git/config ${out}/l`]) {
       expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
     }
@@ -449,7 +455,7 @@ describe('which operands a bash command writes (review findings)', () => {
 
   it.skipIf(!posix)('a write through a symlink whose target misses several parents resolves outside and asks', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     await mkdir(out, { recursive: true });
     await symlink(path.join(out, 'a', 'b', 'c'), path.join(s.project, 'deep'));
     for (const command of ['echo x > deep/f', 'mkdir -p deep/x/y', 'touch deep/x/y/z']) {
@@ -480,7 +486,7 @@ describe('second review findings (oracle: the host truth table)', () => {
 
   it.skipIf(!posix)('`..` after a symlink climbs from where the link points, as the kernel does', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const out = path.join(s.base, 'elsewhere');
+    const out = shellPath(path.join(s.base, 'elsewhere'));
     await mkdir(path.join(out, 'child'), { recursive: true });
     await symlink(path.join(out, 'child'), path.join(s.project, 'link'));
     // Host rows rDotDot1 and rDotDot3: named inside (lexically), real path outside.
@@ -507,8 +513,8 @@ describe('second review findings (oracle: the host truth table)', () => {
   it('a path agent-code-mode protects is refused in every mode, as write and edit are', async () => {
     for (const mode of ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan']) {
       const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
-      const state = path.join(s.base, 'state');
-      for (const command of [`touch ${state}/planted`, `echo x > ${state}/planted`, `echo '{}' > ${path.join(s.home, '.claude', 'settings.json')}`, 'echo x > .mcp.json']) {
+      const state = shellPath(path.join(s.base, 'state'));
+      for (const command of [`touch ${state}/planted`, `echo x > ${state}/planted`, `echo '{}' > ${shellPath(path.join(s.home, '.claude', 'settings.json'))}`, 'echo x > .mcp.json']) {
         expect([mode, command, s.adapter.checkStatic(bash(command, s.project), s.ctx, s.policy)]).toMatchObject([mode, command, { kind: 'deny', reason: expect.stringContaining('protected host policy path') }]);
       }
     }
@@ -541,7 +547,7 @@ describe('third review findings: misread options over-approximate in the safe di
 
   it('every -t value is a destination, never last-wins, even after an option of unknown arity', async () => {
     const s = await setup({ user: { permissions: { allow: ['Bash'] } } });
-    const state = path.join(s.base, 'state');
+    const state = shellPath(path.join(s.base, 'state'));
     for (const tool of tools) {
       for (const command of [`${tool} -t .git --suffix -tplain src.txt`, `${tool} -t .git -t plain src.txt`, `${tool} --target-dir=.git --target-directory plain src.txt`]) {
         expect([command, check(s, bash(command, s.project))]).toEqual([command, 'ask']);
@@ -574,7 +580,7 @@ describe('third review findings: misread options over-approximate in the safe di
     }
     for (const mode of ['default', 'auto', 'bypassPermissions']) {
       const m = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
-      for (const command of [`sed -i'../state/*' 's/a/b/' src.txt`, `sed -i'${path.join(m.base, 'state')}/*' 's/a/b/' src.txt`]) {
+      for (const command of [`sed -i'../state/*' 's/a/b/' src.txt`, `sed -i'${shellPath(path.join(m.base, 'state'))}/*' 's/a/b/' src.txt`]) {
         expect([mode, command, check(m, bash(command, m.project))]).toEqual([mode, command, 'deny']);
       }
     }
@@ -583,7 +589,7 @@ describe('third review findings: misread options over-approximate in the safe di
     expect(check(s, bash("sed -i'bak-*' 's/a/b/' src.txt", s.project))).toBe('allow');
     // GNU sed 4.9 replaces `*` with the name as written: `*` on `<state>/x` renames to `<state>/x` itself.
     expect(check(s, bash("sed -i'.git/*' 's/a/b/' sub/src.txt", s.project))).toBe('ask');
-    expect(check(s, bash(`sed -i'*' 's/a/b/' ${path.join(s.base, 'state')}/x`, s.project))).toBe('deny');
+    expect(check(s, bash(`sed -i'*' 's/a/b/' ${shellPath(path.join(s.base, 'state'))}/x`, s.project))).toBe('deny');
   });
 
   it.skipIf(!posix)('a backslash in a command path or a rule is a file name character on POSIX', async () => {
@@ -597,7 +603,7 @@ describe('third review findings: misread options over-approximate in the safe di
   it.skipIf(!posix)('a backslash in a symlink target is a file name character on POSIX', async () => {
     for (const mode of ['default', 'auto', 'bypassPermissions']) {
       const s = await setup({ user: { permissions: { allow: ['Bash'] } }, mode });
-      const state = path.join(s.base, 'state');
+      const state = shellPath(path.join(s.base, 'state'));
       await mkdir(state, { recursive: true });
       // As reported: alias -> back\slash -> ../state, both in the workspace.
       await symlink('../state', path.join(s.project, 'back\\slash'));
@@ -685,6 +691,19 @@ describe('fourth review findings', () => {
     // The dispatcher runs checkResolved before checkStatic: the deny wins over the ask rule.
     expect(await s.adapter.checkResolved(bash('echo x > alias/f', s.project), s.ctx, s.policy)).toMatchObject({ kind: 'deny', reason: expect.stringContaining('protected') });
     expect(await authorize(s, bash('echo x > alias/f', s.project))).toMatchObject({ kind: 'deny', reason: expect.stringContaining('protected') });
+  });
+});
+
+describe('protected paths on Windows (win32 semantics, on any OS)', () => {
+  it('a command target in POSIX form matches the native protected patterns', () => {
+    const patterns = ['C:\\Users\\a\\state\\**', 'C:\\Users\\a\\proj\\.claude\\settings*.json'];
+    for (const target of ['/c/Users/a/state/planted', '/c/users/A/STATE/x', '/c/Users/a/proj/.claude/settings.json', '/c/Users/a/proj/.claude/settings.local.json']) {
+      expect([target, protectedPathHit(target, patterns, 'win32')]).toEqual([target, expect.any(String)]);
+      // The comparison it replaced never matched: native pattern against a POSIX-form path.
+      expect(findMatchingPattern(target, patterns, true)).toBeUndefined();
+    }
+    expect(protectedPathHit('/c/Users/a/proj/src/x.ts', patterns, 'win32')).toBeUndefined();
+    expect(protectedPathHit('/d/Users/a/state/x', patterns, 'win32')).toBeUndefined();
   });
 });
 
