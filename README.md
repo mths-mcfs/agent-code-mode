@@ -17,8 +17,10 @@ npx -y agent-code-mode install --host claude --scope project
 User scope prints the registration command and the companion hook for `~/.claude/settings.json`:
 
 ```sh
-claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude
+claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude --hybrid
 ```
+
+Install uses `--hybrid` by default because Claude Code keeps its native file and shell tools enabled next to `run`: the tool description then says when to batch calls with `run` and when a native tool is enough. Drop `--hybrid` only if you turn the native tools off and the model works through `run` alone.
 
 ```json
 {

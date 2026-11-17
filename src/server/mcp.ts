@@ -37,6 +37,13 @@ type Failed = {id: string; tool: string; summary: string; reason?: string} | {to
 type Response = {ok: boolean; result?: unknown; error?: {name: string; message: string}; logs?: string[]; calls: {total: number; byTool: Record<string, number>; denied?: Failed[]; errors?: Failed[]}; changedFiles?: string[]; diff?: string; diffStat?: {files: Record<string, string>; moreFiles?: number; total: string}; warnings?: string[]; callSummary?: Response['calls']; truncated?: true; overflow?: {id: string; chars: number}}; // a multi-line string result over ${TEXT_BLOCK_MIN_CHARS} chars comes as plain text in a second block; a diff over ${DIFF_INLINE_CHARS} chars comes as diffStat
 QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits`;
 
+/**
+ * The one line `serve --hybrid` appends to the description, for hosts that keep their native file and
+ * shell tools next to `run`: it says which of the two a step should use.
+ */
+export const HYBRID_GUIDANCE =
+  'Native file and shell tools are also available: use them for a single read, edit or command; use run when a step needs 3+ file/shell calls, a loop over files, or filtering a large output.';
+
 export const RUN_TOOL: Tool = {
   name: 'run',
   title: 'Run a code-mode script',
@@ -50,6 +57,8 @@ export interface McpServerOptions {
   readonly version: string;
   /** `--host` flag; skips detection. */
   readonly host?: HostKind;
+  /** `--hybrid` flag: the `run` description ends with `HYBRID_GUIDANCE`. Default false (the description as it is). */
+  readonly hybrid?: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly serverCwd?: string;
   readonly stateDir?: string;
@@ -145,7 +154,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
     }
   };
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [RUN_TOOL] }));
+  const listed: Tool = opts.hybrid === true ? { ...RUN_TOOL, description: `${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}` } : RUN_TOOL;
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [listed] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
     let verbose = false;

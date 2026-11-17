@@ -54,7 +54,7 @@ describe('paired schedule', () => {
       expect(bs).toHaveLength(c.runs * c.hosts.length * c.tasks.length);
       for (const b of bs) {
         const host = b[0]?.host ?? 'claude';
-        const expected = host === 'claude' ? (c.baseline ? ['A', 'B', 'B0'] : ['A', 'B']) : c.baseline ? ['A', 'B', 'C', 'C0'] : ['A', 'B', 'C'];
+        const expected = host === 'claude' ? (c.baseline ? ['A', 'B', 'B0', 'C'] : ['A', 'B', 'C']) : c.baseline ? ['A', 'B', 'C', 'C0'] : ['A', 'B', 'C'];
         expect(b.map((p) => p.arm).sort()).toEqual(expected);
         expect(b.map((p) => p.position)).toEqual(expected.map((_a, i) => i));
       }
@@ -91,14 +91,17 @@ describe('paired schedule', () => {
     expect(planRuns(['claude', 'codex'], ['T1', 'T2', 'T3'], undefined, 4, 42)).toEqual(a);
     const orders = new Set([1, 2, 3, 4, 5, 6].map((seed) => planRuns(['claude', 'codex'], ['T1', 'T2', 'T3'], undefined, 4, seed).map((p) => `${p.host}${p.task}${p.arm}`).join()));
     expect(orders.size).toBeGreaterThan(1);
-    expect(planRuns(['claude'], ['T1'], ['C'], 1, 1)).toEqual([]);
+    // Claude C is the hybrid arm; the baseline arm C0 is Codex only, B0 Claude only.
+    expect(planRuns(['claude'], ['T1'], ['C'], 1, 1).map((p) => `${p.host}${p.arm}`)).toEqual(['claudeC']);
+    expect(planRuns(['claude'], ['T1'], ['C0'], 1, 1, true)).toEqual([]);
+    expect(planRuns(['codex'], ['T1'], ['B0'], 1, 1, true)).toEqual([]);
     expect(planRuns(['claude'], ['T1'], ['A', 'B0'], 2, 1, true).map((p) => p.arm).sort()).toEqual(['A', 'A', 'B0', 'B0']);
   });
 
   it('warms every host x arm of the plan once, on the warmup task', () => {
     const plan = planRuns(['claude', 'codex'], ['T5', 'T9'], undefined, 3, 7, true);
     const warm = planWarmup(plan, 7);
-    expect(warm.map((p) => `${p.host}${p.arm}`).sort()).toEqual(['claudeA', 'claudeB', 'claudeB0', 'codexA', 'codexB', 'codexC', 'codexC0']);
+    expect(warm.map((p) => `${p.host}${p.arm}`).sort()).toEqual(['claudeA', 'claudeB', 'claudeB0', 'claudeC', 'codexA', 'codexB', 'codexC', 'codexC0']);
     expect(warm.every((p) => p.task === WARMUP_TASK && p.warmup === true)).toBe(true);
   });
 });
@@ -114,6 +117,12 @@ describe('host commands', () => {
     // Arm A: exactly the native file/shell tools, nothing else built in.
     expect(a.slice(a.indexOf('--tools'))).toEqual(['--tools', 'Bash,Read,Write,Edit,Glob,Grep', '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep']);
     expect(claudeMcpConfig('A', 'x')).toEqual({ mcpServers: {} });
+    expect(claudeMcpConfig('B', 'x')).toMatchObject({ mcpServers: { 'agent-code-mode': { args: ['x', 'serve', '--host', 'claude'] } } });
+    // Arm C (hybrid): the native tools of A plus run, and the server started with --hybrid.
+    const c = claudeArgs({ arm: 'C', model: 'm', effort: 'low', maxTurns: 5, settingsFile: 's.json', mcpConfigFile: 'm.json' });
+    expect(c.slice(c.indexOf('--tools'))).toEqual(['--tools', 'Bash,Read,Write,Edit,Glob,Grep', '--allowedTools', 'mcp__agent-code-mode__run,Bash,Read,Write,Edit,Glob,Grep']);
+    expect(c.slice(0, c.indexOf('--tools'))).toEqual(a.slice(0, a.indexOf('--tools')));
+    expect(claudeMcpConfig('C', 'x')).toMatchObject({ mcpServers: { 'agent-code-mode': { args: ['x', 'serve', '--host', 'claude', '--hybrid'] } } });
   });
 
   it('writes the Codex config each arm needs', () => {
@@ -200,15 +209,15 @@ describe('dry run', () => {
       process.stdout.write = orig;
     }
     const text = writes.join('');
-    expect(text.match(/^(claude|codex) T\d+ \w+ r1: pass, valid/gm)).toHaveLength(10);
+    expect(text.match(/^(claude|codex) T\d+ \w+ r1: pass, valid/gm)).toHaveLength(12);
     // One warmup per host x arm before the matrix; none on the resume, which has nothing left to run.
-    expect(text.match(/^warmup (claude|codex) T1 \w+ r1: pass, valid/gm)).toHaveLength(5);
-    expect(text.match(/^skip /gm)).toHaveLength(10);
+    expect(text.match(/^warmup (claude|codex) T1 \w+ r1: pass, valid/gm)).toHaveLength(6);
+    expect(text.match(/^skip /gm)).toHaveLength(12);
     const summary = JSON.parse(await readFile(path.join(out, '2026-01-02', 'summary.json'), 'utf8'));
     expect(summary.dryRun).toBe(true);
-    expect(summary.groups).toHaveLength(10);
-    expect(summary.warmup.runs).toBe(5);
-    expect(text).toMatch(/Warmup: 5 run\(s\)/);
+    expect(summary.groups).toHaveLength(12);
+    expect(summary.warmup.runs).toBe(6);
+    expect(text).toMatch(/Warmup: 6 run\(s\)/);
     // No copy of an auth file may survive a run.
     const left = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => f.endsWith('auth.json'));
     expect(left).toEqual([]);
@@ -231,8 +240,8 @@ describe('baseline build arm', () => {
       expect(r.text.match(/^claude T\d B0 r\d: pass, valid/gm)).toHaveLength(6);
       const summary = JSON.parse(await readFile(path.join(out, '2026-01-04', 'summary.json'), 'utf8'));
       const builds = new Set(summary.groups.filter((g: { arm: string }) => g.arm !== 'A').map((g: { arm: string; config: { acmBuild: string } }) => `${g.arm}:${g.config.acmBuild}`));
-      expect([...builds].sort()).toEqual(expect.arrayContaining(['B:checkout', expect.stringMatching(/^B0:dist:[0-9a-f]{12}$/)]));
-      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', 'B-B0', 'B0-A']);
+      expect([...builds].sort()).toEqual(expect.arrayContaining(['B:checkout', 'C:checkout', expect.stringMatching(/^B0:dist:[0-9a-f]{12}$/)]));
+      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', 'B-B0', 'B0-A', 'C-A']);
       // Canned transcripts: B and B0 are identical, so the cost difference is exactly 0 and the interval says so.
       const bb0 = summary.comparisons.find((c: { arm: string; reference: string }) => c.arm === 'B' && c.reference === 'B0');
       expect(bb0.costUsd).toMatchObject({ estimate: 0, lo: 0, hi: 0, crossesZero: true, tasks: 3 });
@@ -308,7 +317,7 @@ describe('workspace isolation from the checkout', () => {
     try {
       expect((await quiet(() => main(['--dry-run', '--tasks', 'T9,T10', '--runs', '1', '--seed', '2', '--work-dir', work, '--out', out, '--date', '2026-01-06']))).value).toBe(0);
       const wss = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => path.basename(f) === 'ws').map((f) => path.join(work, 'runs', f));
-      expect(wss.length).toBe(2 * 2 + 2 * 3 + 5); // matrix + warmups
+      expect(wss.length).toBe(2 * 3 + 2 * 3 + 6); // matrix + warmups
       for (const ws of wss) {
         expect(insideRepo(ws)).toBe(false);
         for (const dir of ancestors(ws)) expect(existsSync(path.join(dir, 'bench', 'tasks')), dir).toBe(false);

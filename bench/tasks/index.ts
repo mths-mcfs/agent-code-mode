@@ -15,6 +15,9 @@ import { T10_FILES, verify as verifyT10 } from './T10/verify.ts';
 import { T11_FILES, verify as verifyT11 } from './T11/verify.ts';
 import { verify as verifyT12 } from './T12/verify.ts';
 import { addLogs, T12_DAY } from './T12/logs.ts';
+import { T13_FILES, verify as verifyT13 } from './T13/verify.ts';
+import { T14_FILES, verify as verifyT14 } from './T14/verify.ts';
+import { T15_FILES, verify as verifyT15 } from './T15/verify.ts';
 import { applySolution as solveT1 } from './T1/solution/apply.ts';
 import { applySolution as solveT2 } from './T2/solution/apply.ts';
 import { applySolution as solveT3 } from './T3/solution/apply.ts';
@@ -27,6 +30,9 @@ import { applySolution as solveT9 } from './T9/solution/apply.ts';
 import { applySolution as solveT10 } from './T10/solution/apply.ts';
 import { applySolution as solveT11 } from './T11/solution/apply.ts';
 import { applySolution as solveT12 } from './T12/solution/apply.ts';
+import { applySolution as solveT13 } from './T13/solution/apply.ts';
+import { applySolution as solveT14 } from './T14/solution/apply.ts';
+import { applySolution as solveT15 } from './T15/solution/apply.ts';
 
 const same = (tree: Tree): Tree => tree;
 
@@ -115,7 +121,7 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
     verify: verifyT8,
     solution: solveT8,
   },
-  // T9-T12 add their own files in setup (the shared fixture stays as it is) and T9-T11 grade with hidden
+  // T9-T15 add their own files in setup (the shared fixture stays as it is) and T9-T11 and T13-T15 grade with hidden
   // tests that are never in the workspace: they are meant not to saturate.
   T9: {
     id: 'T9',
@@ -172,6 +178,69 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
     protectedHook: false,
     verify: verifyT12,
     solution: solveT12,
+  },
+  // T13 and T14 are the hard pair: short to solve, graded by hidden tests that cover every written
+  // rule (T13: the contract in the module header; T14: the numbered rules of the prompt).
+  T13: {
+    id: 'T13',
+    title: 'two bugs at the seam of an async job queue',
+    size: 'debug',
+    hiddenTests: true,
+    prompt: () =>
+      [
+        'The job queue in src/jobs/ misbehaves in production:',
+        '- when jobs fail and are retried, more jobs run at the same time than the `concurrency` limit allows;',
+        '- once a job has failed for good, every later `add` with the same key gets that old failure back and the new function never runs.',
+        'The contract in the header comment of src/jobs/queue.js is correct and complete; the code does not honor it. Find the root causes and fix them there, so that the module honors every rule of the contract. Keep the public API as it is (`createQueue` and its options, `add`, `stats`). Keep `node --test` passing and do not edit the tests.',
+      ].join('\n'),
+    setup: addFiles(T13_FILES),
+    protectedHook: false,
+    verify: verifyT13,
+    solution: solveT13,
+  },
+  T14: {
+    id: 'T14',
+    title: 'streaming CSV parser with chunk boundaries anywhere',
+    size: 'feature',
+    hiddenTests: true,
+    prompt: () =>
+      [
+        'Implement the streaming CSV parser in src/lib/csv.js: `createCsvParser()` is a stub; `CsvError` and `parseCsv` are already there and must stay exported. Rules:',
+        '1. `createCsvParser()` returns an object with the methods `push(chunk)` and `end()`. The input is the concatenation of the chunks, which are JavaScript strings (not bytes). Only `,`, `"`, `\\r` and `\\n` are special: nothing is trimmed and a BOM is data. A chunk may end anywhere, including between the two quotes of `""`, between `\\r` and `\\n` and in the middle of a surrogate pair, and the records never depend on how the input was cut into chunks.',
+        '2. A record is an array of field strings. Fields are separated by `,` and a record ends with `\\n` or `\\r\\n`. An empty line is a record with one empty field. Records may have different numbers of fields.',
+        '3. A field that starts with `"` is quoted: it runs to its closing `"`; inside it `""` is one literal `"`, and `,`, `\\r` and `\\n` are data. The closing quote must be followed by `,`, a record end or the end of the input.',
+        '4. `push(chunk)` returns an array with the records completed by that chunk, in input order. A record is completed by the `\\n` that ends it. `push(\'\')` returns `[]`.',
+        '5. `end()` returns `[]` when the input is empty or ends with a record end (a final newline does not create an empty record). Otherwise it returns an array with the last record: the input `a,` ends with the record `[\'a\', \'\']`, and `a\\n""` with the record `[\'\']`.',
+        '6. Invalid input throws a `CsvError`: (a) a `"` in a field that did not start with one; (b) a character other than `,`, `\\r` or `\\n` right after a closing quote; (c) outside a quoted field, a `\\r` that is not followed by `\\n`; (d) input that ends inside a quoted field. The `push` that receives the offending character throws, and in (c) that is the character after the `\\r`. Case (d), and case (c) when nothing follows the `\\r`, throw from `end()`.',
+        '7. After a `CsvError`, and after `end()` has been called, every `push` and every `end` throws a `CsvError`. `push` with a chunk that is not a primitive string throws a `TypeError` that is not a `CsvError` and leaves the parser as it was.',
+        '8. `parseCsv(text)` returns all the records of a complete input: one `push(text)` followed by `end()`.',
+        'test/csv.test.js covers the basic case. Keep `node --test` passing and do not edit the tests.',
+      ].join('\n'),
+    setup: addFiles(T14_FILES),
+    protectedHook: false,
+    verify: verifyT14,
+    solution: solveT14,
+  },
+  // T15 is the long one: dozens of small reads and edits, with files that only look like callers.
+  T15: {
+    id: 'T15',
+    title: 'migrate 36 modules to a new HTTP API, with look-alikes that must not change',
+    size: 'long-edit',
+    hiddenTests: true,
+    prompt: () =>
+      [
+        'src/lib/legacy-http.js (`legacyFetch`, `legacyJson`) is deprecated in favour of `request` from src/lib/http.js. Finish the migration:',
+        '- Migrate every caller of src/lib/legacy-http.js to `request`, following the MIGRATION notes in the header comment of src/lib/legacy-http.js and the contract in the header comment of src/lib/http.js. Those two comments are correct and complete.',
+        '- Each caller imports `request` from src/lib/http.js and calls it directly: do not add a wrapper or compatibility helper.',
+        '- Then delete src/lib/legacy-http.js.',
+        '- Change only callers of src/lib/legacy-http.js: every other file stays exactly as it is, src/lib/http.js included.',
+        '- Every module keeps its exported functions, with the same parameters and the same results.',
+        'Keep `node --test` passing and do not edit the tests.',
+      ].join('\n'),
+    setup: addFiles(T15_FILES),
+    protectedHook: false,
+    verify: verifyT15,
+    solution: solveT15,
   },
 };
 

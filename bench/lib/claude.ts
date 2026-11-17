@@ -2,10 +2,10 @@ import { z } from 'zod';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
 import { runInnerCalls } from './run-result.ts';
 
-/** Native file and shell tools of Claude Code. Using one of them in the agent-code-mode arm is a fallback. */
+/** Native file and shell tools of Claude Code. Using one of them in the strict agent-code-mode arm is a fallback. */
 export const CLAUDE_NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
 export const CLAUDE_RUN_TOOL = 'mcp__agent-code-mode__run';
-/** Native tool names allowed by rule in both arms (in arm B they only reach the model through `run`). */
+/** Native tool names allowed by rule in every arm (in arm B they only reach the model through `run`). */
 export const CLAUDE_INNER_ALLOWED = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'];
 /** Agents Claude Code 2.1.325 ships; anything else in the init event came from the user's config. */
 export const CLAUDE_BUILTIN_AGENTS = ['claude', 'Explore', 'general-purpose', 'Plan', 'statusline-setup'];
@@ -40,17 +40,23 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   // Arm A: the native tools, allowed by rule. Arm B: no built-in tools at all (`--tools ""` removes them
   // without denying them: a CLI deny rule would also deny the same tool inside agent-code-mode, by
   // parity), and the same native names allowed by rule so the inner calls are allowed exactly as in A.
-  // Both arms see no other built-in tool (no Task, ToolSearch, web...), so they differ only in native
+  // Arm C (hybrid): the native tools of A and `run`, all allowed by rule; the model picks per call.
+  // No arm sees any other built-in tool (no Task, ToolSearch, web...), so they differ only in native
   // file/shell tools vs `run`.
   if (o.arm === 'A') args.push('--tools', CLAUDE_INNER_ALLOWED.join(','), '--allowedTools', CLAUDE_INNER_ALLOWED.join(','));
-  else args.push('--tools', '', '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
+  else if (o.arm === 'B') args.push('--tools', '', '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
+  else args.push('--tools', CLAUDE_INNER_ALLOWED.join(','), '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
   return args;
 }
 
-/** The `--mcp-config` content for an arm: no servers for A, the agent-code-mode server for B. */
+/**
+ * The `--mcp-config` content for an arm: no servers for A, the agent-code-mode server for B and, started
+ * with `--hybrid` (the `run` description then says when to batch and when to use a native tool), for C.
+ */
 export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
   if (arm === 'A') return { mcpServers: {} };
-  return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args: [serverEntry, 'serve', '--host', 'claude'] } } };
+  const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : [])];
+  return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
 }
 
 const UsageEvent = z.object({

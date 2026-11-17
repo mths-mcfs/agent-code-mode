@@ -12,7 +12,9 @@ import { recoverStaleJournals } from './tools/journal.js';
 const USAGE = `Usage: agent-code-mode <command>
 
 Commands:
-  serve [--host claude|codex|generic]   Run the MCP stdio server
+  serve [--host claude|codex|generic] [--hybrid]
+                                        Run the MCP stdio server; --hybrid adds one line to the run description
+                                        for hosts that keep their native file and shell tools next to run
   hook                                  Claude Code companion PreToolUse hook (reads the hook JSON on stdin)
   install --host claude|codex [--scope user|project] [--write] [--local]
                                         Print the host configuration; --write applies it after showing the diff;
@@ -42,6 +44,22 @@ function parseHost(args: readonly string[]): HostKind | undefined | Error {
   return parsed.success ? parsed.data : new Error(`--host must be one of claude, codex, generic`);
 }
 
+const HybridSchema = z.enum(['true', 'false']);
+
+/** `--hybrid` (or `--hybrid=true|false`): whether the `run` description gets the hybrid guidance line. */
+function parseHybrid(args: readonly string[]): boolean | Error {
+  let hybrid = false;
+  for (const arg of args) {
+    if (arg === '--hybrid') hybrid = true;
+    else if (arg.startsWith('--hybrid=')) {
+      const parsed = HybridSchema.safeParse(arg.slice('--hybrid='.length));
+      if (!parsed.success) return new Error('--hybrid takes no value (or =true / =false)');
+      hybrid = parsed.data === 'true';
+    }
+  }
+  return hybrid;
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const [command, ...rest] = argv;
   if (command === '--version' || command === '-v') {
@@ -59,6 +77,11 @@ export async function main(argv: readonly string[]): Promise<number> {
         process.stderr.write(`${host.message}\n`);
         return 2;
       }
+      const hybrid = parseHybrid(rest);
+      if (hybrid instanceof Error) {
+        process.stderr.write(`${hybrid.message}\n`);
+        return 2;
+      }
       // Undo what runs of a crashed server left in this workspace before serving.
       const recovered = await recoverStaleJournals(stateDirPath(), [process.cwd()]);
       for (const { id, report, kept } of recovered) {
@@ -67,7 +90,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         );
         for (const s of report.skipped) process.stderr.write(`agent-code-mode:   not restored: ${s.path} (${s.reason}${s.detail ? `: ${s.detail}` : ''})\n`);
       }
-      const server = createMcpServer({ version: readVersion(), ...(host ? { host } : {}) });
+      const server = createMcpServer({ version: readVersion(), hybrid, ...(host ? { host } : {}) });
       await server.connect(new StdioServerTransport());
       return -1; // keep running until stdin closes
     }
