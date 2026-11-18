@@ -140,6 +140,16 @@ export interface BashResult {
    * authorized (see `BashEffect.expansion`).
    */
   readonly command?: string;
+  /** The last bytes of stdout, present only when stdout was cut: test summaries come at the end of the output. */
+  readonly stdoutTail?: string;
+  /** The last bytes of stderr, present only when stderr was cut. */
+  readonly stderrTail?: string;
+  /** Bytes of stdout between `stdout` and `stdoutTail` that were not kept; 0 means the two join exactly. */
+  readonly stdoutOmitted?: number;
+  /** Bytes of stderr between `stderr` and `stderrTail` that were not kept; 0 means the two join exactly. */
+  readonly stderrOmitted?: number;
+  /** The end of both streams in the order they arrived, present only when both produced output. */
+  readonly outputTail?: string;
 }
 
 /** Result of `read`. */
@@ -249,8 +259,29 @@ export interface OverflowSlice {
   readonly truncated: boolean;
 }
 
+/** A file `undo` left as it was, and why. */
+export interface UndoSkip {
+  readonly path: string;
+  readonly reason: string;
+}
+
+/** What `undo(undoId)` resolves to. Paths are relative to the session cwd when inside it. */
+export interface UndoResult {
+  /** Files put back to their content before the run. */
+  readonly restored: readonly string[];
+  /** Files the run created, removed again. */
+  readonly removed: readonly string[];
+  /** Directories the run created, removed again (only empty ones). */
+  readonly removedDirs: readonly string[];
+  readonly skipped: readonly UndoSkip[];
+  /** `bash` calls the run made: their effects are not undone. */
+  readonly bashCalls: number;
+  /** `mcpCall`s the run sent: their effects are not undone. */
+  readonly mcpCalls: number;
+}
+
 /** A binding's resolved value as the script receives it. */
-export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice | McpResult;
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice | McpResult | UndoResult;
 
 // ---------------------------------------------------------------------------
 // Upstream MCP tools: `mcpCall(server, tool, args)`.
@@ -378,6 +409,12 @@ export interface BashEffect {
   readonly command: string;
   /** Absolute real working directory. */
   readonly cwd: string;
+  /**
+   * Present when the script passed a `cwd`: `command` starts with `prefix`,
+   * the `cd` to the real directory `dir`, and relative paths of what follows
+   * resolve against `dir`.
+   */
+  readonly startDir?: { readonly dir: string; readonly prefix: string };
   /** Effective timeout in milliseconds. */
   readonly timeoutMs: number;
   /** Containment the tool runtime will enforce; must equal the policy's `bashContainment`. */
@@ -557,6 +594,11 @@ export interface SessionContext {
   readonly model?: string;
   /** Host sandbox mode (Codex `sandbox_mode`, e.g. `read-only`). */
   readonly sandboxMode?: string;
+  /**
+   * Real path of this server process's scratch directory, set by the run for
+   * adapters with `usesScratch`. Never comes from the model or the client.
+   */
+  readonly scratchDir?: string;
   /** Source of each field that was set, keyed by field name. */
   readonly sources: Readonly<Record<string, ContextSource>>;
 }
@@ -623,6 +665,13 @@ export interface PolicySnapshot<P = unknown> {
    * the tools may touch besides the session cwd and roots.
    */
   readonly additionalRoots?: readonly string[];
+  /**
+   * Real path of the scratch directory this policy opens (`ctx.scratchDir`):
+   * a root for the tools, and the only part of the protected state dir that
+   * may be written. Files in it are never reported as changed, journaled or
+   * undone. Absent: no scratch directory.
+   */
+  readonly scratchRoot?: string;
   /**
    * Whether a real absolute path is readable under the host's Read rules.
    * The tool runtime applies it to every grep match and glob entry and drops
@@ -694,6 +743,8 @@ export interface HookContextStore {
  */
 export interface HostAdapter<P = unknown> {
   readonly host: HostKind;
+  /** True when the adapter applies `ctx.scratchDir` to its policy; without it a run gets no scratch directory. */
+  readonly usesScratch?: boolean;
   /** Loads the host's permission rules and hooks for this context. */
   loadPolicy(ctx: SessionContext): Promise<PolicySnapshot<P> | PolicyLoadError>;
   /**
@@ -765,6 +816,18 @@ export interface ToolRuntime<P = unknown> {
   commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction, observer?: CommitObserver): Promise<ToolResult>;
   /** Starts a journal for one transactional run. */
   beginTransaction(): Transaction;
+  /** This server process's scratch directory (real path), created on the first call. */
+  scratchDir?(): Promise<string>;
+  /** Starts recording what one run's writes and edits replace, for `undo`. */
+  beginUndo?(): RunUndo;
+  /**
+   * Plans the undo of a finished run and reserves its files until
+   * `UndoSession.close`. Changes nothing. Throws `ToolError` when `undoId` is
+   * unknown, already used or being undone.
+   */
+  openUndo?(undoId: string, ctx: SessionContext, policy: PolicySnapshot<P>): Promise<UndoSession>;
+  /** Removes this server process's scratch and undo directories. Idempotent. */
+  closeSession?(): void;
   /**
    * Optional end-of-run check: compares the watched paths with what the last
    * `bash` call of the run (the one committed with `observer`) left, and
@@ -777,6 +840,80 @@ export interface ToolRuntime<P = unknown> {
 export interface CommitObserver {
   /** Adds a line to the run's `warnings`. */
   warn(message: string): void;
+  /** Called when a `bash` process was started, whatever happens to it then. */
+  bashStarted?(): void;
+  /** Records what the run's writes and edits replace. */
+  readonly undo?: RunUndo;
+}
+
+/** One file a write is about to change, as found under its path lock. */
+export interface UndoCapture {
+  readonly absPath: string;
+  /** Workspace root that holds the file. */
+  readonly root: string;
+  /** What the file holds now; null when the write creates it. */
+  readonly before: { readonly bytes: Buffer; readonly mode: number; readonly fingerprint: FileFingerprint } | null;
+}
+
+/** Which directory a path names. */
+export interface DirIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+/** Which file a path names and the state it is in. */
+export interface FileFingerprint extends DirIdentity {
+  readonly size: bigint;
+  /** Permission bits. */
+  readonly mode: number;
+}
+
+/** What a write left at its path, recorded when it landed. */
+export interface CommittedFile extends FileFingerprint {
+  readonly sha256: string;
+}
+
+/** How one finished run can be undone. */
+export interface UndoOutcome {
+  /** Absent when the run changed no file or could not be recorded. */
+  readonly undoId?: string;
+  /** Why a run that changed files got no `undoId`. */
+  readonly warning?: string;
+}
+
+/** The undo record of one run. A failure to record never fails the write: the run just gets no `undoId`. */
+export interface RunUndo {
+  /** Called under the file's path lock, before the write. Only the first capture of a file keeps its bytes. */
+  capture(file: UndoCapture): Promise<void>;
+  /** Called after a write landed, with what it left: the file `undo` expects to find. */
+  committed(absPath: string, file: CommittedFile): void;
+  /** Called when a write created a directory, whether or not the write then succeeds. */
+  dirCreated(dir: string, identity: DirIdentity): void;
+  /** Ends the recording and files it under a new `undoId`. */
+  finish(stats: { readonly bashCalls: number; readonly mcpCalls: number }): Promise<UndoOutcome>;
+  /** Ends the recording and drops it (the run rolled back). */
+  discard(): Promise<void>;
+}
+
+/** One change an undo makes, shown to the host as the `write` or `bash` call that makes it. */
+export interface UndoStep {
+  readonly kind: 'restore' | 'remove' | 'rmdir';
+  readonly path: string;
+  /** The call the host authorizes. */
+  readonly call: { readonly tool: 'write'; readonly args: WriteArgs } | { readonly tool: 'bash'; readonly args: BashArgs };
+}
+
+/** A planned undo: its files are reserved until `close`. */
+export interface UndoSession {
+  readonly steps: readonly UndoStep[];
+  /** Files left out of the plan, with the reason. */
+  readonly skipped: readonly UndoSkip[];
+  readonly bashCalls: number;
+  readonly mcpCalls: number;
+  /** Makes one authorized step, checking again under the path lock that the file is the one planned. Throws `ToolError` if not. */
+  apply(step: UndoStep, signal: AbortSignal): Promise<void>;
+  /** Releases the reservations; `used` retires the `undoId` and its saved originals. */
+  close(used: boolean): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +963,8 @@ export interface SandboxRunOptions {
   onCall(tool: string, args: unknown): Promise<CallReply>;
   /** Called for every console line of the script. */
   onLog(level: LogLevel, text: string): void;
+  /** Value of the script's `scratchDir` global; undefined when the run has no scratch directory. */
+  readonly scratchDir?: string;
 }
 
 /** Serialized script error. */
@@ -898,6 +1037,8 @@ export interface RunResult {
   readonly diff: string;
   /** Present when a transaction was rolled back. */
   readonly rolledBack?: RollbackReport;
+  /** Pass it to `undo` in a later run to put back what this run's writes and edits changed. */
+  readonly undoId?: string;
   /** Notes the model must know, e.g. bash effects that were not rolled back. */
   readonly warnings: readonly string[];
 }

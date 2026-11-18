@@ -14,6 +14,8 @@ export const ERROR_CAP_CHARS = 9_500;
 export const DIFF_INLINE_CHARS = 1_500;
 /** Files listed in `diffStat` before the rest is counted. */
 export const DIFF_STAT_FILES = 10;
+/** A successful run that changed more files than this reports their number; the list goes to the overflow. */
+export const CHANGED_FILES_INLINE = 10;
 /** A string result with a line break and more characters than this comes as plain text in a second content block. */
 export const TEXT_BLOCK_MIN_CHARS = 200;
 /** Value of `result` in the JSON block when the result is in the second block. */
@@ -177,24 +179,34 @@ export function diffStat(diff: string, shown: number = DIFF_STAT_FILES): DiffSta
   };
 }
 
+/** Whether the view of `result` reports the number of changed files instead of listing them. */
+function countsChangedFiles(result: RunResult, verbose: boolean): boolean {
+  return result.ok && !verbose && result.changedFiles.length > CHANGED_FILES_INLINE;
+}
+
 /**
  * The view of a `RunResult` the model gets: empty fields left out and, unless
  * `verbose`, the call log as counts plus every denied and failed call, and a
- * diff above `DIFF_INLINE_CHARS` as `diffStat`. `cut` is true when the view
- * dropped something (the diff) that only the whole result has.
+ * diff above `DIFF_INLINE_CHARS` as `diffStat`. A successful run that changed
+ * more than `CHANGED_FILES_INLINE` files reports `changedCount` and only the
+ * total of the `diffStat`, unless `listFiles` (the list has nowhere else to
+ * go). `cut` is true when the view dropped something that only the whole
+ * result has.
  */
-export function runResultView(result: RunResult, verbose = false): { readonly view: Record<string, unknown>; readonly cut: boolean } {
+export function runResultView(result: RunResult, verbose = false, listFiles = false): { readonly view: Record<string, unknown>; readonly cut: boolean } {
   const { logs, calls, changedFiles, diff, warnings, ...rest } = result;
   const bigDiff = !verbose && diff.length > DIFF_INLINE_CHARS;
+  const counted = !listFiles && countsChangedFiles(result, verbose);
+  const stat = bigDiff ? diffStat(diff) : undefined;
   const view: Record<string, unknown> = {
     ...rest,
     ...(logs.length > 0 ? { logs } : {}),
     calls: verbose ? calls : summarizeCalls(calls, result.error?.message),
-    ...(changedFiles.length > 0 ? { changedFiles } : {}),
-    ...(diff === '' ? {} : bigDiff ? { diffStat: diffStat(diff) } : { diff }),
+    ...(counted ? { changedCount: changedFiles.length } : changedFiles.length > 0 ? { changedFiles } : {}),
+    ...(diff === '' ? {} : stat === undefined ? { diff } : { diffStat: counted ? { total: stat.total } : stat }),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
-  return { view, cut: bigDiff };
+  return { view, cut: bigDiff || counted };
 }
 
 /** Text of a result that goes in the second block, or undefined when it stays in the JSON. */
@@ -273,9 +285,11 @@ function clipStrings(value: unknown, max: number): unknown {
  * the run failed) and, when the result is a multi-line string longer than
  * `TEXT_BLOCK_MIN_CHARS`, the string as plain text in a second block.
  *
- * Nothing the model needs disappears: denied and failed calls and changed
- * files are listed whole. When the view leaves something out (a large diff)
- * or the response is above the cap (`SUCCESS_CAP_CHARS`, `ERROR_CAP_CHARS`),
+ * Nothing the model needs disappears: denied and failed calls are listed
+ * whole, and so are the changed files unless a successful run changed more
+ * than `CHANGED_FILES_INLINE` and the whole result could be kept. When the
+ * view leaves something out (a large diff, the list of files) or the response
+ * is above the cap (`SUCCESS_CAP_CHARS`, `ERROR_CAP_CHARS`),
  * the whole result is kept in `opts.overflow` and the response carries
  * `overflow: {id, chars}` for `readOverflow`. Above the cap, the result, the
  * logs and a verbose diff keep their start and end, and long lists their
@@ -287,18 +301,36 @@ function clipStrings(value: unknown, max: number): unknown {
 export function formatRunResult(result: RunResult, opts: FormatOptions = {}): McpToolResponse {
   const isError = !result.ok;
   const cap = isError ? (opts.errorCap ?? ERROR_CAP_CHARS) : (opts.successCap ?? SUCCESS_CAP_CHARS);
-  const { view, cut } = runResultView(result, opts.verbose === true);
-  const text = plainText(view['result']);
-  const whole = text === undefined ? view : { ...view, result: RESULT_IN_NEXT_BLOCK };
-  const plain = response(whole, text, isError);
-  if (!cut && size(plain) <= cap) return plain;
+  const verbose = opts.verbose === true;
+  const first = runResultView(result, verbose);
+  const firstText = plainText(first.view['result']);
+  const firstWhole = firstText === undefined ? first.view : { ...first.view, result: RESULT_IN_NEXT_BLOCK };
+  const plain = response(firstWhole, firstText, isError);
+  if (!first.cut && size(plain) <= cap) return plain;
 
   const full = safeStringify(result);
   const id = opts.overflow?.put(full);
   const overflow = id === undefined ? undefined : { id, chars: full.length };
+  // Nothing was kept: the list of files the view counted has no other home, so it comes back before any cap applies.
+  let view = overflow === undefined && countsChangedFiles(result, verbose) ? runResultView(result, verbose, true).view : first.view;
+  const text = plainText(view['result']);
+  const whole = text === undefined ? view : { ...view, result: RESULT_IN_NEXT_BLOCK };
   const noted = response(overflow ? { ...whole, overflow } : whole, text, isError);
   if (size(noted) <= cap) return noted;
+  if (overflow === undefined) {
+    // Nothing was kept, so what only repeats file names goes first: the list itself has no other home.
+    view = withoutDiffFileNames(view);
+    const slim = response(text === undefined ? view : { ...view, result: RESULT_IN_NEXT_BLOCK }, text, isError);
+    if (size(slim) <= cap) return slim;
+  }
   return capped(view, summarizeCalls(result.calls, result.error?.message), overflow, full.length, cap, isError);
+}
+
+/** `view` with `diffStat` reduced to its total. */
+function withoutDiffFileNames(view: Record<string, unknown>): Record<string, unknown> {
+  const stat = view['diffStat'];
+  if (stat === null || typeof stat !== 'object' || !('total' in stat)) return view;
+  return { ...view, diffStat: { total: stat.total } };
 }
 
 /** `calls` with its denied and failed lists replaced. */
@@ -395,10 +427,19 @@ function capped(
     // lose entries, and other lists lose entries before any string is clipped.
     const bulk = [resultText, logText, diffText].map((t) => (t === undefined ? 0 : t.length));
     const envMax = budget - Math.min(bulk.reduce((a, b) => a + b, 0), Math.floor(budget / 4)) - 200;
-    let env: Record<string, unknown> | undefined;
-    for (let keep = 1_000; env === undefined && keep >= 1; keep = Math.floor(keep / 2)) {
+    // As many entries of the lists as fit.
+    const envelopeWith = (keep: number): Record<string, unknown> | undefined => {
       const cut = { ...cutLists(envelope, keep, more), ...top };
-      env = failed.forms.map((c) => ({ ...cut, [key]: c })).find((e) => safeStringify(e).length <= envMax);
+      return failed.forms.map((c) => ({ ...cut, [key]: c })).find((e) => safeStringify(e).length <= envMax);
+    };
+    let env = envelopeWith(1);
+    let fits = 1;
+    let over = Math.max(1, ...LISTS.map((at) => getList(envelope, at)?.length ?? 0)) + 1;
+    while (env !== undefined && over - fits > 1) {
+      const middle = Math.floor((fits + over) / 2);
+      const wider = envelopeWith(middle);
+      if (wider === undefined) over = middle;
+      else (env = wider), (fits = middle);
     }
     env ??= fitGroups(failed, { ...clipObject(cutLists(envelope, 0, more), 300), ...top }, key, envMax);
     const shares = share(bulk, Math.max(0, budget - safeStringify(env).length - 200));
@@ -415,7 +456,14 @@ function capped(
     const out = response(order(json, view), second, isError);
     if (size(out) <= cap) return out;
   }
-  return response(fitGroups(failed, { ok: view['ok'], ...top }, key, cap), undefined, isError);
+  const undoId = view['undoId'] === undefined ? {} : { undoId: view['undoId'] };
+  const ok = { ok: view['ok'] };
+  const smallest = [fitGroups(failed, { ...ok, ...undoId, ...top }, key, cap), { ...ok, ...undoId, ...top }, { ...ok, ...undoId, truncated: true }, { ...ok, truncated: true }, ok];
+  for (const json of smallest) {
+    const out = response(json, undefined, isError);
+    if (size(out) <= cap) return out;
+  }
+  return { content: [{ type: 'text', text: safeStringify(ok).slice(0, Math.max(0, cap)) }], isError };
 }
 
 /** Splits `total` among parts of the given sizes: small parts whole, the rest evenly. */

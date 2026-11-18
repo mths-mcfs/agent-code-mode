@@ -223,6 +223,8 @@ export interface JailOptions {
   readonly roots: readonly string[];
   /** Protected path patterns (`~` expanded here). */
   readonly protectedPaths: readonly string[];
+  /** The session's scratch directory: one more root, and the only place the protected patterns do not apply. */
+  readonly scratchRoot?: string;
   /** Enforce the Windows alias checks even off Windows (tests). */
   readonly windowsChecks?: boolean;
 }
@@ -235,12 +237,14 @@ export class Jail {
   readonly roots: readonly string[];
   readonly #protected: readonly string[];
   readonly #windowsChecks: boolean;
+  readonly #scratch: string | undefined;
 
-  private constructor(cwd: string, roots: readonly string[], protectedPaths: readonly string[], windowsChecks: boolean) {
+  private constructor(cwd: string, roots: readonly string[], protectedPaths: readonly string[], windowsChecks: boolean, scratch: string | undefined) {
     this.cwd = cwd;
     this.roots = roots;
     this.#protected = protectedPaths;
     this.#windowsChecks = windowsChecks;
+    this.#scratch = scratch;
   }
 
   static async create(opts: JailOptions): Promise<Jail> {
@@ -261,8 +265,16 @@ export class Jail {
         // A root that does not exist grants nothing.
       }
     }
+    // Only the physical directory counts: a scratch root that cannot be resolved grants nothing.
+    const scratch = opts.scratchRoot === undefined ? undefined : await fs.realpath(opts.scratchRoot).catch(() => undefined);
+    if (scratch !== undefined && !roots.includes(scratch)) roots.push(scratch);
     const protectedPaths = await withRealPrefixes(opts.protectedPaths.map((p) => expandTilde(p)));
-    return new Jail(cwd, roots, protectedPaths, opts.windowsChecks ?? IS_WINDOWS);
+    return new Jail(cwd, roots, protectedPaths, opts.windowsChecks ?? IS_WINDOWS, scratch);
+  }
+
+  /** Whether the real path `abs` is inside the session's scratch directory. */
+  isScratch(abs: string): boolean {
+    return this.#scratch !== undefined && isInsideDir(this.#scratch, abs);
   }
 
   /** Protected path patterns with `~` expanded. */
@@ -318,7 +330,8 @@ export class Jail {
       throw new ToolError('tool-error', `cannot resolve ${trimmed}: ${code ?? String(err)}`);
     }
     if (this.rootOf(r.real) === undefined) {
-      throw new ToolError('outside-workspace', `${trimmed} resolves to ${r.real}, outside the workspace (${this.roots.join(', ')})`);
+      const hint = this.#scratch === undefined ? '' : '; for a throwaway file use the scratchDir global';
+      throw new ToolError('outside-workspace', `${trimmed} resolves to ${r.real}, outside the workspace (${this.roots.join(', ')})${hint}`);
     }
     if (this.#windowsChecks) {
       const problem = windowsPathProblem(r.real);
@@ -330,6 +343,7 @@ export class Jail {
   /** Throws `protected-path` when `abs` must not be written or edited. */
   assertWritable(abs: string): void {
     if (isInsideGitDir(abs)) throw new ToolError('protected-path', `${abs} is inside a .git directory`);
+    if (this.isScratch(abs)) return;
     const hit = findMatchingPattern(abs, this.#protected);
     if (hit !== undefined) throw new ToolError('protected-path', `${abs} is a protected host policy path (${hit})`);
   }

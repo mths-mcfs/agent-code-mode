@@ -14,6 +14,7 @@ import { detectHost } from './server/context.js';
 import { createMcpServer } from './server/mcp.js';
 import { REGISTERED_SERVER_NAME } from './server/runtime.js';
 import { recoverStaleJournals } from './tools/journal.js';
+import { closeSessionsOnExit, sweepDeadSessions } from './tools/session-dirs.js';
 
 const USAGE = `Usage: agent-code-mode <command>
 
@@ -128,6 +129,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         );
         for (const s of report.skipped) process.stderr.write(`agent-code-mode:   not restored: ${s.path} (${s.reason}${s.detail ? `: ${s.detail}` : ''})\n`);
       }
+      // Scratch and undo directories go with this process, and those of processes that died are removed now.
+      closeSessionsOnExit(process, lifecycle === undefined);
+      await sweepDeadSessions(stateDirPath());
       // With upstream servers the host is Claude Code, checked above; pin it so no request can switch it.
       const servedHost = upstream !== undefined ? 'claude' : host;
       const server = createMcpServer({ version: readVersion(), hybrid, ...(servedHost ? { host: servedHost } : {}), ...(upstream ? { mcp: upstream } : {}) });

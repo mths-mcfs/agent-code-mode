@@ -2,6 +2,7 @@ import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_proces
 import { existsSync, type BigIntStats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { ToolError } from '../core/errors.js';
 import type { BashEffect, BashExpandedEntry, BashGlobPlan, BashResult } from '../core/types.js';
 import { errnoCode } from './fs-ops.js';
@@ -14,6 +15,10 @@ export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
 export const MAX_BASH_TIMEOUT_MS = 600_000;
 /** Bytes kept of each of stdout and stderr. */
 export const DEFAULT_OUTPUT_CAP_BYTES = 1024 * 1024;
+/** Bytes kept of the end of a stream that was cut. */
+export const OUTPUT_TAIL_BYTES = 64 * 1024;
+/** Characters kept of the end of both streams together. */
+export const OUTPUT_ORDER_CHARS = 8 * 1024;
 /** After the shell exits, how long to wait for the output pipes to close. */
 const DRAIN_MS = 200;
 
@@ -45,28 +50,78 @@ export function findBash(): string | null {
   return cachedShell;
 }
 
+/** How many leading bytes of `bytes` end at a character boundary: an unfinished UTF-8 sequence at the end is left out. */
+function completeLength(bytes: Buffer): number {
+  for (let back = 1; back <= Math.min(4, bytes.length); back++) {
+    const byte = bytes[bytes.length - back] ?? 0;
+    if ((byte & 0xc0) === 0x80) continue;
+    const needs = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    return needs > back ? bytes.length - back : bytes.length;
+  }
+  return bytes.length;
+}
+
+/** What is kept of one output stream. */
+interface Captured {
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly tail?: string;
+  readonly omitted?: number;
+}
+
+/** The first `cap` bytes of a stream and the last `OUTPUT_TAIL_BYTES` of what comes after them. */
 class Capture {
   readonly #chunks: Buffer[] = [];
   #size = 0;
-  truncated = false;
+  #tail: Buffer = Buffer.alloc(0);
+  #total = 0;
 
   constructor(private readonly cap: number) {}
 
+  get total(): number {
+    return this.#total;
+  }
+
   push(chunk: Buffer): void {
-    if (this.#size >= this.cap) {
-      this.truncated = true;
-      return;
+    this.#total += chunk.length;
+    const room = Math.max(0, this.cap - this.#size);
+    if (room > 0) {
+      const kept = chunk.subarray(0, room);
+      this.#chunks.push(kept);
+      this.#size += kept.length;
     }
-    const room = this.cap - this.#size;
-    const kept = chunk.length > room ? chunk.subarray(0, room) : chunk;
-    if (kept.length < chunk.length) this.truncated = true;
-    this.#chunks.push(kept);
-    this.#size += kept.length;
+    const rest = chunk.subarray(room);
+    if (rest.length === 0) return;
+    const joined = Buffer.concat([this.#tail, rest]);
+    this.#tail = joined.length > OUTPUT_TAIL_BYTES ? Buffer.from(joined.subarray(joined.length - OUTPUT_TAIL_BYTES)) : joined;
+  }
+
+  /** The stream as kept; neither cut splits a character. */
+  finish(): Captured {
+    const head = Buffer.concat(this.#chunks);
+    if (this.#total <= this.cap) return { text: head.toString('utf8'), truncated: false };
+    const end = completeLength(head);
+    const gap = this.#total - head.length - this.#tail.length;
+    if (gap === 0) return { text: head.subarray(0, end).toString('utf8'), truncated: true, tail: Buffer.concat([head.subarray(end), this.#tail]).toString('utf8'), omitted: 0 };
+    let start = 0;
+    while (start < this.#tail.length && ((this.#tail[start] ?? 0) & 0xc0) === 0x80) start++;
+    return { text: head.subarray(0, end).toString('utf8'), truncated: true, tail: this.#tail.subarray(start).toString('utf8'), omitted: gap + (head.length - end) + start };
+  }
+}
+
+/** The end of both streams, in the order the output arrived. */
+class ArrivalOrder {
+  #text = '';
+
+  add(text: string): void {
+    this.#text += text;
+    if (this.#text.length > OUTPUT_ORDER_CHARS * 2) this.#text = this.#text.slice(-OUTPUT_ORDER_CHARS);
   }
 
   text(): string {
-    // A cut in the middle of a multi-byte character becomes U+FFFD.
-    return Buffer.concat(this.#chunks).toString('utf8');
+    const end = this.#text.slice(-OUTPUT_ORDER_CHARS);
+    const first = end.charCodeAt(0);
+    return first >= 0xdc00 && first <= 0xdfff ? end.slice(1) : end;
   }
 }
 
@@ -93,6 +148,8 @@ export interface BashRunOptions {
   readonly outputCapBytes?: number;
   /** Paths a sandboxed command may never write (from the host's protected paths). */
   readonly denyWrite?: readonly string[];
+  /** Called once the process exists. */
+  readonly onSpawn?: () => void;
 }
 
 function spawnAndWait(
@@ -102,6 +159,7 @@ function spawnAndWait(
   timeoutMs: number,
   signal: AbortSignal,
   cap: number,
+  onSpawn?: () => void,
 ): Promise<BashResult> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -120,10 +178,20 @@ function spawnAndWait(
       detached: process.platform !== 'win32',
       windowsHide: true,
     });
+    if (child.pid !== undefined) onSpawn?.();
     const out = new Capture(cap);
     const err = new Capture(cap);
-    child.stdout?.on('data', (c: Buffer) => out.push(c));
-    child.stderr?.on('data', (c: Buffer) => err.push(c));
+    const order = new ArrivalOrder();
+    const outText = new StringDecoder('utf8');
+    const errText = new StringDecoder('utf8');
+    child.stdout?.on('data', (c: Buffer) => {
+      out.push(c);
+      order.add(outText.write(c));
+    });
+    child.stderr?.on('data', (c: Buffer) => {
+      err.push(c);
+      order.add(errText.write(c));
+    });
 
     let timedOut = false;
     let settled = false;
@@ -142,13 +210,18 @@ function spawnAndWait(
         reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
         return;
       }
+      const stdout = out.finish();
+      const stderr = err.finish();
       resolve({
         exitCode: exit.code,
         signal: exit.signal,
-        stdout: out.text(),
-        stderr: err.text(),
-        truncated: out.truncated || err.truncated,
+        stdout: stdout.text,
+        stderr: stderr.text,
+        truncated: stdout.truncated || stderr.truncated,
         timedOut,
+        ...(stdout.tail === undefined ? {} : { stdoutTail: stdout.tail, stdoutOmitted: stdout.omitted ?? 0 }),
+        ...(stderr.tail === undefined ? {} : { stderrTail: stderr.tail, stderrOmitted: stderr.omitted ?? 0 }),
+        ...(out.total > 0 && err.total > 0 ? { outputTail: order.text() } : {}),
       });
     };
     const onAbort = (): void => killGroup(child);
@@ -520,14 +593,14 @@ export async function runBash(effect: BashEffect, signal: AbortSignal, opts: Bas
   const containment = effect.containment;
   const shown = (r: BashResult): BashResult => (effect.expansion ? { ...r, command: effect.command } : r);
   if (containment.mode === 'none') {
-    return shown(await spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap));
+    return shown(await spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap, opts.onSpawn));
   }
   return shown(
     await withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], async (wrapped) => {
       if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
       // The sandbox setup took time: check the entries again right before the spawn.
       if (effect.expansion) await assertEntriesUnchanged(effect.expansion.entries);
-      return spawnAndWait(wrapped.argv, { ...process.env, ...wrapped.env }, effect.cwd, effect.timeoutMs, signal, cap);
+      return spawnAndWait(wrapped.argv, { ...process.env, ...wrapped.env }, effect.cwd, effect.timeoutMs, signal, cap, opts.onSpawn);
     }),
   );
 }
