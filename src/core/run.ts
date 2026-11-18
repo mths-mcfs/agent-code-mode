@@ -6,6 +6,7 @@ import type {
   CallReply,
   HostAdapter,
   LogLevel,
+  McpRuntime,
   PolicyLoadError,
   PolicySnapshot,
   RollbackReport,
@@ -44,6 +45,8 @@ export interface RunDeps<P = unknown> {
   readonly rollbackTimeoutMs?: number;
   /** Serves the `readOverflow` binding (results earlier responses of this server cut). */
   readonly overflow?: { read(args: unknown): CallReply };
+  /** Serves `mcpCall` (upstream MCP tools). Absent: no upstream servers are configured. */
+  readonly mcp?: McpRuntime;
 }
 
 /** Binding that reads back what a response cut; it never reaches the host, it only reads this server's memory. */
@@ -235,6 +238,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       tools: deps.tools,
       ctx: deps.ctx,
       policy,
+      ...(deps.mcp ? { mcp: deps.mcp } : {}),
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
     const active = dispatcher;
@@ -272,6 +276,9 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       if (active.bashCommits > 0) {
         rollbackWarnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
       }
+      if (active.mcpCallsSent > 0) {
+        rollbackWarnings.push(`${active.mcpCallsSent} mcpCall(s) were sent to upstream MCP servers in this transaction; their effects were not undone (MCP calls are never rolled back).`);
+      }
     }
     // Last look at the protected paths (after the last bash call and any rollback), before the response is built.
     await active.finishRun();
@@ -291,6 +298,9 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     if (dispatcher) await dispatcher.stop(stopReason ?? 'finished', graceMs);
     const rollbackWarnings: string[] = [];
     const rolledBack = tx ? await rollbackBounded(tx, rollbackMs, rollbackWarnings) : undefined;
+    if (tx && dispatcher && dispatcher.mcpCallsSent > 0) {
+      rollbackWarnings.push(`${dispatcher.mcpCallsSent} mcpCall(s) were sent to upstream MCP servers in this transaction; their effects were not undone (MCP calls are never rolled back).`);
+    }
     if (dispatcher) await dispatcher.finishRun();
     const warnings = [...(dispatcher ? dispatcher.warnings : []), ...rollbackWarnings];
     return {

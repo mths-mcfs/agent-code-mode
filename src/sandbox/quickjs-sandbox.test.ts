@@ -241,7 +241,7 @@ describe('QuickJsSandbox: no ambient authority', () => {
         'eval', 'globalThis', 'Date', 'RegExp', 'JSON', 'Proxy', 'Map', 'Set', 'WeakMap', 'WeakSet', 'ArrayBuffer', 'SharedArrayBuffer',
         'Uint8ClampedArray', 'Int8Array', 'Uint8Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'BigInt64Array',
         'BigUint64Array', 'Float16Array', 'Float32Array', 'Float64Array', 'DataView', 'Promise', 'BigInt', 'WeakRef', 'FinalizationRegistry',
-        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow',
+        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow', 'mcpCall',
       ]),
     ));
     const result = value(outcome);

@@ -13,6 +13,7 @@ import { nodeConfigIo } from '../../src/hosts/codex/config.js';
 import { CodexContextProvider } from '../../src/hosts/codex/context.js';
 import { commandHookHash } from '../../src/hosts/codex/hooks.js';
 import { QuickJsSandbox } from '../../src/sandbox/quickjs-sandbox.js';
+import type { McpUpstream } from '../../src/mcp/upstream.js';
 import { createMcpServer } from '../../src/server/mcp.js';
 import type { Runtime } from '../../src/server/runtime.js';
 import { NodeToolRuntime } from '../../src/tools/runtime.js';
@@ -111,10 +112,12 @@ export interface Server {
   runText(code: string): Promise<string>;
   /** Calls `run` and returns each content block's text. */
   runBlocks(code: string): Promise<string[]>;
+  /** The `run` tool's description from `tools/list`. */
+  description(): Promise<string>;
   close(): Promise<void>;
 }
 
-async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, roots: boolean): Promise<Server> {
+async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, roots: boolean, mcp?: McpUpstream): Promise<Server> {
   const server = createMcpServer({
     version: '0.0.0-attack',
     host: runtime.host,
@@ -122,6 +125,7 @@ async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, 
     serverCwd: lab.ws,
     stateDir: lab.stateDir,
     createRuntime: () => runtime,
+    ...(mcp ? { mcp } : {}),
   });
   const client = new Client({ name: 'attack-client', version: '1.0.0' }, { capabilities: roots ? { roots: {} } : {} });
   if (roots) client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(lab.ws).href }] }));
@@ -148,6 +152,10 @@ async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, 
     },
     runText: async (code) => (await call({ code })).join(''),
     runBlocks: (code) => call({ code }),
+    async description() {
+      const listed = await client.listTools();
+      return listed.tools.find((t) => t.name === 'run')?.description ?? '';
+    },
     async close() {
       await client.close();
       await server.close();
@@ -156,7 +164,7 @@ async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, 
 }
 
 /** A server for Claude Code with the given project `.claude/settings.json` (trusted project, no managed settings). */
-export async function claudeServer(lab: Lab, settings: Record<string, unknown>): Promise<Server> {
+export async function claudeServer(lab: Lab, settings: Record<string, unknown>, opts: { mcp?: McpUpstream } = {}): Promise<Server> {
   mkdirSync(path.join(lab.ws, '.claude'), { recursive: true });
   writeFileSync(path.join(lab.ws, '.claude', 'settings.json'), JSON.stringify(settings));
   mkdirSync(path.join(lab.home, '.claude'), { recursive: true });
@@ -169,7 +177,7 @@ export async function claudeServer(lab: Lab, settings: Record<string, unknown>):
     sandbox: new QuickJsSandbox(),
     maxTimeoutMs: 60_000,
   };
-  return serve(runtime, lab, { 'claudecode/toolUseId': 'toolu_attack' }, true);
+  return serve(runtime, lab, { 'claudecode/toolUseId': 'toolu_attack' }, true, opts.mcp);
 }
 
 /** A Codex command hook entry for `hooks.json`. */
