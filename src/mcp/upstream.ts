@@ -104,8 +104,6 @@ const ToolSchema = z.looseObject({
   inputSchema: z.unknown().optional(),
   outputSchema: z.unknown().optional(),
 });
-/** Names of the entries a listing returned past `MAX_TOOLS_PER_SERVER`, kept only to find duplicates. */
-const MAX_OVERFLOW_NAMES = 10_000;
 const NameOnly = z.looseObject({ name: z.string() });
 
 /** A JSON Schema object (what an `outputSchema` must be). */
@@ -113,20 +111,33 @@ function isSchemaObject(value: unknown): value is JsonSchemaType {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-const outputValidators = new AjvJsonSchemaValidator();
+/** Whether a JSON value has an own key `__proto__` at any depth (a schema the validator would read differently than written). */
+function hasProtoKey(value: unknown, depth = 0): boolean {
+  if (value === null || typeof value !== 'object' || depth > 200) return depth > 200;
+  if (Object.prototype.hasOwnProperty.call(value, '__proto__')) return true;
+  return Object.values(value).some((v) => hasProtoKey(v, depth + 1));
+}
 
 /**
- * The `outputSchema` check of one tool, compiled once at start so it applies to every tool the same way
- * (the SDK's own check keeps only the tools of the last `tools/list` page). Throws when the schema
- * cannot be compiled.
+ * The `outputSchema` check of one tool, compiled once at start with a validator of its own: schemas of
+ * different tools never share identifiers (`$id`) or compiled state. No reference is fetched: one that
+ * points outside the schema does not compile. Throws when the schema cannot be enforced (not an object,
+ * a `__proto__` key, does not compile); the tool is then left out.
  */
 function outputCheck(schema: unknown): ((structured: unknown) => string | undefined) | undefined {
   if (schema === undefined) return undefined;
   if (!isSchemaObject(schema)) throw new Error('its outputSchema is not an object');
-  const validate = outputValidators.getValidator(schema);
+  if (hasProtoKey(schema)) throw new Error('its outputSchema has a `__proto__` key, which cannot be enforced');
+  const validate = new AjvJsonSchemaValidator().getValidator(schema);
   return (structured) => {
     if (structured === undefined) return 'the tool declares an outputSchema but the result has no structuredContent';
-    const r = validate(structured);
+    let r: ReturnType<typeof validate>;
+    try {
+      r = validate(structured);
+    } catch (err) {
+      // A schema that recurses forever (a self-reference through allOf) fails here, not at compile time.
+      return `structuredContent could not be checked against the tool's outputSchema: ${oneLine(errorMessage(err), 200)}`;
+    }
     return r.valid ? undefined : `structuredContent does not match the tool's outputSchema: ${r.errorMessage}`;
   };
 }
@@ -254,8 +265,13 @@ export function buildCatalog(listed: readonly { server: string; tools: readonly 
     servers.push(server);
     if (truncated) problems.push(`MCP server ${shownName(server)} lists more tools than ${MAX_TOOLS_PER_SERVER} (or ${MAX_LIST_PAGES} pages); the rest are left out`);
     const candidates: { tool: McpToolName; description: string; inputShape: string; checkOutput: McpToolEntry['checkOutput'] }[] = [];
+    // Every name read counts, past the cap and in entries that are otherwise invalid: a second copy anywhere
+    // in the listing makes the name ambiguous.
     const counts = new Map<string, number>();
-    // A name the server listed again past the cap is a duplicate all the same.
+    for (const raw of tools) {
+      const named = NameOnly.safeParse(raw);
+      if (named.success) counts.set(named.data.name, (counts.get(named.data.name) ?? 0) + 1);
+    }
     for (const name of overflowNames) counts.set(name, (counts.get(name) ?? 0) + 1);
     for (const raw of tools) {
       const parsed = ToolSchema.safeParse(raw);
@@ -269,7 +285,6 @@ export function buildCatalog(listed: readonly { server: string; tools: readonly 
         problems.push(`tool ${shownName(name)} of MCP server ${shownName(server)} left out: ${problem ?? 'invalid name'}`);
         continue;
       }
-      counts.set(name, (counts.get(name) ?? 0) + 1);
       let checkOutput: McpToolEntry['checkOutput'];
       try {
         checkOutput = outputCheck(parsed.data.outputSchema);
@@ -328,7 +343,9 @@ async function listAll(client: Client, timeoutMs: number): Promise<{ tools: unkn
   let truncated = false;
   let cursor: string | undefined;
   for (let page = 0; page < MAX_LIST_PAGES; page++) {
-    const raw: unknown = await client.listTools(cursor === undefined ? undefined : { cursor }, { timeout: timeoutMs });
+    // Read raw: the SDK's listTools compiles every outputSchema of the page, so one schema that does not
+    // compile would take the whole server down (and its result schema drops `__proto__` keys).
+    const raw: unknown = await client.request({ method: 'tools/list', params: cursor === undefined ? {} : { cursor } }, RawResult, { timeout: timeoutMs });
     const parsed = ListPageSchema.safeParse(raw);
     if (!parsed.success) throw new Error('tools/list returned an invalid result');
     for (const t of parsed.data.tools) {
@@ -338,7 +355,7 @@ async function listAll(client: Client, timeoutMs: number): Promise<{ tools: unkn
       }
       truncated = true;
       const named = NameOnly.safeParse(t);
-      if (named.success && overflowNames.length < MAX_OVERFLOW_NAMES) overflowNames.push(named.data.name);
+      if (named.success) overflowNames.push(named.data.name);
     }
     cursor = parsed.data.nextCursor;
     if (cursor === undefined) return { tools, truncated, overflowNames };
@@ -357,6 +374,15 @@ export async function connectUpstreams(configs: readonly McpServerConfig[], opts
   const connectMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const listMs = opts.listTimeoutMs ?? DEFAULT_LIST_TIMEOUT_MS;
   const stopped = (): boolean => opts.signal?.aborted === true;
+  // Every process spawned during the start, connected or not: an abort closes them all at once.
+  const spawned: { client: Client; transport: StdioClientTransport }[] = [];
+  const abortAll = (): void => {
+    for (const { client, transport } of spawned) {
+      void client.close().catch(() => undefined);
+      void transport.close().catch(() => undefined);
+    }
+  };
+  opts.signal?.addEventListener('abort', abortAll, { once: true });
   const results = await Promise.all(
     configs.map(async (config): Promise<{ conn: Connection; tools: unknown[]; truncated: boolean; overflowNames: string[] } | undefined> => {
       if (stopped()) return undefined;
@@ -383,11 +409,7 @@ export async function connectUpstreams(configs: readonly McpServerConfig[], opts
       };
       // Errors of the transport (a line that is not JSON) are not fatal by themselves.
       client.onerror = () => undefined;
-      const abort = (): void => {
-        void client.close().catch(() => undefined);
-        void transport.close().catch(() => undefined);
-      };
-      opts.signal?.addEventListener('abort', abort, { once: true });
+      spawned.push({ client, transport });
       try {
         await withTimeout(client.connect(transport, { timeout: connectMs }), connectMs, 'starting and initializing the server');
         const listed = await withTimeout(listAll(client, listMs), listMs * MAX_LIST_PAGES, 'listing the tools');
@@ -400,11 +422,11 @@ export async function connectUpstreams(configs: readonly McpServerConfig[], opts
         const tail = oneLine(stderrTail, 300);
         problems.push(`MCP server ${shownName(name)} left out: ${oneLine(errorMessage(err), 300)}${tail === '' ? '' : ` (stderr: ${tail})`}`);
         return undefined;
-      } finally {
-        opts.signal?.removeEventListener('abort', abort);
       }
     }),
   );
+  opts.signal?.removeEventListener('abort', abortAll);
+  if (stopped()) abortAll();
   const connected = results.filter((r): r is NonNullable<typeof r> => r !== undefined);
   const catalog = buildCatalog(
     connected.map((r) => ({ server: r.conn.name, tools: r.tools, truncated: r.truncated, overflowNames: r.overflowNames })),

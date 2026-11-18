@@ -5,7 +5,8 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { FAKE_MCP_UPSTREAM, MemoryMcpUpstream } from '../testing/index.js';
-import { parseMcpConfigFlag, startMcpUpstreams, upstreamLifecycle, type ExitHooks } from './start.js';
+import { EventEmitter } from 'node:events';
+import { parseMcpConfigFlag, processExitHooks, startMcpUpstreams, upstreamLifecycle, type ExitHooks } from './start.js';
 
 async function configFile(servers: Record<string, unknown>): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-mcp-start-'));
@@ -54,7 +55,9 @@ describe('startMcpUpstreams', () => {
     if (!r.ok) throw new Error(r.message);
     try {
       const { catalog } = r.upstream;
-      expect([...catalog.servers].sort()).toEqual(['inventory', 'many', 'paged']);
+      expect([...catalog.servers].sort()).toEqual(['badlist', 'inventory', 'many', 'paged']);
+      // An entry that is not a tool leaves out that entry, not the server.
+      expect(catalog.tools.filter((t) => t.server === 'badlist').map((t) => t.tool)).toEqual(['fine']);
       expect(catalog.tools.filter((t) => t.server === 'paged').map((t) => t.tool)).toEqual(['p1_tool', 'p2_tool', 'p3_tool']);
       expect(catalog.tools.filter((t) => t.server === 'many')).toHaveLength(500);
       const problems = catalog.problems.join('\n');
@@ -63,7 +66,7 @@ describe('startMcpUpstreams', () => {
       expect(problems).toContain('"missing" left out');
       expect(problems).toContain('"silent" left out');
       expect(problems).toContain('"garbage" left out');
-      expect(problems).toContain('"badlist" left out');
+      expect(problems).toContain('a tool of MCP server "badlist" left out: its tools/list entry is invalid');
       expect(problems).toContain('"many" lists more tools than 500');
     } finally {
       await r.upstream.close();
@@ -168,6 +171,71 @@ describe('upstreamLifecycle', () => {
     expect(pids.map(alive)).toEqual([false, false]);
     expect(f.exits).toEqual([143]);
   }, 20_000);
+});
+
+describe('upstreamLifecycle, end of session during the start', () => {
+  it('stdin EOF during the start ends every server, the one still connecting included, though nobody read stdin yet', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-mcp-eof-early-'));
+    const ready = path.join(dir, 'ready.pid');
+    const pending = path.join(dir, 'pending.pid');
+    const f = fakeHooks();
+    const life = upstreamLifecycle(f.hooks);
+    const starting = startMcpUpstreams({
+      configFile: await configFile({
+        ready: { ...inventory, env: { FAKE_MCP_PID_FILE: ready } },
+        pending: { command: process.execPath, args: [FAKE_MCP_UPSTREAM, 'never-init'], env: { FAKE_MCP_PID_FILE: pending } },
+      }),
+      host: 'claude',
+      managedDir: undefined,
+      connectTimeoutMs: 20_000,
+      signal: life.signal,
+    });
+    await waitFor(() => existsSync(ready) && existsSync(pending));
+    const pids = [Number(await readFile(ready, 'utf8')), Number(await readFile(pending, 'utf8'))];
+    f.stdin.end();
+    const r = await starting;
+    if (!r.ok) throw new Error(r.message);
+    expect(life.attach(r.upstream)).toBe(false);
+    await waitFor(() => pids.every((p) => !alive(p)));
+    expect(pids.map(alive)).toEqual([false, false]);
+    expect(f.exits).toEqual([]);
+  }, 20_000);
+
+  it('what the client sent during the start reaches the server transport, in order', async () => {
+    const f = fakeHooks();
+    const life = upstreamLifecycle(f.hooks);
+    f.stdin.write('{"jsonrpc":"2.0",');
+    f.stdin.write('"id":1}\n');
+    await new Promise((r) => setImmediate(r));
+    expect(life.attach(new MemoryMcpUpstream({ srv: ['t'] }))).toBe(true);
+    const got: string[] = [];
+    f.stdin.on('data', (c: Buffer) => got.push(c.toString()));
+    life.resumeInput();
+    f.stdin.write('next\n');
+    await waitFor(() => got.join('').includes('next'));
+    expect(got.join('')).toBe('{"jsonrpc":"2.0","id":1}\nnext\n');
+  });
+
+  it('a repeated signal neither cuts the cleanup short nor closes twice', async () => {
+    let closes = 0;
+    let finish: () => void = () => undefined;
+    const up = new MemoryMcpUpstream({ srv: ['t'] });
+    up.close = () => {
+      closes++;
+      return new Promise<void>((r) => (finish = r));
+    };
+    const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), exits: [] as number[], exit(code: number) { proc.exits.push(code); } });
+    upstreamLifecycle(processExitHooks(proc)).attach(up);
+    proc.emit('SIGTERM');
+    // The handler stays: a second SIGTERM must reach it, not the default action that kills the process.
+    expect(proc.listenerCount('SIGTERM')).toBe(1);
+    proc.emit('SIGTERM');
+    proc.emit('SIGINT');
+    expect(closes).toBe(1);
+    finish();
+    await waitFor(() => proc.exits.length > 0);
+    expect(proc.exits).toEqual([143]);
+  });
 });
 
 function alive(pid: number): boolean {

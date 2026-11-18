@@ -33,30 +33,41 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+// Content blocks as the MCP SDK's ContentBlockSchema defines them: a block of another shape, or of a type
+// the protocol does not have, makes the whole result invalid (as the SDK's own result schema would).
 const TextBlock = z.looseObject({ type: z.literal('text'), text: z.string() });
-const ResourceBlock = z.looseObject({ type: z.literal('resource'), resource: z.looseObject({ uri: z.string(), text: z.string().optional(), mimeType: z.string().optional() }) });
-const LinkBlock = z.looseObject({ type: z.literal('resource_link'), uri: z.string() });
-const MediaBlock = z.looseObject({ type: z.enum(['image', 'audio']), mimeType: z.string().optional() });
-const AnyBlock = z.looseObject({ type: z.string() });
+const MediaBlock = z.looseObject({ type: z.enum(['image', 'audio']), data: z.string(), mimeType: z.string() });
+const LinkBlock = z.looseObject({ type: z.literal('resource_link'), uri: z.string(), name: z.string(), mimeType: z.string().optional() });
+const ResourceBlock = z.looseObject({
+  type: z.literal('resource'),
+  resource: z.union([
+    z.looseObject({ uri: z.string(), text: z.string(), mimeType: z.string().optional() }),
+    z.looseObject({ uri: z.string(), blob: z.string(), mimeType: z.string().optional() }),
+  ]),
+});
+const ContentBlock = z.discriminatedUnion('type', [TextBlock, MediaBlock, LinkBlock, ResourceBlock]);
 const CallResultSchema = z.looseObject({
-  content: z.array(z.unknown()).optional(),
+  content: z.array(ContentBlock).optional(),
   // Checked as a plain object below: a parsed record would turn a `__proto__` key into a prototype.
   structuredContent: z.unknown().optional(),
   isError: z.boolean().optional(),
 });
 
 /** The text of a content block; non-text blocks become a short note. */
-function blockText(block: unknown): string {
-  const text = TextBlock.safeParse(block);
-  if (text.success) return text.data.text;
-  const resource = ResourceBlock.safeParse(block);
-  if (resource.success) return resource.data.resource.text ?? `[resource ${resource.data.resource.uri}${resource.data.resource.mimeType ? ` (${resource.data.resource.mimeType})` : ''}: binary content omitted]`;
-  const link = LinkBlock.safeParse(block);
-  if (link.success) return `[resource link ${link.data.uri}]`;
-  const media = MediaBlock.safeParse(block);
-  if (media.success) return `[${media.data.type} content omitted${media.data.mimeType ? ` (${media.data.mimeType})` : ''}]`;
-  const any = AnyBlock.safeParse(block);
-  return `[${any.success ? any.data.type.slice(0, 40) : 'unknown'} content omitted]`;
+function blockText(block: z.infer<typeof ContentBlock>): string {
+  switch (block.type) {
+    case 'text':
+      return block.text;
+    case 'image':
+    case 'audio':
+      return `[${block.type} content omitted (${block.mimeType})]`;
+    case 'resource_link':
+      return `[resource link ${block.uri}]`;
+    case 'resource':
+      return 'text' in block.resource && typeof block.resource.text === 'string'
+        ? block.resource.text
+        : `[resource ${block.resource.uri}${block.resource.mimeType ? ` (${block.resource.mimeType})` : ''}: binary content omitted]`;
+  }
 }
 
 /** Where a cut result is kept for `readOverflow`. */

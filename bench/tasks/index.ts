@@ -264,6 +264,14 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
       entry: path.join(import.meta.dirname, 'T16', 'server.ts'),
       args: (facts) => ['--seed', String(facts.seed)],
       tools: ['list_customers', 'list_orders', 'get_order'],
+      offLimits: [
+        // The bench's files in the run directory, one level above the workspace.
+        'mcp-config.json', 'upstream-mcp.json', 'claude-settings.json',
+        // The server and its generator.
+        'server.ts', 'data.ts', 't16Data', 'topRefunded', 'refundedInQuarter', 'generateFixture',
+        // The process table: the server's command line names its file and seed.
+        '/proc/', 'pgrep', 'ps aux', 'ps -e', 'ps ax', 'ps -o', 'ps -p',
+      ],
     },
     verify: verifyT16,
     solution: solveT16,

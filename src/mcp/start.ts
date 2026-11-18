@@ -59,12 +59,36 @@ export function parseMcpConfigFlag(args: readonly string[]): string | undefined 
   return value;
 }
 
-/** Where `closeUpstreamsOnExit` listens. */
+/** Where `upstreamLifecycle` listens. */
 export interface ExitHooks {
   /** The client side of the MCP session: its end means the session is over. */
-  readonly stdin: { once(event: 'end', listener: () => void): unknown };
+  readonly stdin: {
+    on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+    removeListener(event: 'data', listener: (chunk: Buffer) => void): unknown;
+    once(event: 'end', listener: () => void): unknown;
+    pause(): unknown;
+    resume(): unknown;
+    unshift(chunk: Buffer): unknown;
+  };
+  /** Registers `handler` for every delivery of `signal`, not only the first: a repeated signal must not cut the cleanup short. */
   readonly onSignal: (signal: 'SIGINT' | 'SIGTERM' | 'SIGHUP', handler: () => void) => void;
   readonly exit: (code: number) => void;
+}
+
+/** The part of `process` the exit hooks use. */
+export interface ProcessLike {
+  readonly stdin: ExitHooks['stdin'];
+  on(signal: 'SIGINT' | 'SIGTERM' | 'SIGHUP', handler: () => void): unknown;
+  exit(code: number): void;
+}
+
+/**
+ * The exit hooks of a real process. Signal handlers are kept for every delivery (`on`, not `once`): with
+ * `once`, a second SIGTERM during the cleanup finds no handler and its default action kills the process
+ * before the upstream servers are closed.
+ */
+export function processExitHooks(proc: ProcessLike): ExitHooks {
+  return { stdin: proc.stdin, onSignal: (signal, handler) => void proc.on(signal, handler), exit: (code) => proc.exit(code) };
 }
 
 /**
@@ -74,31 +98,56 @@ export interface ExitHooks {
  * not; one that comes later closes the set given to `attach`. After a signal the process exits with the
  * signal's code once the upstreams are closed.
  */
-export function upstreamLifecycle(hooks: ExitHooks): { readonly signal: AbortSignal; attach(upstream: McpUpstream): boolean } {
+export function upstreamLifecycle(hooks: ExitHooks): { readonly signal: AbortSignal; attach(upstream: McpUpstream): boolean; resumeInput(): void; release(): void } {
   const controller = new AbortController();
   let upstream: McpUpstream | undefined;
   let exitCode: number | undefined;
-  const stop = (code: number | undefined): void => {
-    if (code !== undefined) exitCode ??= code;
-    controller.abort();
-    if (upstream === undefined) return; // `attach` finishes the job once the start returns
-    const set = upstream;
+  let closing = false;
+  const close = (set: McpUpstream): void => {
+    if (closing) return; // a repeated signal or EOF while closing changes nothing
+    closing = true;
     void set.close().finally(() => {
       if (exitCode !== undefined) hooks.exit(exitCode);
     });
   };
+  const stop = (code: number | undefined): void => {
+    if (code !== undefined) exitCode ??= code;
+    controller.abort();
+    if (upstream !== undefined) close(upstream); // else `attach` finishes the job once the start returns
+  };
+  // stdin is read from the start, so that its end is seen while the upstreams start (a stream that nobody
+  // reads never ends); what arrives meanwhile is kept and handed back to the server transport by `attach`.
+  const early: Buffer[] = [];
+  const keep = (chunk: Buffer): void => {
+    early.push(chunk);
+  };
+  hooks.stdin.on('data', keep);
   hooks.stdin.once('end', () => stop(undefined));
   for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) hooks.onSignal(signal, () => stop(code));
   return {
     signal: controller.signal,
-    /** Hands over the started set. Returns false when the session already ended (the set is then being closed). */
+    /**
+     * Hands over the started set and stops reading stdin: what was read is put back, paused, for the
+     * server transport (call `resumeInput` once it listens). Returns false when the session already ended
+     * (the set is then being closed).
+     */
     attach(set) {
       upstream = set;
+      hooks.stdin.removeListener('data', keep);
+      hooks.stdin.pause();
+      if (early.length > 0) hooks.stdin.unshift(Buffer.concat(early.splice(0)));
       if (!controller.signal.aborted) return true;
-      void set.close().finally(() => {
-        if (exitCode !== undefined) hooks.exit(exitCode);
-      });
+      close(set);
       return false;
+    },
+    /** The start failed before any upstream: stops reading stdin, so the process can end. */
+    release() {
+      hooks.stdin.removeListener('data', keep);
+      hooks.stdin.pause();
+    },
+    /** Lets stdin flow again, to the listener the server transport added. */
+    resumeInput() {
+      hooks.stdin.resume();
     },
   };
 }

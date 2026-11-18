@@ -33,6 +33,20 @@ describe('tools/list', () => {
   });
 });
 
+describe('tools/list, per tool', () => {
+  it('a name listed again after more than 10,000 other names is still a collision', async () => {
+    const u = await connect('dup-far');
+    expect(u.catalog.lookup('srv', 'valid')).toBeUndefined();
+    expect(u.catalog.problems.join('\n')).toContain('mcp__srv__valid names more than one tool');
+  });
+
+  it('an outputSchema that does not compile leaves out that tool only, without fetching the reference', async () => {
+    const u = await connect('bad-ref');
+    expect(u.catalog.tools.map((t) => t.tool)).toEqual(['valid']);
+    expect(u.catalog.problems.join('\n')).toMatch(/tool "broken" of MCP server "srv" left out: .*example\.invalid/);
+  });
+});
+
 describe('tools/call results', () => {
   it('the outputSchema of every page is checked the same way', async () => {
     const u = await connect('schema-pages');

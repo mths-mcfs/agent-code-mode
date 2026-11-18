@@ -366,6 +366,41 @@ export function taskScriptTools(task: Pick<TaskDef, 'mcpServer'>): string[] {
   return m === undefined ? [] : [...m.tools.map((t) => `mcp__${m.name}__${t}`), ...REPL_DISCOVERY_TOOLS];
 }
 
+/**
+ * The inputs of every tool call in a transcript (the model's calls, and in an interactive transcript the
+ * calls REPL scripts made), as JSON text: what the agent asked to read, run or search.
+ */
+export function toolInputsText(transcript: string): string {
+  const out: string[] = [];
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('"tool_use"')) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = ToolUseEvent.safeParse(event);
+    if (!parsed.success) continue;
+    for (const block of parsed.data.message.content) {
+      const use = ToolUseInput.safeParse(block);
+      if (use.success) out.push(JSON.stringify(use.data.input ?? null));
+    }
+  }
+  return out.join('\n');
+}
+
+const ToolUseEvent = z.object({ message: z.object({ content: z.array(z.unknown()) }).passthrough() }).passthrough();
+const ToolUseInput = z.object({ type: z.literal('tool_use'), input: z.unknown() }).passthrough();
+
+/** The off-limits markers of a task's MCP server that a run's tool calls contain. */
+export function offLimitsHits(task: Pick<TaskDef, 'mcpServer'>, transcript: string): string[] {
+  const markers = task.mcpServer?.offLimits ?? [];
+  if (markers.length === 0) return [];
+  const inputs = toolInputsText(transcript);
+  return markers.filter((m) => inputs.includes(m));
+}
+
 /** Content hash of a build directory (sorted relative paths and bytes), for `--acm-dist`. */
 async function dirHash(dir: string): Promise<string> {
   const hash = createHash('sha256');
@@ -827,6 +862,8 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
   if (interactive) invalidReasons.push(...interactiveReasons(ctx.opts, p, output.interactive ?? null, facts, taskScriptTools(task)));
   // The agent must not reach the checkout's bench/tasks (hidden tests, solutions, the T16 server's generator).
   if (!ctx.opts.dryRun && output.stdout.includes(path.join(REPO_ROOT, 'bench', 'tasks'))) invalidReasons.push('the transcript names a path under bench/tasks: the agent reached the task sources');
+  const offLimits = ctx.opts.dryRun ? [] : offLimitsHits(task, output.stdout);
+  if (offLimits.length > 0) invalidReasons.push(`tool calls went around the task's MCP server (${offLimits.join(', ')}): its source, the bench's config files or the process table`);
   const notes: string[] = [];
   const sessionCost = facts?.sessionCost ?? null;
   if (interactive) {

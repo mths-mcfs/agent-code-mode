@@ -19,6 +19,12 @@ export interface TaskMcpServer {
   args(facts: FixtureFacts): string[];
   /** Tool names the server lists. */
   readonly tools: readonly string[];
+  /**
+   * Text that, in the input of any tool call of a run, shows the agent going around the server: reading its
+   * source or the bench's config files next to the workspace, calling the data generator, or reading the
+   * process table (where the server's command line, seed included, is visible). Such a run is invalid.
+   */
+  readonly offLimits: readonly string[];
 }
 
 export interface VerifyContext {
