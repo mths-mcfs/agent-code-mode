@@ -217,7 +217,9 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
   // What was kept of one stream: the start and, when it was cut, the end.
   function streamText(text, tail, omitted) {
     if (tail === undefined) return text;
-    return omitted === 0 ? text + tail : text + '\n' + tail;
+    if (omitted === 0) return text + tail;
+    // Bytes were lost between the two: the records cut at either side are not whole.
+    return text.slice(0, text.lastIndexOf('\n') + 1) + tail.slice(tail.indexOf('\n') + 1);
   }
   function linesOf(text) {
     var kept = text.length > MAX_ANALYZED_CHARS ? text.slice(text.indexOf('\n', text.length - MAX_ANALYZED_CHARS) + 1) : text;
@@ -272,7 +274,7 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
       var files = /^\s*Test Files\s+(\S.*)$/.exec(lines[i - 1]);
       if (files === null || i + 1 >= lines.length || !/^\s*Start at\s/.test(lines[i + 1])) continue;
       var t = counts(tests[1].replace(/\(\d+\)$/, '')), f = counts(files[1].replace(/\(\d+\)$/, ''));
-      return { runner: 'vitest', at: i, passed: t.passed || 0, failed: t.failed || f.failed || 0, skipped: (t.skipped || 0) + (t.todo || 0), cancelled: 0 };
+      return { runner: 'vitest', at: i, testsFailed: t.failed || 0, passed: t.passed || 0, failed: t.failed || f.failed || 0, skipped: (t.skipped || 0) + (t.todo || 0), cancelled: 0 };
     }
     return null;
   }
@@ -283,7 +285,7 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
       var suites = /^Test Suites:\s+(.*\btotal)$/.exec(lines[i - 1]);
       if (suites === null) continue;
       var t = counts(tests[1]), s = counts(suites[1]);
-      return { runner: 'jest', at: i, passed: t.passed || 0, failed: t.failed || s.failed || 0, skipped: (t.skipped || 0) + (t.todo || 0), cancelled: 0 };
+      return { runner: 'jest', at: i, testsFailed: t.failed || 0, passed: t.passed || 0, failed: t.failed || s.failed || 0, skipped: (t.skipped || 0) + (t.todo || 0), cancelled: 0 };
     }
     return null;
   }
@@ -311,30 +313,47 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     }
     return null;
   }
-  // The block that comes last in the stream is the runner's: a test can only print before its runner reports.
-  function lastSummary(lines) {
-    var finders = [vitestSummary, jestSummary, pytestSummary, nodeSummary], best = null;
-    for (var i = 0; i < finders.length; i++) {
-      var found = finders[i](lines);
-      if (found !== null && (best === null || found.at > best.at)) best = found;
+  var SUMMARIES = { vitest: vitestSummary, jest: jestSummary, pytest: pytestSummary, node: nodeSummary };
+  // Whether only what the runner prints after its summary follows it.
+  function endsOutput(found, lines) {
+    for (var k = found.at + 1; k < lines.length; k++) {
+      if (lines[k] === '') continue;
+      if (found.runner === 'vitest' && /^\s*(?:Start at|Duration)\s/.test(lines[k])) continue;
+      if (found.runner === 'jest' && /^(?:Snapshots:|Time:|Ran all test suites)/.test(lines[k])) continue;
+      return found.runner === 'node' && /^✖ failing tests:/.test(lines[k]);
+    }
+    return true;
+  }
+  // The summary of the runner that ran; when the command does not say which, only one that ends the output.
+  function lastSummary(lines, runner) {
+    if (runner !== undefined) return SUMMARIES[runner](lines);
+    var names = objectKeys(SUMMARIES), best = null;
+    for (var i = 0; i < names.length; i++) {
+      var found = SUMMARIES[names[i]](lines);
+      if (found !== null && endsOutput(found, lines) && (best === null || found.at > best.at)) best = found;
     }
     return best;
   }
 
   // ---- failures of each runner
-  function vitestFailures(lines, c) {
-    var section = false;
+  // A failure starts only where the report can start one: after a section title, a separator or another failure's title.
+  function vitestFailures(lines, c, summary) {
+    var wanted = false, open = false, title = /^\s*FAIL\s+(\S.*)$/;
     for (var j = 0; j < lines.length; j++) {
-      if (/⎯ Failed (?:Tests|Suites) \d+ ⎯/.test(lines[j])) { section = true; continue; }
-      if (!section) continue;
-      var head = /^\s*FAIL\s+(\S.*)$/.exec(lines[j]);
-      if (head !== null) c.add(vitestFailure(lines, j, head[1]));
+      var section = /⎯ Failed (Tests|Suites) \d+ ⎯/.exec(lines[j]);
+      if (section !== null) { wanted = section[1] === 'Tests' || summary.testsFailed === 0; open = true; continue; }
+      if (/^\s*⎯/.test(lines[j])) { open = true; continue; }
+      if (lines[j] === '' || !open) continue;
+      var head = title.exec(lines[j]);
+      if (head === null) { open = false; continue; }
+      if (wanted) c.add(vitestFailure(lines, j, head[1], title));
     }
   }
-  function vitestFailure(lines, j, name) {
+  function vitestFailure(lines, j, name, title) {
     return function () {
-      var stop = /^\s*(?:FAIL\s|⎯)/, named = name.replace(/ \[ .* \]$/, '').split(' > ')[0], file, line;
-      for (var k = j + 1; k < lines.length && !stop.test(lines[k]); k++) {
+      var stop = /^\s*⎯/, named = name.replace(/ \[ .* \]$/, '').split(' > ')[0], file, line, from = j + 1;
+      while (from < lines.length && title.test(lines[from])) from++;
+      for (var k = from; k < lines.length && !stop.test(lines[k]); k++) {
         var at = /^\s*❯\s+(.*):(\d+):\d+\)?$/.exec(lines[k]);
         if (at === null) continue;
         var place = at[1].replace(/^.*\(/, '');
@@ -342,18 +361,20 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
         if (own) { file = named; line = Number(at[2]); break; }
         if (file === undefined && place.indexOf('node_modules') === -1) { file = place.split(' ').pop(); line = Number(at[2]); }
       }
-      return failure(name, textBlock(lines, j + 1, /^\s*(?:FAIL\s|⎯|❯|\d+\|)/, 0), file === undefined ? named : file, line);
+      return failure(name, textBlock(lines, from, /^\s*(?:⎯|❯|\d+\|)/, 0), file === undefined ? named : file, line);
     };
   }
-  function jestFailures(lines, c) {
+  // Jest indents a failure's title by two spaces and its message by four or more.
+  function jestFailures(lines, c, summary) {
     var file;
     for (var j = 0; j < lines.length; j++) {
       if (/^\s*Summary of all failing tests/.test(lines[j])) return;
-      var suite = /^\s*FAIL\s+(\S.*)$/.exec(lines[j]);
+      var suite = /^ ?FAIL\s+(\S.*)$/.exec(lines[j]);
       if (suite !== null) { file = suite[1].replace(/^\.\//, ''); continue; }
       if (file === undefined) continue;
-      var head = /^\s*●\s+(\S.*)$/.exec(lines[j]);
+      var head = /^ {2}● (\S.*)$/.exec(lines[j]);
       if (head === null) continue;
+      if (head[1] === 'Test suite failed to run' && summary.testsFailed > 0) continue;
       var next = j + 1;
       while (next < lines.length && lines[next] === '') next++;
       if (head[1] === 'Console' && next < lines.length && /^\s*console\.[a-z]+/.test(lines[next])) continue;
@@ -362,40 +383,75 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
   }
   function jestFailure(lines, j, name, suite) {
     return function () {
-      var stop = /^\s*●\s|^\s*FAIL\s|^Test Suites:/, file = suite, line;
+      var stop = /^ {2}● |^ ?FAIL\s|^Test Suites:/, file = suite, line;
       for (var k = j + 1; k < lines.length && !stop.test(lines[k]); k++) {
         var at = /^\s*at\s+(?:.*\()?([^()]+):(\d+):\d+\)?$/.exec(lines[k]);
         if (at !== null && at[1].indexOf('node_modules') === -1) { file = at[1]; line = Number(at[2]); break; }
       }
-      return failure(name, textBlock(lines, j + 1, /^\s*●\s|^\s*FAIL\s|^Test Suites:|^\s*>?\s*\d+ \||^\s+at\s/, 4), file, line);
+      return failure(name, textBlock(lines, j + 1, /^ {2}● |^ ?FAIL\s|^Test Suites:|^\s*>?\s*\d+ \||^\s+at\s/, 4), file, line);
     };
   }
+  // A diagnostic belongs to a row by kind (the test's body or an error around it), full name and file.
+  function pytestKey(kind, title) { return kind + '\u0000' + title; }
   function pytestFailures(lines, c) {
-    var blocks = {}, block, from = -1, j;
+    var blocks = Object.create(null), block, from = -1, j;
     for (j = 0; j < lines.length; j++) {
       if (/^=+ short test summary info =+$/.test(lines[j])) { from = j; block = undefined; continue; }
       if (lines[j].charCodeAt(0) === 95 && lines[j].charCodeAt(lines[j].length - 1) === 95) {
-        var title = lines[j].replace(/^_+ /, '').replace(/ _+$/, '').replace(/^ERROR (?:at (?:setup|teardown) of|collecting) /, '');
-        block = blocks[title] = { errors: [] };
+        var title = lines[j].replace(/^_+ /, '').replace(/ _+$/, '');
+        var around = /^ERROR (?:at (?:setup|teardown) of|collecting) (.*)$/.exec(title);
+        var key = pytestKey(around === null ? 'body' : 'error', around === null ? title : around[1]);
+        block = { errors: [], places: Object.create(null), last: undefined, used: false };
+        if (blocks[key] === undefined) blocks[key] = [];
+        push(blocks[key], block);
         continue;
       }
       if (block === undefined) continue;
       var where = /^(.+\.py):(\d+): /.exec(lines[j]);
-      if (where !== null) { block.file = where[1]; block.line = Number(where[2]); }
+      if (where !== null) { block.last = { file: where[1], line: Number(where[2]) }; block.places[where[1]] = block.last; }
       if (lines[j].charCodeAt(0) === 69 && (lines[j].length === 1 || lines[j].charCodeAt(1) === 32) && block.errors.length < 40) push(block.errors, lines[j].slice(1).trim());
     }
     if (from === -1) return;
     for (j = from + 1; j < lines.length; j++) {
-      var row = /^(?:FAILED|ERROR) (\S.*)$/.exec(lines[j]);
-      if (row !== null) c.add(pytestFailure(row[1], blocks));
+      var row = /^(FAILED|ERROR) (\S.*)$/.exec(lines[j]);
+      if (row !== null) c.add(pytestFailure(row[1] === 'FAILED' ? 'body' : 'error', row[2], blocks));
     }
   }
-  function pytestFailure(rest, blocks) {
+  function pytestTitle(id) {
+    var parts = id.split('::');
+    return parts.length > 1 ? join(parts.slice(1), '.') : id;
+  }
+  // The row is "<id> - <first line of the error>", and a parametrized id may hold " - " too.
+  function pytestId(kind, rest, blocks) {
+    var cut = rest.length;
+    for (var tries = 0; tries < 8 && cut !== -1; tries++) {
+      var id = rest.slice(0, cut);
+      if (blocks[pytestKey(kind, pytestTitle(id))] !== undefined) return id;
+      cut = cut === 0 ? -1 : rest.lastIndexOf(' - ', cut - 1);
+    }
+    var bracket = rest.lastIndexOf('] - ');
+    if (bracket !== -1) return rest.slice(0, bracket + 1);
+    var plain = rest.indexOf(' - ');
+    return plain === -1 ? rest : rest.slice(0, plain);
+  }
+  function pytestBlock(kind, id, blocks) {
+    var candidates = blocks[pytestKey(kind, pytestTitle(id))], file = id.split('::')[0];
+    if (candidates === undefined) return undefined;
+    for (var i = 0; i < candidates.length; i++) {
+      var block = candidates[i];
+      if (block.used) continue;
+      var names = objectKeys(block.places), onlyConftest = names.length > 0;
+      for (var n = 0; n < names.length; n++) if (names[n].split('/').pop() !== 'conftest.py') onlyConftest = false;
+      if (block.places[file] !== undefined || onlyConftest) { block.used = true; return block; }
+    }
+    return undefined;
+  }
+  function pytestFailure(kind, rest, blocks) {
     return function () {
-      var cutAt = rest.indexOf(' - '), id = cutAt === -1 ? rest : rest.slice(0, cutAt), short = cutAt === -1 ? undefined : rest.slice(cutAt + 3);
-      var parts = id.split('::'), key = parts.length > 1 ? join(parts.slice(1), '.') : id, place = blocks[key];
-      var text = place !== undefined && place.errors.length > 0 ? join(place.errors, '\n') : short;
-      return failure(id, text, place !== undefined && place.file !== undefined ? place.file : parts[0], place === undefined ? undefined : place.line);
+      var id = pytestId(kind, rest, blocks), file = id.split('::')[0], block = pytestBlock(kind, id, blocks);
+      if (block === undefined) return failure(id, '', file);
+      var place = block.places[file] !== undefined ? block.places[file] : block.last;
+      return failure(id, join(block.errors, '\n'), place === undefined ? file : place.file, place === undefined ? undefined : place.line);
     };
   }
   function nodeLocation(text) {
@@ -404,14 +460,19 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
   }
   var NODE_NOT_FAILED = /test did not finish before its parent|test timed out after|^'?\d+ subtests? failed/;
   function nodeSpecFailures(lines, from, c) {
-    var start = -1, j;
+    var start = -1, j, suites = Object.create(null);
     for (j = from + 1; j < lines.length && start === -1; j++) if (/^✖ failing tests:/.test(lines[j])) start = j;
     if (start === -1) return;
+    // A suite's own hook failure is listed too, but the runner does not count it as a failed test.
+    for (j = 0; j < from; j++) {
+      var suite = /^\s*▶ (.+)$/.exec(lines[j]);
+      if (suite !== null) suites[suite[1]] = true;
+    }
     for (j = start + 1; j < lines.length - 1; j++) {
       var at = /^test at (.+)$/.exec(lines[j]);
       if (at === null) continue;
       var named = /^([✖⚠]) (.+)$/.exec(lines[j + 1]);
-      if (named === null || named[1] === '⚠') continue;
+      if (named === null || named[1] === '⚠' || suites[named[2].replace(/ \([\d.]+m?s\)$/, '')] === true) continue;
       var text = textBlock(lines, j + 2, /^test at |^\s+at\s|^\s*\{$/, 2);
       if (NODE_NOT_FAILED.test(text)) continue;
       c.add(nodeSpecFailure(named[2], text, at[1]));
@@ -440,7 +501,7 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
         else if (value.charCodeAt(0) !== 124) message = value;
         else message = tapBlock(lines, k + 1, field[1].length);
       }
-      if (kind === 'subtestsFailed' || kind === 'cancelledByParent' || kind === 'testTimeoutFailure') continue;
+      if (kind === 'subtestsFailed' || kind === 'hookFailed' || kind === 'cancelledByParent' || kind === 'testTimeoutFailure') continue;
       c.add(nodeTapFailure(bad[1], message, location));
     }
   }
@@ -465,8 +526,8 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     var c = collector();
     for (var i = 0; i < streams.length; i++) {
       var lines = streams[i];
-      if (summary.runner === 'vitest') vitestFailures(lines, c);
-      else if (summary.runner === 'jest') jestFailures(lines, c);
+      if (summary.runner === 'vitest') vitestFailures(lines, c, summary);
+      else if (summary.runner === 'jest') jestFailures(lines, c, summary);
       else if (summary.runner === 'pytest') pytestFailures(lines, c);
       else if (i === summary.stream) {
         nodeSpecFailures(lines, summary.at, c);
@@ -476,10 +537,10 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     return c;
   }
   // The runner's summary, or null when the streams disagree about which one it is.
-  function runnerSummary(streams) {
+  function runnerSummary(streams, runner) {
     var chosen = null;
     for (var i = 0; i < streams.length; i++) {
-      var found = lastSummary(streams[i]);
+      var found = lastSummary(streams[i], runner);
       if (found === null) continue;
       found.stream = i;
       if (chosen !== null) return null;
@@ -487,12 +548,21 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     }
     return chosen;
   }
-  function testReport(r) {
+  function allDifferent(list) {
+    var seen = Object.create(null);
+    for (var i = 0; i < list.length; i++) {
+      var key = stringify([list[i].name, list[i].message, list[i].file, list[i].line]);
+      if (seen[key] === true) return false;
+      seen[key] = true;
+    }
+    return true;
+  }
+  function testReport(r, runner) {
     var stdout = streamText(r.stdout, r.stdoutTail, r.stdoutOmitted), stderr = streamText(r.stderr, r.stderrTail, r.stderrOmitted);
     var ok = r.exitCode === 0 && r.timedOut !== true;
-    var streams = [linesOf(stdout), linesOf(stderr)], summary = runnerSummary(streams), found = null;
+    var streams = [linesOf(stdout), linesOf(stderr)], summary = runnerSummary(streams, runner), found = null;
     if (summary !== null && !ok && summary.failed > 0) found = failuresOf(summary, streams);
-    var parsed = summary !== null && r.timedOut !== true && (r.exitCode === 0 ? summary.failed === 0 : found !== null && found.count >= summary.failed);
+    var parsed = summary !== null && r.timedOut !== true && (r.exitCode === 0 ? summary.failed === 0 : found !== null && found.count === summary.failed && allDifferent(found.list));
     var out = {
       ok: ok, exitCode: r.exitCode, timedOut: r.timedOut === true, parsed: parsed,
       passed: parsed ? summary.passed : 0, failed: parsed ? summary.failed : 0, skipped: parsed ? summary.skipped : 0,
@@ -511,18 +581,44 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     defineProperty(err, 'code', { value: code, writable: true, enumerable: true, configurable: true });
     return err;
   }
+  // Which runner a command starts, when it names exactly one.
+  function runnerOf(command) {
+    var text = command.slice(0, 4000), found = [];
+    if (/(?:^|[\s\/])vitest(?:\s|$)/.test(text)) push(found, 'vitest');
+    if (/(?:^|[\s\/])jest(?:\s|$)/.test(text)) push(found, 'jest');
+    if (/(?:^|[\s\/])pytest(?:\s|$)/.test(text)) push(found, 'pytest');
+    if (/(?:^|[\s\/;&|])node\s(?:[^;&|]*\s)?--test(?:\s|$)/.test(text)) push(found, 'node');
+    return found.length === 1 ? found[0] : undefined;
+  }
+  function packageFile(cwd) { return cwd === undefined ? 'package.json' : cwd + '/package.json'; }
+  function testScript(content) {
+    var pkg = parse(content);
+    var scripts = pkg !== null && typeof pkg === 'object' ? pkg.scripts : undefined;
+    return scripts !== null && typeof scripts === 'object' && typeof scripts.test === 'string' ? scripts.test : undefined;
+  }
   function discoverTestCommand(cwd) {
-    var file = cwd === undefined ? 'package.json' : cwd + '/package.json';
+    var file = packageFile(cwd);
     return apply(promiseThen, invoke('read', { path: file, limit: 1000000 }), [function (r) {
       if (r.truncated === true) throw toolError('invalid-args', 'test: ' + file + ' is too large to read whole; pass a command');
-      var pkg;
-      try { pkg = parse(r.content); } catch (e) { throw toolError('invalid-args', 'test: ' + file + ' is not valid JSON; pass a command'); }
-      var scripts = pkg !== null && typeof pkg === 'object' ? pkg.scripts : undefined;
-      return scripts !== null && typeof scripts === 'object' && typeof scripts.test === 'string' ? 'npm test --silent' : 'node --test';
+      var script;
+      try { script = testScript(r.content); } catch (e) { throw toolError('invalid-args', 'test: ' + file + ' is not valid JSON; pass a command'); }
+      return script === undefined ? { command: 'node --test', starts: 'node --test' } : { command: 'npm test --silent', starts: script };
     }, function (e) {
-      if (e !== null && typeof e === 'object' && e.code === 'not-found') return 'node --test';
+      if (e !== null && typeof e === 'object' && e.code === 'not-found') return { command: 'node --test', starts: 'node --test' };
       throw e;
     }]);
+  }
+  // What a given command starts: for "npm test", the script in package.json, if it can be read.
+  function startedBy(command, cwd) {
+    if (typeof command !== 'string') return apply(promiseResolve, PromiseCtor, [{ command: command, starts: '' }]);
+    if (!/^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|t)(?:\s|$)/.test(command)) return apply(promiseResolve, PromiseCtor, [{ command: command, starts: command }]);
+    var unknown = { command: command, starts: '' };
+    return apply(promiseThen, invoke('read', { path: packageFile(cwd), limit: 1000000 }), [function (r) {
+      try {
+        var script = r.truncated === true ? undefined : testScript(r.content);
+        return script === undefined ? unknown : { command: command, starts: script };
+      } catch (e) { return unknown; }
+    }, function () { return unknown; }]);
   }
   function runTests(arg) {
     var a = typeof arg === 'string' ? { command: arg } : arg === undefined || arg === null ? {} : arg;
@@ -531,13 +627,13 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     for (var i = 0; i < keys.length; i++) {
       if (keys[i] !== 'command' && keys[i] !== 'cwd' && keys[i] !== 'timeoutMs') return apply(promiseReject, PromiseCtor, [toolError('invalid-args', 'test: unknown option ' + keys[i])]);
     }
-    function run(command) {
-      var call = { command: command };
+    function run(chosen) {
+      var call = { command: chosen.command }, runner = runnerOf(chosen.starts);
       if (a.cwd !== undefined) call.cwd = a.cwd;
       if (a.timeoutMs !== undefined) call.timeoutMs = a.timeoutMs;
-      return apply(promiseThen, invoke('bash', call), [testReport]);
+      return apply(promiseThen, invoke('bash', call), [function (r) { return testReport(r, runner); }]);
     }
-    return a.command === undefined ? apply(promiseThen, discoverTestCommand(a.cwd), [run]) : run(a.command);
+    return apply(promiseThen, a.command === undefined ? discoverTestCommand(a.cwd) : startedBy(a.command, a.cwd), [run]);
   }
 
   var bindings = {

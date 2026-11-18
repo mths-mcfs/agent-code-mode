@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Jail } from './jail.js';
-import { SessionDirs, closeSessionsOnExit, processStartTicks, scratchBase, sweepDeadSessions, undoBase } from './session-dirs.js';
+import { SessionDirs, closeSessionsOnExit, processStartTicks, scratchBase, scratchName, sweepDeadSessions, undoBase } from './session-dirs.js';
 import { EventEmitter } from 'node:events';
 
 const made: string[] = [];
@@ -17,14 +18,18 @@ const stateDir = (): string => {
   return dir;
 };
 
-const ID = 'a'.repeat(32);
+const ID = randomBytes(16).toString('hex');
+const ID2 = randomBytes(16).toString('hex');
+const temp = realpathSync.native(os.tmpdir());
 function planted(state: string, id: string, owner: unknown): { scratch: string; undo: string; record: string } {
-  const scratch = path.join(scratchBase(state), id);
+  const scratch = path.join(temp, scratchName(id));
   const undo = path.join(undoBase(state), id);
   mkdirSync(scratch, { recursive: true });
+  made.push(scratch);
   mkdirSync(undo, { recursive: true });
+  mkdirSync(scratchBase(state), { recursive: true });
   const record = path.join(scratchBase(state), `${id}.json`);
-  writeFileSync(record, typeof owner === 'string' ? owner : JSON.stringify(owner));
+  writeFileSync(record, typeof owner === 'string' ? owner : JSON.stringify({ scratch, ...(owner as object) }));
   return { scratch, undo, record };
 }
 
@@ -41,8 +46,9 @@ describe('SessionDirs', () => {
     const session = new SessionDirs(state);
     const dir = await session.scratch();
     expect(await session.scratch()).toBe(dir);
-    expect(path.dirname(dir)).toBe(scratchBase(state));
-    expect(path.basename(dir)).toMatch(/^[0-9a-f]{32}$/);
+    expect(path.dirname(dir)).toBe(temp);
+    expect(path.basename(dir)).toBe(scratchName(session.id));
+    expect(dir.startsWith(state)).toBe(false);
     if (process.platform !== 'win32') expect(statSync(dir).mode & 0o777).toBe(0o700);
     expect(new SessionDirs(state).id).not.toBe(session.id);
     session.close();
@@ -55,6 +61,7 @@ describe('SessionDirs', () => {
     writeFileSync(path.join(dir, 'a.txt'), 'x');
     session.close();
     session.close();
+    expect(existsSync(dir)).toBe(false);
     expect(readdirSync(scratchBase(state))).toEqual([]);
     expect(readdirSync(undoBase(state))).toEqual([]);
     await expect(session.scratch()).rejects.toThrow('closed');
@@ -68,23 +75,31 @@ describe('SessionDirs', () => {
     const dir = await session.scratch();
     rmSync(dir, { recursive: true });
     mkdirSync(dir);
-    if (process.platform !== 'win32') (await import('node:fs')).symlinkSync(outside, path.join(dir, 'link'));
+    if (process.platform !== 'win32') symlinkSync(outside, path.join(dir, 'link'));
     session.close();
     expect(existsSync(path.join(outside, 'keep.txt'))).toBe(true);
   });
 });
 
 describe('Jail with a scratch root', () => {
-  it('lifts the protected patterns inside the scratch directory and nowhere else', async () => {
+  it('makes it one more root, with the protected patterns still in force', async () => {
     const state = stateDir();
     const cwd = path.join(state, 'ws');
-    const scratch = path.join(state, 'scratch', 'mine');
+    const scratch = path.join(state, 'tmp', 'mine');
     mkdirSync(cwd);
     mkdirSync(scratch, { recursive: true });
-    const jail = await Jail.create({ cwd, roots: [], protectedPaths: [path.join(state, '**')], scratchRoot: scratch });
+    const jail = await Jail.create({ cwd, roots: [], protectedPaths: [path.join(scratch, 'locked', '**')], scratchRoot: scratch });
+    expect(jail.rootOf(path.join(scratch, 'a.txt'))).toBe(scratch);
     expect(() => jail.assertWritable(path.join(scratch, 'a.txt'))).not.toThrow();
-    expect(() => jail.assertWritable(path.join(state, 'journal', 'a.txt'))).toThrow('protected');
+    expect(() => jail.assertWritable(path.join(scratch, 'locked', 'a.txt'))).toThrow('protected');
     expect(() => jail.assertWritable(path.join(scratch, '.git', 'config'))).toThrow('.git');
+  });
+
+  it('a recorded path is taken as it is, spaces at its end included', async () => {
+    const cwd = stateDir();
+    mkdirSync(path.join(cwd, 'space '));
+    const jail = await Jail.create({ cwd, roots: [], protectedPaths: [] });
+    expect(await jail.resolveRecorded(path.join(cwd, 'space '))).toBe(path.join(cwd, 'space '));
   });
 });
 
@@ -170,7 +185,7 @@ describe('sweepDeadSessions', () => {
       const child = await sleeper();
       try {
         const orphan = planted(state, ID, { pid: child.pid, host, startedAt: Date.now() - 60_000 });
-        const owner = planted(state, 'b'.repeat(32), { pid: child.pid, host, startedAt: Date.now() });
+        const owner = planted(state, ID2, { pid: child.pid, host, startedAt: Date.now() });
         await sweepDeadSessions(state);
         expect([existsSync(orphan.scratch), existsSync(owner.scratch)]).toEqual([false, true]);
       } finally {
@@ -190,19 +205,68 @@ describe('sweepDeadSessions', () => {
   it('leaves a record it cannot read, and one from another machine', async () => {
     const state = stateDir();
     const unreadable = planted(state, ID, 'not json');
-    const remote = planted(state, 'b'.repeat(32), { pid: await deadPid(), host: `${host}-other`, startedAt: Date.now() });
+    const remote = planted(state, ID2, { pid: await deadPid(), host: `${host}-other`, startedAt: Date.now() });
     await sweepDeadSessions(state);
     expect([existsSync(unreadable.scratch), existsSync(remote.scratch)]).toEqual([true, true]);
   });
 
-  it('removes a directory without a record, and only names it created', async () => {
+  it('removes saved originals without a record, and only names it created', async () => {
     const state = stateDir();
-    mkdirSync(path.join(scratchBase(state), ID), { recursive: true });
     mkdirSync(path.join(undoBase(state), ID), { recursive: true });
-    mkdirSync(path.join(scratchBase(state), 'something-else'), { recursive: true });
+    mkdirSync(path.join(undoBase(state), 'something-else'), { recursive: true });
     await sweepDeadSessions(state);
-    expect(readdirSync(scratchBase(state))).toEqual(['something-else']);
-    expect(readdirSync(undoBase(state))).toEqual([]);
+    expect(readdirSync(undoBase(state))).toEqual(['something-else']);
+  });
+
+  describe('a dead owner\'s record names', () => {
+    const swept = async (scratch: string): Promise<void> => {
+      const state = stateDir();
+      mkdirSync(scratchBase(state), { recursive: true });
+      writeFileSync(path.join(scratchBase(state), `${ID}.json`), JSON.stringify({ pid: await deadPid(), host, startedAt: Date.now(), scratch }));
+      await sweepDeadSessions(state);
+    };
+
+    it('a directory with another name: it stays', async () => {
+      const victim = stateDir();
+      writeFileSync(path.join(victim, 'keep.txt'), 'x');
+      await swept(victim);
+      expect(existsSync(path.join(victim, 'keep.txt'))).toBe(true);
+    });
+
+    it('the name of another session: it stays', async () => {
+      const victim = path.join(temp, scratchName(ID2));
+      mkdirSync(victim);
+      made.push(victim);
+      await swept(victim);
+      expect(existsSync(victim)).toBe(true);
+    });
+
+    it('the right name outside a temp directory: it stays', async () => {
+      const parent = path.join(stateDir(), 'deep');
+      const victim = path.join(parent, scratchName(ID));
+      mkdirSync(victim, { recursive: true });
+      await swept(victim);
+      expect(existsSync(victim)).toBe(true);
+    });
+
+    it('a path that climbs back to the right name: it stays', async () => {
+      const victim = path.join(temp, scratchName(ID));
+      mkdirSync(victim);
+      made.push(victim);
+      await swept(`${temp}/x/../${scratchName(ID)}`);
+      expect(existsSync(victim)).toBe(true);
+    });
+
+    it.runIf(process.platform !== 'win32')('a link at the right name: neither it nor its target is removed', async () => {
+      const target = stateDir();
+      writeFileSync(path.join(target, 'keep.txt'), 'x');
+      const link = path.join(temp, scratchName(ID));
+      symlinkSync(target, link);
+      made.push(link);
+      await swept(link);
+      expect(existsSync(path.join(target, 'keep.txt'))).toBe(true);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    });
   });
 
   it('a missing state dir is nothing to do', async () => {

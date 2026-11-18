@@ -211,6 +211,8 @@ interface CallView {
   /** `callPaths` of the call. */
   readonly paths: readonly string[];
   readonly analysis: BashAnalysis | undefined;
+  /** What allow rules must approve: `analysis`, without the `cd` the server adds for an explicit cwd in the scratch directory. */
+  readonly approved: BashAnalysis | undefined;
   /** Resolved file targets of a bash command; undefined path = only known at run time. */
   readonly bashFiles: readonly BashFile[];
 }
@@ -352,8 +354,8 @@ function scratchFileAllowed(prepared: PreparedCall, policy: ClaudePolicy): boole
 }
 
 /** Why one of the files must not be written: a path agent-code-mode protects (as write() and edit() refuse it). */
-function protectedWrite(files: readonly BashFile[], protectedPaths: readonly string[], policy: ClaudePolicy): string | undefined {
-  const hit = files.find((f) => f.access === 'write' && f.path !== undefined && !inScratch(f.path, policy) && protectedPathHit(f.path, protectedPaths) !== undefined);
+function protectedWrite(files: readonly BashFile[], protectedPaths: readonly string[]): string | undefined {
+  const hit = files.find((f) => f.access === 'write' && f.path !== undefined && protectedPathHit(f.path, protectedPaths) !== undefined);
   return hit === undefined ? undefined : `the command writes ${hit.path ?? ''}, which is a protected host policy path`;
 }
 
@@ -362,7 +364,7 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
   const { prepared, native } = view;
   const applicable = rules.filter((r) => r.matcher.type !== 'never');
   if (prepared.tool === 'bash') {
-    const analysis = view.analysis;
+    const analysis = view.approved;
     if (!analysis || analysis.uncertain.length > 0 || analysis.commands.length === 0) {
       return applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all');
     }
@@ -375,8 +377,8 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
       return applicable.some((r) => governs(r, 'Bash') && (r.matcher.type === 'all' || (r.matcher.type === 'bash' && matchesBashSpec(r.matcher.spec, form))));
     });
     // A literal write target in the scratch directory counts as inside, also when the command reads that same
-    // path (`mv` and `cp` report a destination as both); the command itself still needs its rule.
-    const writesInScratch = (p: string): boolean => inScratch(p, policy) && view.bashFiles.some((f) => f.access === 'write' && f.path === p);
+    // path (`mv` and `cp` report a destination as both); the command itself still needs its rule. Plan mode writes nothing.
+    const writesInScratch = (p: string): boolean => policy.mode !== 'plan' && inScratch(p, policy) && view.bashFiles.some((f) => f.access === 'write' && f.path === p);
     const filesInside = view.bashFiles.every((f) => f.path !== undefined && (policy.workingDirs.some((d) => isInsidePath(f.path ?? '', d)) || writesInScratch(f.path)));
     return everyCommand && filesInside;
   }
@@ -818,13 +820,17 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
   #view(prepared: PreparedCall, policy: ClaudePolicy): CallView {
     const native = nativeCall(prepared);
     const paths = callPaths(prepared, policy.cwd, policy.home);
-    if (prepared.tool !== 'bash') return { prepared, native, paths, analysis: undefined, bashFiles: [] };
+    if (prepared.tool !== 'bash') return { prepared, native, paths, analysis: undefined, approved: undefined, bashFiles: [] };
     const { command, startDir } = prepared.effect;
     const analysis = BashAnalyzer.analyze(command, { home: policy.home });
-    // The `cd` to an explicit cwd is known: only a further `cd` in the script's own command leaves relative targets open.
-    const inner = startDir !== undefined && command.startsWith(startDir.prefix) ? BashAnalyzer.analyze(command.slice(startDir.prefix.length), { home: policy.home }) : undefined;
-    const base = inner !== undefined && startDir !== undefined && !inner.changesDirectory ? startDir.dir : prepared.effect.cwd;
-    const openRelative = base === prepared.effect.cwd && analysis.changesDirectory;
+    // An explicit cwd physically in the scratch directory is known, outside plan mode: relative targets resolve there,
+    // unless the script's own command moves again. Anywhere else the `cd` leaves them open, as in any command.
+    const scratchStart = startDir !== undefined && policy.mode !== 'plan' && inScratch(startDir.dir, policy) && command.startsWith(startDir.prefix) ? startDir : undefined;
+    const inner = scratchStart === undefined ? undefined : BashAnalyzer.analyze(command.slice(scratchStart.prefix.length), { home: policy.home });
+    const known = inner !== undefined && !inner.changesDirectory ? { dir: scratchStart?.dir ?? prepared.effect.cwd, analysis: inner } : undefined;
+    const base = known?.dir ?? prepared.effect.cwd;
+    const approved = known?.analysis ?? analysis;
+    const openRelative = known === undefined && analysis.changesDirectory;
     const bashFiles = analysis.files.map((f): BashFile => {
       if (f.path === undefined) return { access: f.access, path: undefined, ...(f.pattern === undefined ? {} : { pattern: f.pattern }) };
       const relative = !(f.path.startsWith('/') || f.path.startsWith('~') || path.isAbsolute(f.path));
@@ -836,7 +842,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       const whenDirectory = f.whenDirectory === undefined ? {} : { whenDirectory: resolveCommandPath(f.whenDirectory, base, policy.home) };
       return { access: f.access, path: resolveCommandPath(f.path, base, policy.home), spelled, ...whenDirectory };
     });
-    return { prepared, native, paths, analysis, bashFiles };
+    return { prepared, native, paths, analysis, approved, bashFiles };
   }
 
   /**
@@ -889,7 +895,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     for (const rule of policy.rules.deny) {
       if (restrictVerdict(rule, view) === 'match') return { kind: 'deny', source: 'rule', reason: `denied by ${describe(rule)}` };
     }
-    const protectedHit = protectedWrite(view.bashFiles, protectedPaths, policy);
+    const protectedHit = protectedWrite(view.bashFiles, protectedPaths);
     return protectedHit === undefined ? undefined : { kind: 'deny', source: 'rule', reason: protectedHit };
   }
 
@@ -940,6 +946,9 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const critical = criticalRemoval(view, policy);
     if (critical !== undefined) return askOrDeny(`${critical}; no rule or mode approves it`);
     if (scratchFileAllowed(prepared, policy)) return { kind: 'allow' };
+    if (policy.mode === 'plan' && (prepared.tool === 'write' || prepared.tool === 'edit') && inScratch(prepared.effect.absPath, policy)) {
+      return { kind: 'deny', source: 'rule', reason: `plan mode does not allow ${NATIVE_TOOL[prepared.tool]}` };
+    }
     if (allowedByRule(view, policy.rules.allow, policy)) {
       const sensitive = checksBashTargets(policy.mode) ? sensitiveWrite(view.bashFiles) : undefined;
       return sensitive === undefined ? { kind: 'allow' } : askOrDeny(`${sensitive}; Claude Code asks before such a write`);

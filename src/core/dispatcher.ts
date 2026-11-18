@@ -465,7 +465,7 @@ export class Dispatcher<P = unknown> {
 
   /** Why a file or directory may not be removed: a protected path, or outside what the bash containment can write. */
   #removalRefused(target: string, policy: PolicySnapshot<P>): Failure | undefined {
-    if (findMatchingPattern(target, this.#protectedPatterns(policy)) !== undefined && !this.#inScratch(target, policy)) {
+    if (findMatchingPattern(target, this.#protectedPatterns(policy)) !== undefined) {
       return { kind: 'error', error: new ToolError('protected-path', `${target} is a protected host policy path`) };
     }
     const containment = policy.bashContainment;
@@ -561,7 +561,7 @@ export class Dispatcher<P = unknown> {
       return { kind: 'error', error: new ToolError('tool-error', 'tool runtime returned a prepared call for another call') };
     }
     if (prepared.tool === 'write' || prepared.tool === 'edit') {
-      const hit = this.#inScratch(prepared.effect.absPath, policy) ? undefined : findMatchingPattern(prepared.effect.absPath, this.#protectedPatterns(policy));
+      const hit = findMatchingPattern(prepared.effect.absPath, this.#protectedPatterns(policy));
       if (hit !== undefined) {
         return { kind: 'error', error: new ToolError('protected-path', `${prepared.effect.absPath} is a protected host policy path`) };
       }

@@ -223,7 +223,7 @@ export interface JailOptions {
   readonly roots: readonly string[];
   /** Protected path patterns (`~` expanded here). */
   readonly protectedPaths: readonly string[];
-  /** The session's scratch directory: one more root, and the only place the protected patterns do not apply. */
+  /** The session's scratch directory: one more root. */
   readonly scratchRoot?: string;
   /** Enforce the Windows alias checks even off Windows (tests). */
   readonly windowsChecks?: boolean;
@@ -310,9 +310,17 @@ export class Jail {
     return r.real;
   }
 
-  async #resolve(input: string): Promise<Resolution> {
+  /** Like `resolveForWrite`, for a path this server recorded: taken as it is, spaces at its ends included. */
+  async resolveRecorded(recorded: string): Promise<string> {
+    const r = await this.#resolve(recorded, recorded);
+    for (const p of [r.real, ...r.links]) this.assertWritable(p);
+    if (r.finalIsLink) throw new ToolError('invalid-args', `${recorded} is a symbolic link`);
+    return r.real;
+  }
+
+  async #resolve(input: string, exact: string = input.trim()): Promise<Resolution> {
     if (input.includes('\0')) throw new ToolError('invalid-args', 'path must not contain NUL characters');
-    const trimmed = input.trim();
+    const trimmed = exact;
     if (trimmed === '') throw new ToolError('invalid-args', 'path must not be empty');
     if (this.#windowsChecks) {
       const problem = windowsPathProblem(trimmed);
@@ -343,7 +351,6 @@ export class Jail {
   /** Throws `protected-path` when `abs` must not be written or edited. */
   assertWritable(abs: string): void {
     if (isInsideGitDir(abs)) throw new ToolError('protected-path', `${abs} is inside a .git directory`);
-    if (this.isScratch(abs)) return;
     const hit = findMatchingPattern(abs, this.#protected);
     if (hit !== undefined) throw new ToolError('protected-path', `${abs} is a protected host policy path (${hit})`);
   }

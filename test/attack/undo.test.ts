@@ -132,6 +132,17 @@ describe.runIf(posix)('undo', () => {
     expect((await server.run(undoCall(undoIdOf(run)))).result).toMatchObject({ removedDirs: ['made'] });
   });
 
+  it('a directory whose name ends in a space does not stay behind', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, ALLOW);
+    const before = snapshot(lab.ws);
+    const first = await server.run(`await write({ path: 'space /leaf.txt', content: 'first' });`);
+    const second = await server.run(`await edit({ path: 'space /leaf.txt', oldString: 'first', newString: 'second' });`);
+    expect((await server.run(undoCall(undoIdOf(second)))).result).toMatchObject({ restored: ['space /leaf.txt'], skipped: [] });
+    expect((await server.run(undoCall(undoIdOf(first)))).result).toMatchObject({ removed: ['space /leaf.txt'], removedDirs: ['space '], skipped: [] });
+    expect(snapshot(lab.ws)).toEqual(before);
+  });
+
   it('a directory created again by someone else is left alone', async () => {
     lab = makeLab();
     server = await claudeServer(lab, ALLOW);
