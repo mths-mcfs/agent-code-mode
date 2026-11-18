@@ -4,15 +4,18 @@ import { ToolError, errorMessage } from '../core/errors.js';
 import type {
   BashContainment,
   CommitObserver,
+  DirIdentity,
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
   ReadResult,
+  RunUndo,
   SessionContext,
   ToolCall,
   ToolResult,
   ToolRuntime,
   Transaction,
+  UndoSession,
   WatchedChange,
 } from '../core/types.js';
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, expandBashGlobs, findBash, runBash, shellQuote } from './bash.js';
@@ -20,9 +23,11 @@ import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace } from './edit-match.js';
 import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
-import { Jail } from './jail.js';
+import { Jail, isInsideDir } from './jail.js';
 import { containmentUnavailableReason } from './sandbox.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
+import { SessionDirs, scratchBase, undoBase } from './session-dirs.js';
+import { UndoStore } from './undo.js';
 import { type WatchSnapshot, changedWatched, describeChanges, incompleteReason, snapshotWatched, uncheckedWatched } from './watch.js';
 
 /** Default number of lines `read` returns. */
@@ -63,6 +68,8 @@ interface CallMeta {
   readonly routine?: (change: WatchedChange) => Promise<boolean>;
   /** For write and edit: identity of the file and its directories at prepare. */
   readonly identity?: PathIdentity;
+  /** For write and edit: the file is in the scratch directory, so nothing records the change. */
+  readonly scratch?: boolean;
   /** For grep and glob: the policy's Read filter. */
   readonly readFilter?: (realAbsPath: string) => boolean;
 }
@@ -117,6 +124,31 @@ function sandboxDenyWrite(patterns: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * What a sandboxed command may not write. A protected directory that holds the
+ * scratch directory (the state dir) cannot be denied whole, since a deny wins
+ * over the writable root inside it: what is denied instead is everything in it
+ * but the way down to the scratch directory.
+ */
+async function denyAroundScratch(paths: readonly string[], scratch: string | undefined): Promise<string[]> {
+  if (scratch === undefined) return [...paths];
+  const out = new Set<string>();
+  for (const p of paths) {
+    const real = await fs.realpath(p).catch(() => p);
+    if (isInsideDir(scratch, real)) continue;
+    if (!isInsideDir(real, scratch)) {
+      out.add(p);
+      continue;
+    }
+    let dir = real;
+    for (const segment of path.relative(real, scratch).split(path.sep)) {
+      for (const name of await fs.readdir(dir)) if (name !== segment) out.add(path.join(dir, name));
+      dir = path.join(dir, segment);
+    }
+  }
+  return [...out];
+}
+
 /** Any failure of the runtime reaches the dispatcher as a `ToolError`. */
 function asToolError(err: unknown): ToolError {
   if (err instanceof ToolError) return err;
@@ -147,9 +179,48 @@ export class NodeToolRuntime implements ToolRuntime {
   readonly #meta = new MetaStore();
   /** Per run (its observer): what the last bash call left in the watched paths, for the end-of-run comparison. */
   readonly #watch = new WeakMap<CommitObserver, WatchState>();
+  readonly #session: SessionDirs;
+  readonly #undo: UndoStore;
 
   constructor(opts: NodeToolRuntimeOptions) {
     this.#opts = opts;
+    this.#session = new SessionDirs(opts.stateDir);
+    this.#undo = new UndoStore(this.#session);
+  }
+
+  scratchDir(): Promise<string> {
+    return this.#session.scratch();
+  }
+
+  beginUndo(): RunUndo {
+    return this.#undo.begin();
+  }
+
+  async openUndo(undoId: string, ctx: SessionContext, policy: PolicySnapshot): Promise<UndoSession> {
+    try {
+      return await this.#undo.open(undoId, await this.#jail(ctx, policy));
+    } catch (err) {
+      throw asToolError(err);
+    }
+  }
+
+  closeSession(): void {
+    this.#session.close();
+  }
+
+  /** The state dir's areas that change with every run, as the watch spells them and as they really are. */
+  async #watchExclude(): Promise<string[]> {
+    const real = await fs.realpath(this.#opts.stateDir).catch(() => this.#opts.stateDir);
+    return [...new Set([this.#opts.stateDir, real].flatMap((dir) => [scratchBase(dir), undoBase(dir)]))];
+  }
+
+  #jail(ctx: SessionContext, policy: PolicySnapshot): Promise<Jail> {
+    return Jail.create({
+      cwd: ctx.cwd,
+      roots: [...ctx.roots, ...(policy.additionalRoots ?? []), ...(this.#opts.additionalRoots ?? [])],
+      protectedPaths: policy.protectedPaths,
+      ...(policy.scratchRoot === undefined ? {} : { scratchRoot: policy.scratchRoot }),
+    });
   }
 
   async prepare(call: ToolCall, ctx: SessionContext, policy: PolicySnapshot): Promise<PreparedCall> {
@@ -161,17 +232,14 @@ export class NodeToolRuntime implements ToolRuntime {
   }
 
   async #prepareInJail(call: ToolCall, ctx: SessionContext, policy: PolicySnapshot): Promise<PreparedCall> {
-    const jail = await Jail.create({
-      cwd: ctx.cwd,
-      roots: [...ctx.roots, ...(policy.additionalRoots ?? []), ...(this.#opts.additionalRoots ?? [])],
-      protectedPaths: policy.protectedPaths,
-    });
+    const jail = await this.#jail(ctx, policy);
     const readFilter = policy.readFilter;
     const meta = (abs: string, denyWrite: readonly string[] = []): CallMeta => ({
       root: jail.rootOf(abs) ?? jail.cwd,
       runRoots: jail.roots,
       display: jail.displayPath(abs),
       denyWrite,
+      ...(jail.isScratch(abs) ? { scratch: true } : {}),
       ...(readFilter && (call.tool === 'grep' || call.tool === 'glob') ? { readFilter } : {}),
     });
     return this.#prepare(call, jail, policy, meta);
@@ -199,7 +267,8 @@ export class NodeToolRuntime implements ToolRuntime {
         const plan = policy.planBashExpansion?.(call.args.command);
         const expanded = plan === undefined ? undefined : await expandBashGlobs(plan, cwd, jail, policy.readFilter);
         // What hooks see is exactly what runs: another cwd becomes part of the command.
-        const inCwd = (c: string): string => (cwd === jail.cwd ? c : `cd -- ${shellQuote(cwd)} && ${c}`);
+        const prefix = cwd === jail.cwd ? '' : `cd -- ${shellQuote(cwd)} && `;
+        const inCwd = (c: string): string => `${prefix}${c}`;
         const command = inCwd(expanded?.command ?? call.args.command);
         const timeoutMs = Math.min(call.args.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
         const containment = policy.bashContainment;
@@ -215,12 +284,14 @@ export class NodeToolRuntime implements ToolRuntime {
           effect: {
             command,
             cwd: jail.cwd,
+            ...(prefix === '' ? {} : { startDir: { dir: cwd, prefix } }),
             timeoutMs,
             containment,
             ...(expanded === undefined ? {} : { expansion: { original: inCwd(call.args.command), entries: expanded.entries } }),
           },
         };
-        this.#meta.put(prepared, { ...meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)), watched: policy.watchedPaths ?? policy.protectedPaths, ...(policy.isRoutineWatchedChange ? { routine: policy.isRoutineWatchedChange } : {}) });
+        const denyWrite = containment.mode === 'sandbox' ? await denyAroundScratch(sandboxDenyWrite(jail.protectedPaths), policy.scratchRoot) : [];
+        this.#meta.put(prepared, { ...meta(jail.cwd, denyWrite), watched: policy.watchedPaths ?? policy.protectedPaths, ...(policy.isRoutineWatchedChange ? { routine: policy.isRoutineWatchedChange } : {}) });
         return prepared;
       }
       case 'read': {
@@ -368,10 +439,11 @@ export class NodeToolRuntime implements ToolRuntime {
         const routine = m.routine;
         // The windows chain: what changed since the previous bash call of this run is compared too.
         const last = observer === undefined ? undefined : this.#watch.get(observer);
+        const exclude = await this.#watchExclude();
         let before: WatchSnapshot;
         try {
           // A baseline: links that appeared since (a previous call made them) are resolved now, then watched.
-          before = await snapshotWatched(patterns, last?.snapshot, { baseline: true });
+          before = await snapshotWatched(patterns, last?.snapshot, { baseline: true, exclude });
         } catch (err) {
           // Fail closed: a change there could not be reported afterwards, so the command does not run.
           throw new ToolError('containment-unavailable', `the protected paths could not be fingerprinted before bash, so it did not run: ${incompleteReason(err)}`);
@@ -383,17 +455,18 @@ export class NodeToolRuntime implements ToolRuntime {
           return await runBash(prepared.effect, signal, {
             ...(this.#opts.bashOutputCapBytes !== undefined ? { outputCapBytes: this.#opts.bashOutputCapBytes } : {}),
             denyWrite: m.denyWrite,
+            ...(observer?.bashStarted === undefined ? {} : { onSpawn: () => observer.bashStarted?.() }),
           });
         } finally {
           // Normal end, error, cancel or timeout: compare, and report without changing the call's result.
-          await this.#compareAfterBash(prepared.id, patterns, routine, before, observer);
+          await this.#compareAfterBash(prepared.id, patterns, routine, before, observer, exclude);
         }
       }
       case 'read':
         return this.#commitRead(prepared);
       case 'write':
       case 'edit':
-        return this.#commitWrite(prepared, signal, tx);
+        return this.#commitWrite(prepared, signal, tx, observer?.undo);
       case 'grep': {
         await assertDirUnchanged(prepared.effect.absRoot);
         const m = this.#searchMetaOf(prepared);
@@ -439,6 +512,7 @@ export class NodeToolRuntime implements ToolRuntime {
     prepared: PreparedCallOf<'write'> | PreparedCallOf<'edit'>,
     signal: AbortSignal,
     tx: Transaction | undefined,
+    runUndo: RunUndo | undefined,
   ): Promise<ToolResult> {
     if (tx !== undefined && !(tx instanceof FileTransaction)) {
       throw new ToolError('tool-error', 'the transaction was not started by this tool runtime; refusing to write without a journal');
@@ -450,12 +524,21 @@ export class NodeToolRuntime implements ToolRuntime {
     }
     const bytes = Buffer.from(afterContent, 'utf8');
     const nextHash = sha256(bytes);
+    // A scratch file is throwaway: no journal, no undo record.
+    const journal = m.scratch === true ? undefined : tx;
+    const undo = m.scratch === true ? undefined : runUndo;
+    const beforeWrite = async (before: RegularFile | null, createdDirs: readonly string[]): Promise<void> => {
+      await journal?.record(absPath, m.root, before, nextHash, createdDirs, m.runRoots);
+      await undo?.capture({ absPath, root: m.root, before });
+    };
     const outcome = await atomicWrite(absPath, bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {
       signal,
       identity: m.identity,
-      ...(tx ? { beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs, m.runRoots) } : {}),
+      ...(journal || undo ? { beforeWrite } : {}),
+      ...(undo ? { onDirCreated: (dir: string, identity: DirIdentity) => undo.dirCreated(dir, identity) } : {}),
     });
-    tx?.written(absPath, nextHash);
+    journal?.written(absPath, nextHash);
+    undo?.committed(absPath, { sha256: nextHash, ...outcome.written });
     if (prepared.tool === 'write') return { path: absPath, created: outcome.before === null, diff: prepared.effect.diff };
     return {
       path: absPath,
@@ -471,10 +554,11 @@ export class NodeToolRuntime implements ToolRuntime {
     routine: WatchState['routine'],
     before: WatchSnapshot,
     observer: CommitObserver | undefined,
+    exclude: readonly string[],
   ): Promise<void> {
     let after: WatchSnapshot;
     try {
-      after = await snapshotWatched(patterns, before);
+      after = await snapshotWatched(patterns, before, { exclude });
     } catch (err) {
       observer?.warn(`protected path check incomplete after bash call ${callId}: ${incompleteReason(err)}`);
       if (observer) this.#watch.set(observer, { patterns, routine, snapshot: before, callId });
@@ -505,7 +589,7 @@ export class NodeToolRuntime implements ToolRuntime {
     this.#watch.delete(observer);
     let now: WatchSnapshot;
     try {
-      now = await snapshotWatched(last.patterns, last.snapshot);
+      now = await snapshotWatched(last.patterns, last.snapshot, { exclude: await this.#watchExclude() });
     } catch (err) {
       observer.warn(`protected path check incomplete at the end of the run: ${incompleteReason(err)}`);
       return;

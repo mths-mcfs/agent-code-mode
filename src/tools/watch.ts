@@ -62,6 +62,8 @@ export interface SnapshotOptions {
   readonly baseline?: boolean;
   /** Hash budget (tests). */
   readonly hashTotalBytes?: number;
+  /** Paths not looked at, nor anything below them (scratch files and saved originals change with every run). */
+  readonly exclude?: readonly string[];
 }
 
 interface Walk {
@@ -70,6 +72,7 @@ interface Walk {
   readonly baseline: boolean;
   readonly previous: WatchSnapshot | undefined;
   readonly out: Map<string, Entry>;
+  readonly exclude: ReadonlySet<string>;
   hashed: number;
   count: number;
 }
@@ -168,6 +171,7 @@ async function walk(shownDir: string, realDir: string, pattern: string, depth: n
   }
   for (const name of names.sort()) {
     const shown = path.join(shownDir, name);
+    if (w.exclude.has(shown)) continue;
     const entry = await entryOf(shown, path.join(realDir, name), w);
     if (entry !== undefined) await visit(shown, entry, pattern, depth - 1, w, inner);
   }
@@ -189,6 +193,7 @@ export async function snapshotWatched(patterns: readonly string[], previous?: Wa
     baseline: opts.baseline === true,
     previous,
     out: new Map(),
+    exclude: new Set(opts.exclude),
     hashed: 0,
     count: 0,
   };

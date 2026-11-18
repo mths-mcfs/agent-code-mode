@@ -2,6 +2,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { OverflowStore } from './overflow.js';
 import {
+  CHANGED_FILES_INLINE,
   DIFF_INLINE_CHARS,
   DIFF_STAT_FILES,
   ERROR_CAP_CHARS,
@@ -100,12 +101,96 @@ describe('summarizeCalls', () => {
     expect(all(out)).not.toMatch(/more\]/);
   });
 
-  it('D1: lists every failed call and every changed file', () => {
+  it('D1: lists every failed call, and every changed file of a failed run', () => {
     const errors = Array.from({ length: 30 }, (_, i): CallLogEntry => ({ id: `c${i}`, tool: 'read', summary: `read m${i}`, decision: 'error', reason: 'missing', durationMs: 0 }));
     const changedFiles = Array.from({ length: 40 }, (_, i) => `src/f${i}.ts`);
-    const view = json(formatRunResult({ ...base, calls: errors, changedFiles, diff: '--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a\n+b\n' }));
+    const failed: RunResult = { ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, calls: errors, changedFiles, diff: '--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a\n+b\n' };
+    const view = json(formatRunResult(failed, { errorCap: 100_000 }));
     expect((view['calls'] as { errors: unknown[] }).errors).toHaveLength(30);
     expect(view['changedFiles']).toEqual(changedFiles);
+    expect(view['changedCount']).toBeUndefined();
+  });
+
+  describe('many changed files in a successful run', () => {
+    const files = (n: number): string[] => Array.from({ length: n }, (_, i) => `src/f${i}.ts`);
+    const hunks = (names: readonly string[]): string => names.map((f) => `--- a/${f}\n+++ b/${f}\n@@ -1,1 +1,1 @@\n-${'a'.repeat(60)}\n+${'b'.repeat(60)}\n`).join('');
+    const store = (): { put(text: string): string; kept: string[] } => {
+      const kept: string[] = [];
+      return { kept, put: (text) => (kept.push(text), `ov_${kept.length}`) };
+    };
+
+    it('keeps the list up to the limit', () => {
+      const changedFiles = files(CHANGED_FILES_INLINE);
+      const sink = store();
+      const view = json(formatRunResult({ ...base, changedFiles }, { overflow: sink }));
+      expect(view['changedFiles']).toEqual(changedFiles);
+      expect(view['changedCount']).toBeUndefined();
+      expect(sink.kept).toEqual([]);
+    });
+
+    it('above the limit counts the files, keeps only the diff total and sends the whole result to the overflow', () => {
+      const changedFiles = files(CHANGED_FILES_INLINE + 2);
+      const sink = store();
+      const view = json(formatRunResult({ ...base, changedFiles, diff: hunks(changedFiles) }, { overflow: sink }));
+      expect(view['changedFiles']).toBeUndefined();
+      expect(view['changedCount']).toBe(12);
+      expect(view['diffStat']).toEqual({ total: '12 files +12 -12' });
+      expect(view['overflow']).toMatchObject({ id: 'ov_1' });
+      expect(JSON.parse(sink.kept[0] ?? '{}')).toMatchObject({ changedFiles });
+    });
+
+    it('a small diff stays inline next to the count', () => {
+      const changedFiles = files(CHANGED_FILES_INLINE + 1);
+      const view = json(formatRunResult({ ...base, changedFiles, diff: '--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a\n+b\n' }, { overflow: store() }));
+      expect(view['changedCount']).toBe(11);
+      expect(view['diff']).toContain('+++ b/x');
+    });
+
+    it.each([
+      ['there is no store', undefined],
+      ['the store refuses the result', { put: () => undefined }],
+    ])('restores the whole list and names no overflow when %s', (_why, overflow) => {
+      const changedFiles = files(CHANGED_FILES_INLINE + 2);
+      const view = json(formatRunResult({ ...base, changedFiles, diff: hunks(changedFiles) }, overflow === undefined ? {} : { overflow }));
+      expect(view['changedFiles']).toEqual(changedFiles);
+      expect(view['changedCount']).toBeUndefined();
+      expect(view['overflow']).toBeUndefined();
+      expect(view['diffStat']).toMatchObject({ files: expect.any(Object), moreFiles: 2 });
+    });
+
+    it('restores the list before the cap, so a list too long to fit is cut with a marker instead of disappearing', () => {
+      const changedFiles = files(2_000);
+      const view = json(formatRunResult({ ...base, changedFiles }, { successCap: 4_000 }));
+      expect(view['truncated']).toBe(true);
+      expect(view['changedCount']).toBeUndefined();
+      expect((view['changedFiles'] as string[]).at(-1)).toMatch(/more\]$/);
+    });
+
+    it('without a store, an error keeps every path that fits: the diff totals give way first', () => {
+      const changedFiles = Array.from({ length: 11 }, (_, i) => `${'folder-name/'.repeat(44)}f${i}.ts`);
+      const failed: RunResult = { ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, changedFiles, diff: hunks(changedFiles) };
+      const out = formatRunResult(failed);
+      expect(json(out)['changedFiles']).toEqual(changedFiles);
+      expect(json(out)['diffStat']).toEqual({ total: '11 files +11 -11' });
+      expect(all(out).length).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    });
+
+    it('a list that cannot fit whole keeps as many entries as fit', () => {
+      const changedFiles = files(2_000);
+      const list = json(formatRunResult({ ...base, changedFiles }, { successCap: 4_000 }))['changedFiles'] as string[];
+      expect(list.length).toBeGreaterThan(200);
+    });
+
+    it.each([200, 80, 30, 11, 5])('never goes above a cap of %i characters', (successCap) => {
+      const changedFiles = files(50);
+      expect(all(formatRunResult({ ...base, changedFiles, diff: hunks(changedFiles), logs: ['x'.repeat(5_000)] }, { successCap, overflow: store() })).length).toBeLessThanOrEqual(successCap);
+    });
+
+    it('verbose keeps the list', () => {
+      const changedFiles = files(CHANGED_FILES_INLINE + 2);
+      const view = json(formatRunResult({ ...base, changedFiles }, { verbose: true, overflow: store() }));
+      expect(view['changedFiles']).toEqual(changedFiles);
+    });
   });
 
   it('keeps the size of a run with many allowed calls constant', () => {

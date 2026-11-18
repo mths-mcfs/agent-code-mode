@@ -104,6 +104,7 @@ export const CODEX_MCP_UNSUPPORTED = 'upstream MCP calls (mcpCall) are only supp
 
 export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
   readonly host = 'codex' as const;
+  readonly usesScratch = true;
   readonly #opts: CodexHostAdapterOptions;
 
   constructor(opts: CodexHostAdapterOptions = {}) {
@@ -143,7 +144,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       ...(config.excludeSlashTmp || tmp.slashTmp === null ? [] : [tmp.slashTmp]),
       ...(config.excludeTmpdirEnvVar || tmp.tmpdir === null || !path.isAbsolute(tmp.tmpdir) ? [] : [tmp.tmpdir]),
     ];
-    const writableRoots = unique([config.cwd, ...config.writableRoots, ...tmpRoots].map((p) => path.resolve(p)));
+    // The scratch directory is one more writable root, so the read-only mode still refuses it.
+    const writableRoots = unique([config.cwd, ...config.writableRoots, ...tmpRoots, ...(ctx.scratchDir === undefined ? [] : [ctx.scratchDir])].map((p) => path.resolve(p)));
     const bashContainment = containmentFor(sandboxMode, writableRoots, config.networkAccess);
 
     const stateDir = this.#opts.stateDir ?? stateDirPath(io.env, io.home);
@@ -190,6 +192,7 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       protectedPaths,
       watchedPaths,
       ...(additionalRoots.length > 0 ? { additionalRoots } : {}),
+      ...(ctx.scratchDir === undefined ? {} : { scratchRoot: ctx.scratchDir }),
       payload: {
         sandboxMode,
         approvalPolicy: config.approvalPolicy,

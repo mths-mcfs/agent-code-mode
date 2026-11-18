@@ -36,6 +36,8 @@ export interface StartMessage {
   /** Wall-clock budget left for the script when the message was sent. */
   readonly timeoutMs: number;
   readonly limits: SandboxLimits;
+  /** Value of the script's `scratchDir` global. */
+  readonly scratchDir?: string;
 }
 
 /** Answer to one binding call. */

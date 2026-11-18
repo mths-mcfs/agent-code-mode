@@ -21,7 +21,7 @@
  *
  * This file has no import of other project files, so Node runs it from source.
  */
-import { writeFileSync } from 'node:fs';
+import { renameSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -168,9 +168,13 @@ function listTools(id: Json, cursor: string | undefined): void {
   }
 }
 
-// Tests find the process through this file (set in the server's declared env).
+// Tests find the process through this file (set in the server's declared env). It appears whole: a test that
+// polls for it must never read it empty, which `Number` would turn into pid 0, a process that always looks alive.
 const pidFile = process.env['FAKE_MCP_PID_FILE'];
-if (pidFile !== undefined && pidFile !== '') writeFileSync(pidFile, String(process.pid));
+if (pidFile !== undefined && pidFile !== '') {
+  writeFileSync(`${pidFile}.tmp`, String(process.pid));
+  renameSync(`${pidFile}.tmp`, pidFile);
+}
 
 if (variant === 'exit-early') {
   process.stderr.write('fake upstream: missing credentials\n');

@@ -78,6 +78,23 @@ const openTransactions = new Set<string>();
  */
 const fileOwners = new Map<string, string>();
 
+/**
+ * Claims `absPath` for `owner` (an undo in progress). False when an open
+ * transaction or another undo holds it. While claimed, a transaction refuses
+ * to journal the file.
+ */
+export function reserveFile(absPath: string, owner: string): boolean {
+  const current = fileOwners.get(absPath);
+  if (current !== undefined && current !== owner) return false;
+  fileOwners.set(absPath, owner);
+  return true;
+}
+
+/** Gives up a claim made with `reserveFile`. */
+export function releaseFile(absPath: string, owner: string): void {
+  if (fileOwners.get(absPath) === owner) fileOwners.delete(absPath);
+}
+
 interface LiveEntry {
   readonly entry: Entry;
   /** Original bytes, kept in memory for the in-process rollback. */
@@ -304,7 +321,7 @@ async function removeCreatedDirs(dirs: readonly string[], roots: readonly string
 // Crash recovery.
 // ---------------------------------------------------------------------------
 
-function isAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -317,7 +334,7 @@ function isAlive(pid: number): boolean {
 /** Whether the process that wrote a record can no longer be running it. */
 function ownerGone(manifest: Manifest, openHere: ReadonlySet<string>, id: string): boolean {
   if (manifest.pid === process.pid) return !openHere.has(id);
-  if (!isAlive(manifest.pid)) return true;
+  if (!isProcessAlive(manifest.pid)) return true;
   // A pid alone does not say: the system hands a dead process's id to a new one.
   const bootedAt = Date.now() - os.uptime() * 1000;
   return bootedAt > manifest.startedAt + BOOT_SLACK_MS;
@@ -428,7 +445,7 @@ export async function recoverStaleJournals(stateDir: string, roots: readonly str
       if (!manifest.roots.some((r) => realRoots.some((root) => isInsideDir(root, r) || isInsideDir(r, root)))) continue;
       if (record.name.includes(RECOVERING)) {
         const claimer = Number(record.name.slice(record.name.indexOf(RECOVERING) + RECOVERING.length));
-        if (claimer !== process.pid && isAlive(claimer)) continue;
+        if (claimer !== process.pid && isProcessAlive(claimer)) continue;
       } else if (!ownerGone(manifest, openTransactions, record.id)) {
         continue;
       }

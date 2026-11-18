@@ -95,7 +95,11 @@ describe('MCP server', () => {
       inputSchema: { type: 'object', required: ['code'] },
     });
     const description = tools[0]?.description ?? '';
-    for (const binding of ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow']) expect(description).toContain(`declare function ${binding}(`);
+    for (const binding of ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'test', 'undo', 'readOverflow']) expect(description).toContain(`declare function ${binding}(`);
+    expect(description).toContain('declare const scratchDir: string | undefined;');
+    expect(description).toContain('return counts and small samples, not whole file lists');
+    expect(description).toContain('changedCount?: number');
+    expect(description).toContain('undoId?: string');
     expect(description).toContain('QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits');
     expect(description).toContain("columns: ['file', 'line', 'text']");
     expect(description).not.toMatch(/overflowPath|Example/);

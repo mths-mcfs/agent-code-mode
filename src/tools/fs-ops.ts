@@ -3,6 +3,7 @@ import { constants as FS, type Stats } from 'node:fs';
 import fs, { type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
+import type { DirIdentity, FileFingerprint } from '../core/types.js';
 
 /**
  * File operations that do not let a symlink or a race widen what was
@@ -124,6 +125,22 @@ export async function assertIdentity(identity: PathIdentity): Promise<void> {
   }
 }
 
+/** The file `abs` names now (a link is not followed), or null when nothing is there. */
+export async function fingerprintOf(abs: string): Promise<FileFingerprint | null> {
+  const st = await fs.lstat(abs, { bigint: true }).catch(() => null);
+  return st === null ? null : { dev: st.dev, ino: st.ino, size: st.size, mode: Number(st.mode & 0o7777n) };
+}
+
+export function sameFingerprint(a: FileFingerprint, b: FileFingerprint): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mode === b.mode;
+}
+
+/** Throws `stale` unless `abs` is still the file recorded in `expected`, with the same size and mode. */
+async function assertFingerprint(abs: string, expected: FileFingerprint): Promise<void> {
+  const now = await fingerprintOf(abs);
+  if (now === null || !sameFingerprint(now, expected)) throw new ToolError('stale', `file changed since prepared: ${abs} was replaced or its mode changed`);
+}
+
 // ---------------------------------------------------------------------------
 // Per-path lock: check-and-replace of one path is atomic within the process.
 // ---------------------------------------------------------------------------
@@ -146,6 +163,8 @@ export function withPathLock<T>(abs: string, fn: () => Promise<T>): Promise<T> {
 export interface RegularFile {
   readonly bytes: Buffer;
   readonly mode: number;
+  /** Which file was read. */
+  readonly fingerprint: FileFingerprint;
 }
 
 /**
@@ -169,7 +188,8 @@ export async function readRegularFile(abs: string, maxBytes = Number.MAX_SAFE_IN
     if (!st.isFile()) throw new ToolError('invalid-args', `${abs} is not a regular file`);
     if (st.size > maxBytes) throw new ToolError('tool-error', `${abs} is ${st.size} bytes, more than the ${maxBytes}-byte limit`);
     const bytes = await handle.readFile();
-    return { bytes, mode: st.mode & 0o7777 };
+    const big = await handle.stat({ bigint: true });
+    return { bytes, mode: st.mode & 0o7777, fingerprint: { dev: big.dev, ino: big.ino, size: big.size, mode: Number(big.mode & 0o7777n) } };
   } finally {
     await handle.close();
   }
@@ -183,6 +203,8 @@ export interface WriteOutcome {
   readonly before: RegularFile | null;
   /** Directories created to hold the file, outermost first. */
   readonly createdDirs: readonly string[];
+  /** The file that was put in place. */
+  readonly written: FileFingerprint;
 }
 
 async function missingDirs(dir: string): Promise<string[]> {
@@ -213,6 +235,10 @@ export interface AtomicWriteOptions {
   readonly identity?: PathIdentity;
   /** Mode of the new file; defaults to the mode of the file it replaces. */
   readonly mode?: number;
+  /** The file expected at the path; checked before writing and right before the rename. */
+  readonly fingerprint?: FileFingerprint;
+  /** Called for each directory this write really created, even if the write fails afterwards. */
+  readonly onDirCreated?: (dir: string, identity: DirIdentity) => void;
 }
 
 function hashMatches(expect: Expectation, current: RegularFile | null): boolean {
@@ -241,9 +267,10 @@ function assertNotAborted(signal: AbortSignal | undefined, abs: string): void {
  * transaction journal snapshots the original there).
  */
 async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions): Promise<WriteOutcome> {
-  const { beforeWrite, signal, identity } = opts;
+  const { beforeWrite, signal, identity, fingerprint } = opts;
   assertNotAborted(signal, abs);
   if (identity) await assertIdentity(identity);
+  if (fingerprint) await assertFingerprint(abs, fingerprint);
   const dir = path.dirname(abs);
   const toCreate = await missingDirs(dir);
   const existingAncestor = toCreate.length > 0 ? path.dirname(toCreate[0] ?? dir) : dir;
@@ -263,6 +290,8 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
   for (const d of toCreate) {
     try {
       await fs.mkdir(d);
+      const st = await fs.lstat(d, { bigint: true });
+      opts.onDirCreated?.(d, { dev: st.dev, ino: st.ino });
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
@@ -274,11 +303,15 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
   const mode = opts.mode ?? before?.mode ?? 0o666;
   const handle = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | NOFOLLOW, mode);
   let placed = false;
+  let written: FileFingerprint;
   try {
     try {
       await handle.writeFile(bytes);
       if ((opts.mode !== undefined || before) && !IS_WINDOWS) await handle.chmod(mode);
       await handle.sync();
+      // The temp file becomes the target: rename and link keep its inode.
+      const st = await handle.stat({ bigint: true });
+      written = { dev: st.dev, ino: st.ino, size: st.size, mode: Number(st.mode & 0o7777n) };
     } finally {
       await handle.close();
     }
@@ -286,6 +319,7 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     assertNotAborted(signal, abs);
     await assertDirUnchanged(dir);
     if (identity) await assertIdentity(identity);
+    if (fingerprint) await assertFingerprint(abs, fingerprint);
     if (!hashMatches(expect, await readRegularFile(abs))) {
       throw new ToolError('stale', `file changed since prepared: ${abs} changed while it was being written`);
     }
@@ -301,7 +335,7 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
       }
     }
     if (!placed) await fs.rename(tmp, abs);
-    return { before, createdDirs: toCreate };
+    return { before, createdDirs: toCreate, written };
   } finally {
     // After `link` the temp name is still there; after `rename` it is gone.
     await fs.rm(tmp, { force: true }).catch(() => undefined);
@@ -310,10 +344,13 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
 
 /**
  * Removes `abs` when it is a regular file holding `expectHash`, reached
- * without any link (its directory must still resolve to itself).
+ * without any link (its directory must still resolve to itself) and, when
+ * `identity` is given, still the very file and directories recorded there.
  */
-export function removeRegularFile(abs: string, expectHash: string): Promise<void> {
+export function removeRegularFile(abs: string, expectHash: string, identity?: PathIdentity, fingerprint?: FileFingerprint): Promise<void> {
   return withPathLock(abs, async () => {
+    if (identity) await assertIdentity(identity);
+    if (fingerprint) await assertFingerprint(abs, fingerprint);
     await assertDirUnchanged(path.dirname(abs));
     const current = await readRegularFile(abs);
     if (current === null) return;
@@ -324,12 +361,14 @@ export function removeRegularFile(abs: string, expectHash: string): Promise<void
 
 /**
  * Removes `dir` when it is an empty real directory (not a link, not reached
- * through one) strictly inside one of `roots`. Returns whether it was removed.
+ * through one) strictly inside one of `roots` and, when `identity` is given,
+ * still that very directory. Returns whether it was removed.
  */
-export async function removeEmptyDirInside(dir: string, roots: readonly string[]): Promise<boolean> {
+export async function removeEmptyDirInside(dir: string, roots: readonly string[], identity?: DirIdentity): Promise<boolean> {
   if (!path.isAbsolute(dir)) return false;
-  const st = await fs.lstat(dir).catch(() => null);
+  const st = await fs.lstat(dir, { bigint: true }).catch(() => null);
   if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
+  if (identity !== undefined && (st.dev !== identity.dev || st.ino !== identity.ino)) return false;
   const real = await fs.realpath(dir).catch(() => null);
   const same = real !== null && (IS_WINDOWS ? real.toLowerCase() === dir.toLowerCase() : real === dir);
   if (!same) return false;
@@ -370,6 +409,11 @@ export async function writeDurable(file: string, data: Buffer | string): Promise
   } finally {
     await handle.close();
   }
+}
+
+/** Writes a new private file without flushing it to disk: for data that does not have to survive a crash. */
+export async function writePrivate(file: string, data: Buffer): Promise<void> {
+  await fs.writeFile(file, data, { mode: 0o600, flag: 'wx' });
 }
 
 /** Whether a buffer looks like binary data: a NUL byte in the first 8 KiB, or invalid UTF-8. */
