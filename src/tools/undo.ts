@@ -354,7 +354,7 @@ class Session implements UndoSession {
     const committed = file.committed;
     if (committed === null) return;
     // The path is judged again now: it must still lead to itself, inside today's roots, and be writable.
-    if ((await this.#jail.resolveForWrite(abs)) !== abs) return this.#skip(abs, 'the path now leads somewhere else');
+    if ((await this.#jail.resolveRecorded(abs)) !== abs) return this.#skip(abs, 'the path now leads somewhere else');
     const identity = await captureIdentity(abs, this.#jail.rootOf(abs) ?? file.root);
     const current = await readRegularFile(abs);
     if (current === null) return this.#skip(abs, 'the file no longer exists');
@@ -387,7 +387,7 @@ class Session implements UndoSession {
       const identity = this.#run.dirs.get(dir);
       try {
         const root = this.#jail.rootOf(dir);
-        if (identity === undefined || !dirIdentityMatches(st, identity) || root === undefined || root === dir || (await this.#jail.resolveForWrite(dir)) !== dir) {
+        if (identity === undefined || !dirIdentityMatches(st, identity) || root === undefined || root === dir || (await this.#jail.resolveRecorded(dir)) !== dir) {
           this.#skip(dir, 'the directory is not the one the run created');
           continue;
         }

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GenericContextProvider } from '../../src/server/context.js';
@@ -97,19 +98,17 @@ describe.runIf(posix)('the scratch directory under Claude Code', () => {
     expect(existsSync(path.join(lab.stateDir, 'journal-note'))).toBe(false);
   });
 
-  it('only this session\'s directory opens: the rest of the state dir stays protected', async () => {
+  it('the state dir stays protected as a whole, and the temp directory around the scratch directory stays closed', async () => {
     lab = makeLab();
     server = await claudeServer(lab, bypass);
     const dir = await scratchOf(server);
-    const sibling = path.join(path.dirname(dir), 'b'.repeat(32));
-    mkdirSync(sibling);
     const attempts = [
-      `await write({ path: scratchDir + '/../evil.json', content: 'x' })`,
-      `await write({ path: ${JSON.stringify(path.join(sibling, 'x'))}, content: 'x' })`,
+      `await write({ path: scratchDir + '/../acm-evil-${path.basename(dir)}.json', content: 'x' })`,
+      `await write({ path: ${JSON.stringify(path.join(lab.stateDir, 'scratch', 'forged.json'))}, content: 'x' })`,
       `await write({ path: ${JSON.stringify(path.join(lab.stateDir, 'journal', 'x'))}, content: 'x' })`,
     ];
     for (const body of attempts) expect((await server.run(attempt(body))).result).toMatch(/^ToolError:(outside-workspace|protected-path)$/);
-    expect(readdirSync(sibling)).toEqual([]);
+    expect(existsSync(path.join(path.dirname(dir), `acm-evil-${path.basename(dir)}.json`))).toBe(false);
   });
 
   it('a file swapped for a link between prepare and commit is not written through', async () => {
@@ -166,6 +165,70 @@ describe.runIf(posix)('the scratch directory under Claude Code', () => {
     server = await claudeServer(lab, { permissions: { allow: ['Bash(mv:*)'] } });
     expect((await server.run(attempt(`await bash({ command: 'mv source.txt ${lab.outside}/out.txt' })`))).result).toBe('PermissionDenied:denied');
     expect(existsSync(path.join(lab.ws, 'source.txt'))).toBe(true);
+  });
+
+  it.each(['default', 'acceptEdits'])('%s: an explicit cwd in a project subfolder leaves a relative destination for the mode to decide', async (defaultMode) => {
+    lab = makeLab({ 'sub/keep.txt': 'x\n' });
+    server = await claudeServer(lab, { permissions: { defaultMode, allow: ['Bash(cd:*)', 'Bash(echo:*)'] } });
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > out.txt', cwd: 'sub' })`))).result).toBe('PermissionDenied:denied');
+    expect(existsSync(path.join(lab.ws, 'sub', 'out.txt'))).toBe(false);
+  });
+
+  it.each(['plan', 'dontAsk'])('%s: the same command stays refused', async (defaultMode) => {
+    lab = makeLab({ 'sub/keep.txt': 'x\n' });
+    server = await claudeServer(lab, { permissions: { defaultMode, allow: ['Bash(cd:*)', 'Bash(echo:*)'] } });
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > out.txt', cwd: 'sub' })`))).result).toBe('PermissionDenied:denied');
+    expect(existsSync(path.join(lab.ws, 'sub', 'out.txt'))).toBe(false);
+  });
+
+  it('plan: bash is refused with an explicit cwd in the scratch directory, whatever the rules', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, { permissions: { defaultMode: 'plan', allow: ['Bash(cd:*)', 'Bash(echo:*)'] } });
+    const dir = await scratchOf(server);
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > out.txt', cwd: scratchDir })`))).result).toBe('PermissionDenied:denied');
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > ' + scratchDir + '/out.txt' })`))).result).toBe('PermissionDenied:denied');
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('plan: an allow rule for all of bash does not open an explicit cwd in the scratch directory', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, { permissions: { defaultMode: 'plan', allow: ['Bash'] } });
+    const dir = await scratchOf(server);
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > out.txt', cwd: scratchDir })`))).result).toBe('PermissionDenied:denied');
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('plan: write and edit in the scratch directory are refused even with an allow rule', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, { permissions: { defaultMode: 'plan', allow: ['Write', 'Edit'] } });
+    const dir = await scratchOf(server);
+    expect((await server.run(attempt(`await write({ path: scratchDir + '/a.txt', content: 'x' })`))).result).toBe('PermissionDenied:denied');
+    writeFileSync(path.join(dir, 'b.txt'), 'old\n');
+    expect((await server.run(attempt(`await edit({ path: scratchDir + '/b.txt', oldString: 'old', newString: 'new' })`))).result).toBe('PermissionDenied:denied');
+    expect(readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe('old\n');
+  });
+
+  it('dontAsk: an explicit allow rule still permits the scratch directory', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, { permissions: { defaultMode: 'dontAsk', allow: ['Write'] } });
+    const dir = await scratchOf(server);
+    expect((await server.run(attempt(`await write({ path: scratchDir + '/a.txt', content: 'x' })`))).result).toBe('DONE');
+    expect(readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('x');
+  });
+
+  it('an explicit cwd in the scratch directory needs the same rules as the absolute destination', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, { permissions: { allow: ['Bash(echo:*)'] } });
+    const dir = await scratchOf(server);
+    expect((await server.run(`return (await bash({ command: 'echo hi > out.txt', cwd: scratchDir })).exitCode;`)).result).toBe(0);
+    expect(readFileSync(path.join(dir, 'out.txt'), 'utf8')).toBe('hi\n');
+  });
+
+  it('without a rule for the command, the explicit cwd and the absolute destination are both refused', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, {});
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > out.txt', cwd: scratchDir })`))).result).toBe('PermissionDenied:denied');
+    expect((await server.run(attempt(`await bash({ command: 'echo hi > ' + scratchDir + '/out.txt' })`))).result).toBe('PermissionDenied:denied');
   });
 
   it('a relative destination with an explicit cwd in the scratch directory is judged where it lands', async () => {
@@ -266,7 +329,9 @@ describe.runIf(posix)('the scratch directory under Claude Code', () => {
     const dir = await scratchOf(server);
     await server.run(`await write({ path: scratchDir + '/a.txt', content: 'x' });`);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(path.basename(dir)).toMatch(/^[0-9a-f]{32}$/);
+    expect(path.basename(dir)).toMatch(/^agent-code-mode-scratch-[0-9a-f]{32}$/);
+    expect(path.dirname(dir)).toBe(realpathSync.native(os.tmpdir()));
+    expect(dir.startsWith(lab.stateDir)).toBe(false);
     await server.close();
     server = undefined;
     expect(existsSync(dir)).toBe(false);
@@ -306,10 +371,13 @@ describe.runIf(posix)('the scratch directory under Codex', () => {
       const out = await server.run(`
         const a = await bash({ command: 'echo inside > ' + scratchDir + '/a.txt' });
         const b = await bash({ command: 'echo outside > ${lab.stateDir}/journal/planted.txt' });
-        return [a.exitCode, b.exitCode];
+        const c = await bash({ command: 'cd ${lab.stateDir} && echo outside > brand-new.txt' });
+        return [a.exitCode, b.exitCode, c.exitCode];
       `);
-      expect(out.result).toEqual([0, expect.any(Number)]);
+      expect(out.result).toEqual([0, expect.any(Number), expect.any(Number)]);
       expect((out.result as number[])[1]).not.toBe(0);
+      expect((out.result as number[])[2]).not.toBe(0);
+      expect(existsSync(path.join(lab.stateDir, 'brand-new.txt'))).toBe(false);
       expect(readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('inside\n');
       expect(existsSync(path.join(lab.stateDir, 'journal', 'planted.txt'))).toBe(false);
     });

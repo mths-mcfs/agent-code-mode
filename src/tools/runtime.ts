@@ -23,7 +23,7 @@ import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace } from './edit-match.js';
 import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
-import { Jail, isInsideDir } from './jail.js';
+import { Jail } from './jail.js';
 import { containmentUnavailableReason } from './sandbox.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
 import { SessionDirs, scratchBase, undoBase } from './session-dirs.js';
@@ -122,31 +122,6 @@ function sandboxDenyWrite(patterns: readonly string[]): string[] {
     if (!/[*?[]/.test(base) && path.isAbsolute(base)) out.push(base);
   }
   return out;
-}
-
-/**
- * What a sandboxed command may not write. A protected directory that holds the
- * scratch directory (the state dir) cannot be denied whole, since a deny wins
- * over the writable root inside it: what is denied instead is everything in it
- * but the way down to the scratch directory.
- */
-async function denyAroundScratch(paths: readonly string[], scratch: string | undefined): Promise<string[]> {
-  if (scratch === undefined) return [...paths];
-  const out = new Set<string>();
-  for (const p of paths) {
-    const real = await fs.realpath(p).catch(() => p);
-    if (isInsideDir(scratch, real)) continue;
-    if (!isInsideDir(real, scratch)) {
-      out.add(p);
-      continue;
-    }
-    let dir = real;
-    for (const segment of path.relative(real, scratch).split(path.sep)) {
-      for (const name of await fs.readdir(dir)) if (name !== segment) out.add(path.join(dir, name));
-      dir = path.join(dir, segment);
-    }
-  }
-  return [...out];
 }
 
 /** Any failure of the runtime reaches the dispatcher as a `ToolError`. */
@@ -290,8 +265,7 @@ export class NodeToolRuntime implements ToolRuntime {
             ...(expanded === undefined ? {} : { expansion: { original: inCwd(call.args.command), entries: expanded.entries } }),
           },
         };
-        const denyWrite = containment.mode === 'sandbox' ? await denyAroundScratch(sandboxDenyWrite(jail.protectedPaths), policy.scratchRoot) : [];
-        this.#meta.put(prepared, { ...meta(jail.cwd, denyWrite), watched: policy.watchedPaths ?? policy.protectedPaths, ...(policy.isRoutineWatchedChange ? { routine: policy.isRoutineWatchedChange } : {}) });
+        this.#meta.put(prepared, { ...meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)), watched: policy.watchedPaths ?? policy.protectedPaths, ...(policy.isRoutineWatchedChange ? { routine: policy.isRoutineWatchedChange } : {}) });
         return prepared;
       }
       case 'read': {

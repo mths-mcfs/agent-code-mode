@@ -8,10 +8,11 @@ import { ensureStateDir } from '../core/state-dir.js';
 import { isProcessAlive } from './journal.js';
 
 /**
- * Directories that live as long as one server process: its scratch directory
- * (`<stateDir>/scratch/<id>`, the one part of the state dir scripts may write)
- * and the saved originals of `undo` (`<stateDir>/undo/<id>`). The id is random
- * and unguessable. The owner record (`<stateDir>/scratch/<id>.json`) is written
+ * Directories that live as long as one server process: its scratch directory,
+ * private and directly in the system temp directory (so nothing of the state
+ * dir ever has to open for scripts), and the saved originals of `undo`
+ * (`<stateDir>/undo/<id>`). The id is random and unguessable. The owner record
+ * (`<stateDir>/scratch/<id>.json`) names the scratch directory; it is written
  * first and removed last, outside what scripts can write, so a directory
  * without a record never belongs to a live process.
  */
@@ -22,11 +23,33 @@ const OwnerSchema = z.object({
   startedAt: z.number(),
   /** When the owner process started, in the kernel's clock ticks since boot (Linux). */
   processStart: z.string().optional(),
+  /** Real path of the scratch directory. */
+  scratch: z.string().optional(),
 });
 const ID_PATTERN = /^[0-9a-f]{32}$/;
 const RECORD_PATTERN = /^([0-9a-f]{32})\.json$/;
 /** Slack when comparing a start time with the boot time. */
 const BOOT_SLACK_MS = 10_000;
+
+/** Name of the scratch directory of session `id`. */
+export function scratchName(id: string): string {
+  return `agent-code-mode-scratch-${id}`;
+}
+
+/** Temp directories a recorded scratch directory may sit directly in. */
+async function tempDirs(): Promise<Set<string>> {
+  const dirs = [os.tmpdir(), '/tmp', '/var/tmp'];
+  const real = await Promise.all(dirs.map((d) => fs.realpath(d).catch(() => d)));
+  return new Set([...dirs, ...real]);
+}
+
+/** The scratch directory a record names, when it is exactly what session `id` would have created. */
+async function recordedScratch(id: string, recorded: string | undefined): Promise<string | undefined> {
+  if (recorded === undefined || !path.isAbsolute(recorded)) return undefined;
+  if (path.basename(recorded) !== scratchName(id) || !(await tempDirs()).has(path.dirname(recorded))) return undefined;
+  const st = await fs.lstat(recorded).catch(() => null);
+  return st !== null && st.isDirectory() && (process.getuid === undefined || st.uid === process.getuid()) ? recorded : undefined;
+}
 
 export function scratchBase(stateDir: string): string {
   return path.join(stateDir, 'scratch');
@@ -73,6 +96,7 @@ export class SessionDirs {
   readonly id = randomBytes(16).toString('hex');
   readonly #stateDir: string;
   #ready: Promise<Ready> | undefined;
+  #scratchPath: string | undefined;
   #closed = false;
 
   constructor(stateDir: string) {
@@ -99,19 +123,24 @@ export class SessionDirs {
     open.add(this);
     await ensureStateDir(this.#stateDir);
     await sweepDeadSessions(this.#stateDir);
-    const scratchParent = scratchBase(this.#stateDir);
+    const records = scratchBase(this.#stateDir);
     const undoParent = undoBase(this.#stateDir);
-    await fs.mkdir(scratchParent, { recursive: true, mode: 0o700 });
+    await fs.mkdir(records, { recursive: true, mode: 0o700 });
     await fs.mkdir(undoParent, { recursive: true, mode: 0o700 });
-    const record = path.join(scratchParent, `${this.id}.json`);
+    const scratch = path.join(await fs.realpath(os.tmpdir()), scratchName(this.id));
+    this.#scratchPath = scratch;
+    const record = path.join(records, `${this.id}.json`);
     const next = `${record}.next`;
     const processStart = processStartTicks(process.pid);
-    await fs.writeFile(next, JSON.stringify({ pid: process.pid, host: os.hostname(), startedAt: Date.now(), ...(processStart === undefined ? {} : { processStart }) }), { mode: 0o600, flag: 'wx' });
+    await fs.writeFile(next, JSON.stringify({ pid: process.pid, host: os.hostname(), startedAt: Date.now(), scratch, ...(processStart === undefined ? {} : { processStart }) }), { mode: 0o600, flag: 'wx' });
     await fs.rename(next, record);
     // Without `recursive`, an entry that already exists at the random name is an error instead of being adopted.
-    await fs.mkdir(path.join(scratchParent, this.id), { mode: 0o700 });
+    await fs.mkdir(scratch, { mode: 0o700 });
+    const st = await fs.lstat(scratch);
+    if (!st.isDirectory() || (process.getuid !== undefined && st.uid !== process.getuid())) throw new Error(`${scratch} is not a private directory of this user`);
+    if (process.platform !== 'win32') await fs.chmod(scratch, 0o700);
     await fs.mkdir(path.join(undoParent, this.id), { mode: 0o700 });
-    const ready = { scratch: await fs.realpath(path.join(scratchParent, this.id)), undo: await fs.realpath(path.join(undoParent, this.id)) };
+    const ready = { scratch: await fs.realpath(scratch), undo: await fs.realpath(path.join(undoParent, this.id)) };
     if (this.#closed) {
       this.#remove();
       throw new Error('the server session is closed');
@@ -128,7 +157,7 @@ export class SessionDirs {
   }
 
   #remove(): void {
-    const targets = [path.join(scratchBase(this.#stateDir), this.id), path.join(undoBase(this.#stateDir), this.id), path.join(scratchBase(this.#stateDir), `${this.id}.json`)];
+    const targets = [...(this.#scratchPath === undefined ? [] : [this.#scratchPath]), path.join(undoBase(this.#stateDir), this.id), path.join(scratchBase(this.#stateDir), `${this.id}.json`)];
     for (const target of targets) {
       try {
         rmSync(target, { recursive: true, force: true });
@@ -186,18 +215,17 @@ export async function sweepDeadSessions(stateDir: string): Promise<void> {
       continue;
     }
     if (owner.host !== os.hostname() || !ownerGone(id, owner)) continue;
-    await fs.rm(path.join(scratch, id), { recursive: true, force: true }).catch(() => undefined);
+    const dir = await recordedScratch(id, owner.scratch);
+    if (dir !== undefined) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
     await fs.rm(path.join(undo, id), { recursive: true, force: true }).catch(() => undefined);
     await fs.rm(path.join(scratch, name), { force: true }).catch(() => undefined);
   }
   // The record is written first and removed last: a directory without one has no live owner.
-  for (const [base, list] of [[scratch, entries], [undo, undoEntries]] as const) {
-    for (const name of list) {
-      if (!ID_PATTERN.test(name) || recorded.has(name)) continue;
-      // A listing is not atomic: the record of a session that started meanwhile may have been missed.
-      const owned = await fs.access(path.join(scratch, `${name}.json`)).then(() => true, () => false);
-      if (!owned) await fs.rm(path.join(base, name), { recursive: true, force: true }).catch(() => undefined);
-    }
+  for (const name of undoEntries) {
+    if (!ID_PATTERN.test(name) || recorded.has(name)) continue;
+    // A listing is not atomic: the record of a session that started meanwhile may have been missed.
+    const owned = await fs.access(path.join(scratch, `${name}.json`)).then(() => true, () => false);
+    if (!owned) await fs.rm(path.join(undo, name), { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

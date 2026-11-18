@@ -33,16 +33,16 @@ async function script(code: string, reply: (tool: string, args: unknown) => Call
 const ran = (result: Partial<BashResult>) => (tool: string): CallReply =>
   tool === 'bash' ? { ok: true, value: bashResult(result) } : { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'missing' } };
 
-const report = async (result: Partial<BashResult>): Promise<Record<string, unknown>> => {
-  const { value } = await script('return await test({command: "run tests"});', ran(result));
+const report = async (result: Partial<BashResult>, command = 'run tests'): Promise<Record<string, unknown>> => {
+  const { value } = await script(`return await test({command: ${JSON.stringify(command)}});`, ran(result));
   return value as Record<string, unknown>;
 };
 
 const recorded: Record<string, { exitCode: number; stdout: string; stderr: string }> = JSON.parse(fixture2('runs.json'));
-const replay = (name: string): Promise<Record<string, unknown>> => {
+const replay = (name: string, command?: string): Promise<Record<string, unknown>> => {
   const run = recorded[name];
   if (run === undefined) throw new Error(`no recorded run ${name}`);
-  return report(run);
+  return report(run, command);
 };
 
 describe('test(): recorded runner output', () => {
@@ -99,7 +99,8 @@ describe('test(): runs with mixed outcomes', () => {
     const r = await replay(name);
     expect(r).toMatchObject({ parsed: true, passed: 2, failed: 2, skipped: 2, cancelled: 1, truncated: false });
     const failures = r['failures'] as { name: string; message: string }[];
-    expect(failures.map((f) => f.name)).toEqual(['failure # SKIP: café 🚀', 'child fails', 'before suite', 'after suite']);
+    // A suite's own hook failure is not one of the two failed tests the runner counts.
+    expect(failures.map((f) => f.name)).toEqual(['failure # SKIP: café 🚀', 'child fails']);
     expect(failures[0]?.message).toContain("cannot read Bob's item\nsecond detail");
   });
 
@@ -169,6 +170,131 @@ describe('test(): runs with mixed outcomes', () => {
 
 const VITEST_END = ' Test Files  1 failed (1)\n      Tests  1 failed (1)\n   Start at  10:00:00\n';
 const vitestBlock = (name: string, line: number): string => `⎯⎯⎯ Failed Tests 1 ⎯⎯⎯\n\n FAIL  a.test.ts > ${name}\nError: nope\n ❯ a.test.ts:${line}:3\n\n⎯⎯⎯[1/1]⎯\n\n`;
+
+describe('test(): the runner that ran', () => {
+  const nodeTotals = 'ℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 5\n';
+  const withPackage = (script: string, result: Partial<BashResult>) => (tool: string): CallReply =>
+    tool === 'read' ? { ok: true, value: { path: 'package.json', content: JSON.stringify({ scripts: { test: script } }), startLine: 1, totalLines: 1, truncated: false } } : { ok: true, value: bashResult(result) };
+
+  it.each(['node --test --test-reporter=spec nested-output.test.mjs', 'run tests'])('a report of another runner inside a failure message is not the summary (%s)', async (command) => {
+    const r = await replay('node-nested-spec', command);
+    expect(r).toMatchObject({ parsed: true, passed: 0, failed: 1 });
+    expect((r['failures'] as { name: string }[]).map((f) => f.name)).toEqual(['outer integration test']);
+  });
+
+  it.each([
+    ['./node_modules/.bin/vitest run', 'node-spoof'],
+    ['npx jest', 'node-spoof'],
+    ['python -m pytest -q', 'node-spoof'],
+    ['node --test', 'vitest-mixed'],
+  ])('%s reads only its own format', async (command, run) => {
+    expect(await replay(run, command)).toMatchObject({ parsed: false, passed: 0, failed: 0, failures: [] });
+  });
+
+  it('a command that starts two runners counts as unknown', async () => {
+    expect(await replay('node-spoof', 'vitest run && node --test')).toMatchObject({ parsed: true, passed: 1 });
+  });
+
+  it('npm test is read through the test script of package.json', async () => {
+    const stdout = recorded['node-spoof']?.stdout ?? '';
+    const asVitest = await script('return await test({command: "npm test"});', withPackage('vitest run', { stdout }));
+    expect(asVitest.value).toMatchObject({ parsed: false });
+    expect(asVitest.calls.map((c) => c.tool)).toEqual(['read', 'bash']);
+    expect((await script('return await test({command: "npm test"});', withPackage('node --test', { stdout }))).value).toMatchObject({ parsed: true, passed: 1 });
+  });
+
+  it('without a known runner, a summary with more output after it is not believed', async () => {
+    expect(await report({ exitCode: 0, stdout: `${nodeTotals}something else was printed\n` })).toMatchObject({ parsed: false, passed: 0 });
+    expect(await report({ exitCode: 0, stdout: `${nodeTotals}\n\n` })).toMatchObject({ parsed: true, passed: 1 });
+  });
+
+  it('with a known runner, its last summary counts wherever it is', async () => {
+    expect(await report({ exitCode: 0, stdout: `${nodeTotals}something else was printed\n` }, 'node --test')).toMatchObject({ parsed: true, passed: 1 });
+  });
+});
+
+describe('test(): failures must match the summary', () => {
+  const end = (failed: number): string => ` Test Files  1 failed (1)\n      Tests  ${failed} failed (${failed})\n   Start at  10:00:00\n`;
+  const section = (...blocks: string[]): string => `⎯⎯⎯ Failed Tests ${blocks.length} ⎯⎯⎯\n\n${blocks.join('⎯⎯⎯[1/1]⎯\n\n')}⎯⎯⎯[1/1]⎯\n\n`;
+  const block = (name: string, message = 'Error: nope'): string => ` FAIL  a.test.ts > ${name}\n${message}\n ❯ a.test.ts:3:3\n\n`;
+
+  it('more failures found than the summary counts is not parsed', async () => {
+    expect(await report({ exitCode: 1, stdout: `${section(block('one'), block('two'))}${end(1)}` })).toMatchObject({ parsed: false, failed: 0, failures: [] });
+  });
+
+  it('two identical entries are not parsed', async () => {
+    expect(await report({ exitCode: 1, stdout: `${section(block('same'), block('same'))}${end(2)}` })).toMatchObject({ parsed: false, failures: [] });
+  });
+
+  it('the same name with another message is two failures', async () => {
+    expect(await report({ exitCode: 1, stdout: `${section(block('same', 'Error: a'), block('same', 'Error: b'))}${end(2)}` })).toMatchObject({ parsed: true, failed: 2 });
+  });
+
+  it('titles that share one error are each a failure', async () => {
+    const shared = ` FAIL  a.test.ts > one\n FAIL  a.test.ts > two\nError: nope\n ❯ a.test.ts:3:3\n\n`;
+    const r = await report({ exitCode: 1, stdout: `${section(shared)}${end(2)}` });
+    expect(r).toMatchObject({ parsed: true, failed: 2 });
+    expect((r['failures'] as { message: string }[]).map((f) => f.message)).toEqual(['Error: nope', 'Error: nope']);
+  });
+
+  it('a record cut by lost bytes at the start of the tail is not a failure', async () => {
+    const tail = 'not ok 99 - single failure\n# more\nnot ok 1 - single failure\n  ---\n  error: \'real detail\'\n  ...\n1..1\n# tests 1\n# suites 0\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 5\n';
+    const r = await report({ exitCode: 1, truncated: true, stdout: 'TAP version 13\n# long comment', stdoutTail: tail, stdoutOmitted: 5_000 }, 'node --test --test-reporter=tap');
+    expect(r).toMatchObject({ parsed: true, failed: 1 });
+    expect(r['failures']).toEqual([{ name: 'single failure', message: 'real detail' }]);
+  });
+});
+
+describe('test(): the record cut at the end of the start of a stream', () => {
+  it('is not a failure', async () => {
+    const tail = 'dropped\nnot ok 1 - real\n  ---\n  error: \'real detail\'\n  ...\n# tests 1\n# suites 0\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 5\n';
+    const r = await report({ exitCode: 1, truncated: true, stdout: 'TAP version 13\nnot ok 7 - cut in the mid', stdoutTail: tail, stdoutOmitted: 5_000 }, 'node --test --test-reporter=tap');
+    expect(r).toMatchObject({ parsed: true, failed: 1 });
+    expect(r['failures']).toEqual([{ name: 'real', message: 'real detail' }]);
+  });
+});
+
+describe('test(): lines that look like titles', () => {
+  it('jest: a message line starting with ● stays in the message', async () => {
+    expect((await replay('jest-marker'))['failures']).toEqual([{ name: 'real failure', message: 'real message\n● a status marker\nlast line', file: 'markers.test.js', line: 1 }]);
+  });
+
+  it('vitest: a message line starting with FAIL stays in the message', async () => {
+    expect((await replay('vitest-marker'))['failures']).toEqual([{ name: 'markers.test.mjs > real failure', message: 'Error: real message\nFAIL status marker\nlast line', file: 'markers.test.mjs', line: 2 }]);
+  });
+});
+
+describe('test(): pytest diagnostics', () => {
+  it('a failing body and a failing teardown each keep their own, and an id with " - " stays whole', async () => {
+    expect((await replay('pytest-dual'))['failures']).toEqual([
+      { name: 'test_collision.py::test_collision', message: 'ValueError: body failed', file: 'test_collision.py', line: 9 },
+      { name: 'test_collision.py::test_special[key - caf\\xe9]', message: 'assert 0', file: 'test_collision.py', line: 13 },
+      { name: 'test_collision.py::test_collision', message: 'RuntimeError: fixture teardown failed', file: 'test_collision.py', line: 6 },
+    ]);
+  });
+
+  it('tests with the same name in two files each keep their own', async () => {
+    expect((await replay('pytest-cross'))['failures']).toEqual([
+      { name: 'test_alpha.py::test_shared', message: 'ValueError: alpha failure', file: 'test_alpha.py', line: 2 },
+      { name: 'test_beta.py::test_shared', message: 'RuntimeError: beta failure', file: 'test_beta.py', line: 2 },
+    ]);
+  });
+
+  it('an id with " - " stays whole when the error text holds "] - " too', async () => {
+    const stdout = '____ t[k - v] ____\n\nE   assert b[0] - c\n\ntest_a.py:3: AssertionError\n==== short test summary info ====\nFAILED test_a.py::t[k - v] - assert b[0] - c\n==== 1 failed in 0.10s ====\n';
+    expect((await report({ exitCode: 1, stdout }))['failures']).toEqual([{ name: 'test_a.py::t[k - v]', message: 'assert b[0] - c', file: 'test_a.py', line: 3 }]);
+  });
+
+  it('an id with " - " stays whole when no diagnostic was printed', async () => {
+    const stdout = '==== short test summary info ====\nFAILED test_a.py::t[k - v] - boom\n==== 1 failed in 0.10s ====\n';
+    expect((await report({ exitCode: 1, stdout }))['failures']).toEqual([{ name: 'test_a.py::t[k - v]', message: '', file: 'test_a.py' }]);
+  });
+
+  it('a row with no diagnostic of its own gets an empty message, not that of another test', async () => {
+    const stdout = '____ test_shared ____\n\nE   ValueError: other file\n\ntest_other.py:2: ValueError\n==== short test summary info ====\nFAILED test_mine.py::test_shared - ValueError: other file\n==== 1 failed in 0.10s ====\n';
+    expect((await report({ exitCode: 1, stdout }))['failures']).toEqual([{ name: 'test_mine.py::test_shared', message: '', file: 'test_mine.py' }]);
+  });
+});
 
 describe('test(): the verdict', () => {
   it('ok is false after a timeout, even with exit code 0', async () => {
