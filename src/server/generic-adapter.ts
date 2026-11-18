@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { stateDirPath } from '../core/state-dir.js';
-import type { Decision, HostAdapter, PolicySnapshot, PreparedCall, SessionContext } from '../core/types.js';
+import type { Decision, HostAdapter, HostCall, PolicySnapshot, SessionContext } from '../core/types.js';
 
 /** Why the generic policy refuses mutations; shown in the call log and to the script. */
 export const GENERIC_ASK_REASON =
@@ -30,8 +30,10 @@ export class GenericHostAdapter implements HostAdapter<null> {
     };
   }
 
-  checkStatic(prepared: PreparedCall): Decision {
+  checkStatic(prepared: HostCall): Decision {
     switch (prepared.tool) {
+      case 'mcp':
+        return { kind: 'deny', source: 'unsupported-config', reason: 'upstream MCP calls (mcpCall) need the Claude Code host' };
       case 'read':
       case 'grep':
       case 'glob':

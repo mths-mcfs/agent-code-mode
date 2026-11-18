@@ -81,9 +81,26 @@ return { matches: hits.count, exitCode: test.exitCode };
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` says which rung matched.
 
+### Upstream MCP tools (Claude Code)
+
+`serve --mcp-config <file>` starts the stdio MCP servers listed in a file in the `.mcp.json` format (`{"mcpServers": {"<name>": {"command", "args", "env"}}}`) and lets scripts call their tools with `mcpCall(server, tool, args, {timeoutMs}?)`. A script can chain many upstream calls and return only the summary:
+
+```js
+const { structuredContent } = await mcpCall('inventory', 'list_items', {});
+const empty = structuredContent.items.filter((item) => item.qty === 0);
+for (const item of empty) await mcpCall('inventory', 'adjust_stock', { sku: item.sku, delta: 10 });
+return { restocked: empty.map((item) => item.sku) };
+```
+
+- **Host and config.** Claude Code only: with `--host codex`, or when Claude Code is not detected, the server refuses to start. The file is validated at start (stdio servers only, no `${VAR}` expansion, no unknown keys); an invalid file stops the start with the reason. So do managed settings that set `allowedMcpServers` or `deniedMcpServers`, which this server does not evaluate. The server does not read your Claude Code MCP configuration on its own.
+- **Catalog.** Each server is started with a minimal environment (the MCP SDK's default variables plus its `env`), initialized and listed once at start. A server that fails to start or list is left out; so is a tool whose name is not `[A-Za-z0-9_-]`, contains `__`, starts or ends with `_` or `-`, is longer than 64 characters or appears twice. What was left out goes to stderr and to the end of the `run` description, which lists the tools with a short description and input shape (capped at 8,000 characters). Calls to anything outside the catalog fail with `invalid-args`; list-change notifications are ignored.
+- **Authorization.** Each call is authorized as the tool `mcp__<server>__<tool>`, with `tool_input` = `args` and `mcp_server` in the PreToolUse hook input. `mcp__<server>` and `mcp__<server>__*` cover every tool of a server, `mcp__<server>__<tool>` one tool; deny beats ask beats allow, and in deny and ask rules globs such as `mcp__*` apply too. `--disallowedTools` and `--allowedTools` of the parent Claude Code process count. Without a rule only `bypassPermissions` runs the call; `default`, `acceptEdits` and `auto` need an allow rule (an ask is a deny here), `dontAsk` denies and `plan` always denies. Tool annotations such as `readOnlyHint` are never used. A hook's `updatedInput` replaces `args` and is checked again; it cannot change the server or the tool.
+- **Results.** `{isError, structuredContent}` when the tool returns structured content, else `{isError, text}` with the text blocks joined (other blocks become a short note). A result above 200,000 characters comes cut with `truncated: true` and `overflow: {id, chars}` for `readOverflow`. Calls run one at a time, in call order, with a 60 s default timeout; a timeout or a server that dies mid-call leaves the effect unknown, and the call is never retried.
+- **No rollback.** An upstream call is an external effect, like `bash`: a rolled-back transaction warns how many were sent and that they were not undone.
+
 ## Security model and limits
 
-The script runs in a QuickJS-ng WebAssembly VM inside a child Node process. The VM has no `require`, `process`, `fetch`, timers, filesystem, network or environment. Its only way out is the six bindings. Each binding call goes back to the server, which:
+The script runs in a QuickJS-ng WebAssembly VM inside a child Node process. The VM has no `require`, `process`, `fetch`, timers, filesystem, network or environment. Its only way out is the bindings. Each binding call goes back to the server, which:
 
 1. **prepares** the exact effect (real paths inside the workspace, the diff of a write, the command and cwd of `bash`) with no side effect;
 2. **authorizes** it as the native tool: `Bash`, `Read`, `Write`, `Edit`, `Grep`, `Glob` in Claude Code; shell commands and `apply_patch` in Codex. Your permission rules (deny → ask → allow) apply, then your PreToolUse hooks run with the input the native tool would send. A hook rewrite (`updatedInput`) is re-validated, re-prepared and re-checked against the rules;
@@ -99,7 +116,7 @@ Semantics:
 - **`bash` containment** mirrors the host. When Claude's sandbox is enabled, or Codex runs `read-only`/`workspace-write`, commands run in an OS sandbox (bubblewrap on Linux, Seatbelt on macOS) with the host's writable roots. If that cannot be enforced, the call is refused, never run unconfined.
 - **Protected-path watch.** Around every `bash` call, and once more at the end of the run, the server fingerprints the host policy files it reads (settings, hooks and agents, `.mcp.json`, Codex config, hooks and rules) and its state dir, and adds a `warnings` line naming any that changed, other than its own writes; the call keeps its result. This detects and reports, it does not prevent or restore: a change reverted before the comparison goes unseen, a change by another process (the host, another run) is reported too, Windows links and junctions are untested for this check, and if the fingerprint cannot be taken before a command (unreadable, too many entries, too slow) the command is refused. A new, well-formed companion-hook record in the state dir is not reported (parallel subagents write them all the time; a forged one would need the id of a tool call the host has not issued yet), while a changed existing record is. Files past the hashing budget are named as checked by metadata only.
 - **Overlapping transactions.** Within one server, a transactional run may not write a file that another unfinished transactional run already changed: that write fails, so both runs can still roll back to the true original.
-- **Rollback covers files only.** Effects of `bash` (processes, network, files a command wrote) are never undone; the result warns when a rolled-back run had committed `bash` calls.
+- **Rollback covers files only.** Effects of `bash` (processes, network, files a command wrote) and of `mcpCall` are never undone; the result warns when a rolled-back run had committed `bash` calls or sent upstream calls.
 - **Network on Node 22/24.** Node's permission model blocks sockets in the sandbox child only from Node 25. On Node 22 and 24, network isolation of scripts rests on the QuickJS VM exposing no network API.
 - **Windows.** `bash` needs Git Bash and is otherwise refused; OS containment is not available there.
 - **Unknown clients.** When neither Claude Code nor Codex is detected and no `--host` is given, only `read`, `grep` and `glob` inside the workspace are allowed; every other call is denied with the reason.
