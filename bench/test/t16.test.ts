@@ -6,7 +6,12 @@ import { DEFAULT_FIXTURE_SEED, generateFixture } from '../fixture/generate.ts';
 import { claudeMcpConfig, contextOf, parseClaudeTranscript, upstreamMcpConfig } from '../lib/claude.ts';
 import { checkArm, checkMcpCalls, checkSurface, mcpCallCounts } from '../lib/record.ts';
 import { claudeProjectSettings } from '../lib/workspace.ts';
-import { interactiveReasons, taskDirectTools, taskScriptTools } from '../run.ts';
+import { interactiveReasons, offLimitsHits, taskDirectTools, taskScriptTools, toolInputsText } from '../run.ts';
+import { createWorkspace } from '../lib/workspace.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { TASKS } from '../tasks/index.ts';
 import { dollars, t16Data, T16_QUARTER, topRefunded } from '../tasks/T16/data.ts';
 import { answerPairs } from '../tasks/T16/verify.ts';
@@ -122,11 +127,27 @@ describe('T16 data', () => {
 describe('T16 answer parsing', () => {
   it.each([
     ['C-0343 1673.00, C-0103 876.90, C-0063 279.00', [167300, 87690, 27900]],
-    ['C-0343: $1,673.00, C-0103: $876.90, C-0063: $279', [167300, 87690, 27900]],
-    ['`C-0343` (1673.00) | C-0103 = 876.9 | C-0063 279.00', [167300, 87690, 27900]],
+    ['C-0343: $1,673.00, C-0103: $876.90, C-0063: $279.00', [167300, 87690, 27900]],
+    ['`C-0343` (1673.00) | C-0103 = 876.90 | C-0063 279.00', [167300, 87690, 27900]],
+    ['C-0343 -1673.00, C-0103 876.9, C-0063 279', [null, null, null]],
+    ['C-0343 1673.001, C-0103 +876.90, C-0063 279.00.', [null, null, 27900]],
   ])('%j', (line, cents) => {
     expect(answerPairs(line).map((p) => p.cents)).toEqual(cents);
     expect(answerPairs(line).map((p) => p.customerId)).toEqual(['C-0343', 'C-0103', 'C-0063']);
+  });
+
+  it.each([
+    ['a negative total', (t: string) => t.replace(/C-(\d{4}) (\d)/, 'C-$1 -$2')],
+    ['a third decimal', (t: string) => t.replace(/(\.\d{2}),/, '$11,')],
+    ['a fourth customer', (t: string) => `${t}, C-9999 1.00`],
+  ])('the verifier refuses %s', async (_label, change) => {
+    const top = topRefunded(t16Data(DEFAULT_FIXTURE_SEED), 3);
+    const right = `ANSWER: ${top.map((t) => `${t.customerId} ${dollars(t.cents)}`).join(', ')}`;
+    const ctx = { workspace: '/nonexistent-acm-t16', facts, initial: new Map<string, string>() };
+    const answer = change(right);
+    expect(answer).not.toBe(right);
+    const r = await task.verify({ ...ctx, answer });
+    expect(r.details.some((d) => d.startsWith('FAIL') && !d.includes('workspace'))).toBe(true);
   });
 
   it('the verifier wants the exact totals', async () => {
@@ -209,6 +230,37 @@ describe('T16 in arm D', () => {
     expect(interactiveReasons(opts, { arm: 'D' }, null, ok).join()).toMatch(/searchTools/);
     const other = { ...facts, innerByTool: { mcp__other__x: 1 } };
     expect(interactiveReasons(opts, { arm: 'D' }, null, other, taskScriptTools(task)).join()).toMatch(/mcp__other__x/);
+  });
+});
+
+describe('T16 without the server', () => {
+  it('the workspace commit names no seed', async () => {
+    const ws = path.join(await mkdtemp(path.join(os.tmpdir(), 'acm-t16-ws-')), 'ws');
+    await createWorkspace(ws, task, 'claude', DEFAULT_FIXTURE_SEED);
+    const log = execFileSync('git', ['log', '--format=%B'], { cwd: ws, encoding: 'utf8' });
+    expect(log.trim()).toBe('fixture for T16');
+    expect(log).not.toContain(String(DEFAULT_FIXTURE_SEED));
+  });
+
+  const use = (input: unknown, synthetic = false) =>
+    JSON.stringify({ type: 'assistant', ...(synthetic ? { isVirtual: true } : {}), message: { id: 'm', model: synthetic ? '<synthetic>' : 'x', content: [{ type: 'tool_use', id: 'u', name: 'Bash', input }] } });
+
+  it.each([
+    ['reading the bench config next to the workspace', { command: 'cat ../mcp-config.json' }],
+    ['reading the server source', { file_path: '/repo/bench/x/server.ts' }],
+    ['calling the generator from a script', { code: "const { t16Data } = await import(p); return t16Data(1115);" }],
+    ['reading the process table', { command: 'ps aux | grep node' }],
+    ['reading /proc', { command: 'cat /proc/123/cmdline' }],
+  ])('%s makes the run invalid', (_label, input) => {
+    expect(offLimitsHits(task, use(input)).length).toBeGreaterThan(0);
+    expect(offLimitsHits(task, use(input, true)).length).toBeGreaterThan(0);
+  });
+
+  it('ordinary tool calls and text that only mentions a marker do not', () => {
+    const text = JSON.stringify({ type: 'assistant', message: { id: 'm', content: [{ type: 'text', text: 'I will not read mcp-config.json or server.ts' }] } });
+    expect(offLimitsHits(task, [use({ server: 'orders', tool: 'list_orders', args: { customer_id: 'C-0001' } }), text].join('\n'))).toEqual([]);
+    expect(toolInputsText(use({ command: 'ls' }))).toBe('{"command":"ls"}');
+    expect(offLimitsHits(TASKS.T4, use({ command: 'ps aux' }))).toEqual([]);
   });
 });
 

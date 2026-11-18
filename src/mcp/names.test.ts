@@ -86,6 +86,37 @@ describe('buildCatalog', () => {
     expect(catalog.tools[0]?.inputShape.length).toBeLessThanOrEqual(400);
   });
 
+  it('two servers with the same schema $id each validate against their own schema', () => {
+    const tool = (required: string) => ({ name: 'check', inputSchema: { type: 'object' }, outputSchema: { $id: 'shared', type: 'object', required: [required] } });
+    const catalog = buildCatalog([{ server: 'first', tools: [tool('first')], truncated: false }, { server: 'second', tools: [tool('second')], truncated: false }], []);
+    const second = catalog.lookup('second', 'check')?.checkOutput;
+    expect(second?.({ second: true })).toBeUndefined();
+    expect(second?.({ first: true })).toMatch(/second/);
+    expect(catalog.lookup('first', 'check')?.checkOutput?.({ first: true })).toBeUndefined();
+  });
+
+  it('an outputSchema with a `__proto__` key leaves the tool out', () => {
+    const problems: string[] = [];
+    const raw: unknown = JSON.parse('{"name":"t","inputSchema":{"type":"object"},"outputSchema":{"type":"object","properties":{"__proto__":{"type":"string"}}}}');
+    const catalog = buildCatalog([{ server: 'srv', tools: [raw, { name: 'ok', inputSchema: { type: 'object' } }], truncated: false }], problems);
+    expect(catalog.tools.map((t) => t.tool)).toEqual(['ok']);
+    expect(problems.join()).toContain('__proto__');
+  });
+
+  it('a recursive outputSchema makes a call invalid, never throws', () => {
+    const catalog = buildCatalog([{ server: 'srv', tools: [{ name: 'loop', inputSchema: { type: 'object' }, outputSchema: { $id: 'loop', type: 'object', allOf: [{ $ref: 'loop' }] } }], truncated: false }], []);
+    const check = catalog.lookup('srv', 'loop')?.checkOutput;
+    expect(() => check?.({ a: 1 })).not.toThrow();
+    expect(check?.({ a: 1 })).toMatch(/could not be checked/);
+  });
+
+  it('an invalid entry still counts for duplicates', () => {
+    const problems: string[] = [];
+    const catalog = buildCatalog([{ server: 'srv', tools: [{ name: 'valid', inputSchema: { type: 'object' } }, { name: 'valid', description: 12 }], truncated: false }], problems);
+    expect(catalog.lookup('srv', 'valid')).toBeUndefined();
+    expect(problems.join()).toContain('names more than one tool');
+  });
+
   it('reports a server whose list was cut', () => {
     const problems: string[] = [];
     buildCatalog([{ server: 'srv', tools: [tool('ok')], truncated: true }], problems);

@@ -12,6 +12,8 @@
  * - `bad-list`: a `tools/list` answer with an entry that is not a tool.
  * - `many`: more tools than the catalog keeps.
  * - `dup-past-cap`: 501 tools in one page, the first and the last with the same name.
+ * - `dup-far`: `valid`, 10,500 other names, then `valid` again, in one page.
+ * - `bad-ref`: `valid`, and `broken` whose outputSchema points to an external reference.
  * - `schema-pages`: two pages, one tool each, both with an outputSchema their results do not match.
  * - `never-init`: never answers `initialize`.
  * - `garbage`: prints lines that are not JSON-RPC and never answers.
@@ -145,6 +147,12 @@ function listTools(id: Json, cursor: string | undefined): void {
       return;
     case 'dup-past-cap':
       send({ id, result: { tools: [{ name: 'dup', inputSchema: obj }, ...Array.from({ length: 499 }, (_, i) => ({ name: `t${i}`, inputSchema: obj })), { name: 'dup', inputSchema: obj }] } });
+      return;
+    case 'dup-far':
+      send({ id, result: { tools: [{ name: 'valid', inputSchema: obj }, ...Array.from({ length: 10_500 }, (_, i) => ({ name: `tool${i}`, inputSchema: obj })), { name: 'valid', inputSchema: obj }] } });
+      return;
+    case 'bad-ref':
+      send({ id, result: { tools: [{ name: 'valid', inputSchema: obj }, { name: 'broken', inputSchema: obj, outputSchema: { $ref: 'https://example.invalid/schema.json' } }] } });
       return;
     case 'schema-pages': {
       const page = cursor === undefined ? 1 : 2;

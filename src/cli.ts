@@ -8,7 +8,7 @@ import type { HostKind } from './core/types.js';
 import { runContextHook } from './hosts/claude/context-hook.js';
 import { managedSettingsDir } from './hosts/claude/settings.js';
 import { applyPlan, parseInstallArgs, planDiff, planInstall } from './install.js';
-import { parseMcpConfigFlag, startMcpUpstreams, upstreamLifecycle } from './mcp/start.js';
+import { parseMcpConfigFlag, processExitHooks, startMcpUpstreams, upstreamLifecycle } from './mcp/start.js';
 import type { McpUpstream } from './mcp/upstream.js';
 import { detectHost } from './server/context.js';
 import { createMcpServer } from './server/mcp.js';
@@ -96,9 +96,10 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 2;
       }
       let upstream: McpUpstream | undefined;
+      let lifecycle: ReturnType<typeof upstreamLifecycle> | undefined;
       if (mcpConfig !== undefined) {
         // Installed before any upstream starts: a signal or EOF during the start must not leave one running.
-        const lifecycle = upstreamLifecycle({ stdin: process.stdin, onSignal: (signal, handler) => process.once(signal, handler), exit: (code) => process.exit(code) });
+        lifecycle = upstreamLifecycle(processExitHooks(process));
         const started = await startMcpUpstreams({
           signal: lifecycle.signal,
           configFile: path.resolve(mcpConfig),
@@ -109,6 +110,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           clientVersion: readVersion(),
         });
         if (!started.ok) {
+          lifecycle.release();
           process.stderr.write(`agent-code-mode: ${started.message}\n`);
           return 2;
         }
@@ -131,6 +133,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       const server = createMcpServer({ version: readVersion(), hybrid, ...(servedHost ? { host: servedHost } : {}), ...(upstream ? { mcp: upstream } : {}) });
       try {
         await server.connect(new StdioServerTransport());
+        // stdin was paused when the upstreams were handed over; the transport now listens.
+        lifecycle?.resumeInput();
       } catch (err) {
         // A start that fails after the upstream servers started must not leave them running.
         await upstream?.close();

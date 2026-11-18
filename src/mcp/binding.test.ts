@@ -51,17 +51,29 @@ describe('shapeResult', () => {
           { type: 'image', data: 'AAAA', mimeType: 'image/png' },
           { type: 'resource', resource: { uri: 'file:///a', text: 'res text' } },
           { type: 'resource_link', uri: 'file:///b', name: 'b' },
-          { type: 'weird' },
+          { type: 'resource', resource: { uri: 'file:///c', blob: 'AAAA', mimeType: 'application/pdf' } },
         ],
       },
       1_000,
       undefined,
       't',
     );
-    expect(r).toEqual({ isError: true, text: 'one\n[image content omitted (image/png)]\nres text\n[resource link file:///b]\n[weird content omitted]' });
+    expect(r).toEqual({ isError: true, text: 'one\n[image content omitted (image/png)]\nres text\n[resource link file:///b]\n[resource file:///c (application/pdf): binary content omitted]' });
   });
 
-  it.each([[{ content: 'nope' }], [null], ['text'], [{ isError: 'yes' }], [{ structuredContent: [1] }]])('throws on an invalid result %j', (raw) => {
+  it.each([
+    [{ content: 'nope' }],
+    [null],
+    ['text'],
+    [{ isError: 'yes' }],
+    [{ structuredContent: [1] }],
+    [{ content: [null] }],
+    [{ content: [{ type: 'text', text: 12 }] }],
+    [{ content: [{ type: 'invented' }] }],
+    [{ content: [{ type: 'image', mimeType: 'image/png' }] }],
+    [{ content: [{ type: 'resource_link', uri: 'file:///b' }] }],
+    [{ content: [{ type: 'resource', resource: { uri: 'file:///a' } }] }],
+  ])('throws on an invalid result %j', (raw) => {
     expect(() => shapeResult(raw, 1_000, undefined, 't')).toThrow(ToolError);
   });
 
