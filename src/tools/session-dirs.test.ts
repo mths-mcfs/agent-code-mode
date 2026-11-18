@@ -95,11 +95,17 @@ describe('Jail with a scratch root', () => {
     expect(() => jail.assertWritable(path.join(scratch, '.git', 'config'))).toThrow('.git');
   });
 
-  it('a recorded path is taken as it is, spaces at its end included', async () => {
+  it.skipIf(process.platform === 'win32')('a recorded path is taken as it is, spaces at its end included', async () => {
     const cwd = stateDir();
     mkdirSync(path.join(cwd, 'space '));
     const jail = await Jail.create({ cwd, roots: [], protectedPaths: [] });
     expect(await jail.resolveRecorded(path.join(cwd, 'space '))).toBe(path.join(cwd, 'space '));
+  });
+
+  it('with the Windows checks, a recorded path that ends in a space is refused', async () => {
+    const cwd = stateDir();
+    const jail = await Jail.create({ cwd, roots: [], protectedPaths: [], windowsChecks: true });
+    await expect(jail.resolveRecorded(path.join(cwd, 'space '))).rejects.toMatchObject({ code: 'outside-workspace' });
   });
 });
 
