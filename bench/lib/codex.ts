@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
+import { contextOf } from './claude.ts';
 import { runInnerCalls } from './run-result.ts';
 
 /**
@@ -291,14 +292,19 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
   let turns: number | null = null;
   let calls = jsonCalls;
   let denials: string[] | null = runInnerSeen ? [...runDenials] : null;
+  let context: ParsedRun['context'] = null;
   if (requests !== null && requests.trim() !== '') {
     turns = 0;
+    const prompts: number[] = [];
     calls = { native: 0, run: 0, codeMode: 0, other: 0, byName: {} };
     denials = [...runDenials];
     requests.split('\n').forEach((line, i) => {
       if (line.trim() === '') return;
       const value = parseJson(line);
-      if (RequestLine.safeParse(value).success) {
+      const request = RequestLine.safeParse(value);
+      if (request.success) {
+        // OpenAI input tokens include the cached ones: the whole prompt of the request.
+        prompts.push(request.data.usage.input_tokens);
         turns = (turns ?? 0) + 1;
         evidence['requests']?.push(i + 1);
         return;
@@ -317,6 +323,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
         evidence['calls']?.push(i + 1);
       }
     });
+    context = contextOf(prompts);
   }
 
   // With code mode off, command/file items in the --json stream are calls the model made itself
@@ -350,6 +357,9 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     denials,
     hostError,
     evidence,
+    context,
+    // Set by the runner, which knows the task's MCP server.
+    mcpCalls: null,
   };
 }
 

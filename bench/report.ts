@@ -37,6 +37,12 @@ export interface GroupSummary {
   readonly cacheReadTokens: Spread | null;
   readonly costUsd: Spread | null;
   readonly wallMs: Spread | null;
+  /** Largest prompt of a run (uncached input + cache read + cache write of one request), and its last request's prompt. */
+  readonly contextPeak: Spread | null;
+  readonly contextLast: Spread | null;
+  /** Calls to the task's MCP tools made directly and from scripts (null for tasks without an MCP server). */
+  readonly mcpDirect: Spread | null;
+  readonly mcpScript: Spread | null;
   /** Run ids behind the numbers, so each one traces to its record and transcript. */
   readonly runIds: readonly string[];
 }
@@ -156,6 +162,10 @@ export function summarize(all: readonly RunRecord[]): GroupSummary[] {
       cacheReadTokens: nums((r) => r.parsed?.usage?.cacheRead),
       costUsd: nums((r) => r.costUsd),
       wallMs: nums((r) => r.wallMs),
+      contextPeak: nums((r) => r.parsed?.context?.peak),
+      contextLast: nums((r) => r.parsed?.context?.last),
+      mcpDirect: nums((r) => r.parsed?.mcpCalls?.direct),
+      mcpScript: nums((r) => r.parsed?.mcpCalls?.script),
       runIds: runs.map((r) => r.id).sort(),
     });
   }
@@ -289,11 +299,13 @@ export function markdownTable(summary: Summary): string {
     lines.push('> Some host/task/arm rows appear more than once: those runs used different configs (see Config) and are reported separately, never pooled.', '');
   }
   lines.push('Requests are model requests counted from usage events; num_turns is the host counter (Claude counts tool-use rounds, so parallel tool calls inflate it). pass^n: every valid run of the cell passed. Cost/solved: cost of all valid runs, failed ones included, over the passing runs.', '');
-  lines.push('| Host | Task | Arm | Config | Pass@1 | Pass^n | Requests | num_turns | Input | Output | Cache write | Cache read | Cost | Cost/solved | Wall | Fallback | Valid/runs |');
-  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  lines.push('Peak ctx: the largest prompt of a run (uncached input + cache read + cache write of one request); Last ctx: the prompt of its last request. MCP direct/script: calls to the task\'s MCP tools made as tool calls / from inside scripts.', '');
+  lines.push('| Host | Task | Arm | Config | Pass@1 | Pass^n | Requests | num_turns | Input | Output | Cache write | Cache read | Cost | Cost/solved | Wall | Peak ctx | Last ctx | MCP direct/script | Fallback | Valid/runs |');
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const g of summary.groups) {
+    const mcp = g.mcpDirect === null && g.mcpScript === null ? '–' : `${fmt(g.mcpDirect, int)} / ${fmt(g.mcpScript, int)}`;
     lines.push(
-      `| ${g.host} | ${g.task} | ${g.arm} ${g.armLabel} | ${g.configHash} | ${pct(g.passRate)} | ${pct(g.passAll)} | ${fmt(g.requests, int)} | ${fmt(g.turns, int)} | ${fmt(g.inputTokens, int)} | ${fmt(g.outputTokens, int)} | ${fmt(g.cacheCreationTokens, int)} | ${fmt(g.cacheReadTokens, int)} | ${fmt(g.costUsd, usd)} | ${usdOrDash(g.costPerSolvedUsd)} | ${fmt(g.wallMs, secs)} | ${pct(g.fallbackRate)} | ${g.validRuns}/${g.runs} |`,
+      `| ${g.host} | ${g.task} | ${g.arm} ${g.armLabel} | ${g.configHash} | ${pct(g.passRate)} | ${pct(g.passAll)} | ${fmt(g.requests, int)} | ${fmt(g.turns, int)} | ${fmt(g.inputTokens, int)} | ${fmt(g.outputTokens, int)} | ${fmt(g.cacheCreationTokens, int)} | ${fmt(g.cacheReadTokens, int)} | ${fmt(g.costUsd, usd)} | ${usdOrDash(g.costPerSolvedUsd)} | ${fmt(g.wallMs, secs)} | ${fmt(g.contextPeak, int)} | ${fmt(g.contextLast, int)} | ${mcp} | ${pct(g.fallbackRate)} | ${g.validRuns}/${g.runs} |`,
     );
   }
   if (summary.arms.length > 0) {

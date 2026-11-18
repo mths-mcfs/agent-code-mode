@@ -109,6 +109,18 @@ export const ParsedRunSchema = z.object({
   hostError: z.string().nullable(),
   /** Where the numbers came from: transcript line numbers (1-based) of the source events. */
   evidence: z.record(z.string(), z.array(z.number().int().positive())),
+  /**
+   * Prompt size of the model requests in tokens (uncached input + cache read + cache write; Codex: input
+   * tokens, which include the cached ones): `peak` the largest request, `last` the final one. Null when
+   * the transcript does not show it per request.
+   */
+  context: z.object({ peak: z.number().int().nonnegative(), last: z.number().int().nonnegative() }).nullable().default(null),
+  /**
+   * Calls to a task's MCP server tools (`mcp__<server>__<tool>`, agent-code-mode's own `run` excluded):
+   * `direct` made by the model as tool calls, `script` made from inside scripts (agent-code-mode `mcpCall`,
+   * Claude Code Mode REPL). Null for tasks without an MCP server.
+   */
+  mcpCalls: z.object({ direct: z.number().int().nonnegative(), script: z.number().int().nonnegative() }).nullable().default(null),
 });
 export type ParsedRun = z.infer<typeof ParsedRunSchema>;
 
@@ -160,9 +172,15 @@ export interface ArmCheck {
   readonly reasons: readonly string[];
 }
 
-/** Checks that observed tool usage matches the arm. */
-export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls): ArmCheck {
+/**
+ * Checks that observed tool usage matches the arm. `taskTools` are the direct tool names of the task's MCP
+ * server: calls to them are part of the task, not calls outside the arm's surface (whether an arm may
+ * make them is `checkMcpCalls`).
+ */
+export function checkArm(host: 'claude' | 'codex', arm: ArmId, observed: ToolCalls, taskTools: readonly string[] = []): ArmCheck {
   const reasons: string[] = [];
+  const taskCalls = taskTools.reduce((n, t) => n + (observed.byName[t] ?? 0), 0);
+  const calls: ToolCalls = { ...observed, other: Math.max(0, observed.other - taskCalls) };
   const total = calls.native + calls.run + calls.codeMode + calls.other;
   if (isHybridArm(host, arm)) {
     // The model picks per call: native only, run only and any mix are all the arm as labeled.
@@ -196,6 +214,30 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
   return { fallback: false, reasons };
 }
 
+
+/** Calls to a task's MCP tools: made directly by the model, and made from inside scripts. */
+export function mcpCallCounts(parsed: Pick<ParsedRun, 'toolCalls' | 'innerCalls'>, server: string): { direct: number; script: number } {
+  const prefix = `mcp__${server}__`;
+  const sum = (counts: Readonly<Record<string, number>>): number => Object.entries(counts).reduce((n, [tool, k]) => n + (tool.startsWith(prefix) ? k : 0), 0);
+  return { direct: sum(parsed.toolCalls.byName), script: parsed.innerCalls === null ? 0 : sum(parsed.innerCalls.byTool) };
+}
+
+/**
+ * Whether an arm reached a task's MCP server the way its label says: A directly, B only from `run`
+ * scripts (`mcpCall`), C any mix (both are counted), D only from REPL scripts.
+ */
+export function checkMcpCalls(arm: ArmId, counts: { direct: number; script: number }): string[] {
+  switch (arm) {
+    case 'A':
+      return counts.direct === 0 ? ['native arm made no direct MCP tool call'] : counts.script > 0 ? [`native arm made ${counts.script} MCP call(s) from scripts`] : [];
+    case 'B':
+      return [...(counts.script === 0 ? ['agent-code-mode arm made no mcpCall from a run script'] : []), ...(counts.direct > 0 ? [`strict agent-code-mode arm made ${counts.direct} direct MCP tool call(s)`] : [])];
+    case 'C':
+      return counts.direct + counts.script === 0 ? ['hybrid arm made no MCP call, direct or from a script'] : [];
+    case 'D':
+      return [...(counts.script === 0 ? ['Code Mode arm made no MCP call from a REPL script'] : []), ...(counts.direct > 0 ? [`Code Mode arm made ${counts.direct} direct MCP tool call(s)`] : [])];
+  }
+}
 
 /** The exact tool set each Claude arm must see in its `system/init` event. */
 export const CLAUDE_ARM_SURFACE: Readonly<Record<ArmId, readonly string[]>> = {
@@ -233,10 +275,10 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
  * surface that differs between arms shows up here before any tool call). Codex names come from
  * `codexToolSurface`: `namespace.name` for direct tools, `exec.name` for tools nested in code mode.
  */
-export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readonly string[]): string[] {
+export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readonly string[], taskTools: readonly string[] = []): string[] {
   const reasons: string[] = [];
   if (host === 'claude') {
-    const expected = CLAUDE_ARM_SURFACE[arm];
+    const expected = [...CLAUDE_ARM_SURFACE[arm], ...taskTools];
     const seen = tools.filter((t) => !CLAUDE_INTERACTIVE_HARNESS_TOOLS.includes(t));
     if (!sameSet(seen, expected)) reasons.push(`Claude arm ${arm} tools are [${[...tools].sort().join(', ')}], expected exactly [${[...expected].sort().join(', ')}]`);
     return reasons;

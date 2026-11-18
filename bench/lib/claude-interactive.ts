@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CLAUDE_INNER_ALLOWED, CLAUDE_NATIVE_TOOLS, CLAUDE_RUN_TOOL, claudeUsage, DENIAL_TEXT } from './claude.ts';
+import { CLAUDE_INNER_ALLOWED, CLAUDE_NATIVE_TOOLS, CLAUDE_RUN_TOOL, claudeUsage, contextOf, DENIAL_TEXT } from './claude.ts';
 import type { ParsedRun, ToolCalls, Usage } from './record.ts';
 
 /**
@@ -510,6 +510,12 @@ export function parseClaudeInteractiveTranscript(text: string): InteractiveParse
     hostContext: { agents: [...s.agents], plugins: [], memory: s.memory },
     hostError: s.interrupted ? 'turn interrupted' : finished ? null : 'turn did not finish',
     evidence: s.evidence,
+    context: contextOf(s.requestOrder.flatMap((id) => {
+      const u = s.requests.get(id)?.usage;
+      return u === undefined ? [] : [u.input + u.cacheRead + u.cacheCreation];
+    })),
+    // Set by the runner, which knows the task's MCP server.
+    mcpCalls: null,
   };
   return {
     parsed,
