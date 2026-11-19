@@ -67,6 +67,13 @@ describe('MemoryToolRuntime', () => {
     expect(tools.read(file)).toBe('hello');
   });
 
+  it('resolves a local POSIX root and file with redundant leading slashes', async () => {
+    const root = '///ws';
+    const tools = new MemoryToolRuntime({ root, files: { 'note.txt': 'hello' } });
+    const read = await prepare(tools, 'read', { path: `${root}/note.txt` }, makeContext(root));
+    expect(await tools.commit(read, new AbortController().signal)).toMatchObject({ content: 'hello' });
+  });
+
   it('allows two overlapping writes to roll back in reverse order', async () => {
     const tools = new MemoryToolRuntime({ root: '/ws', files: { 'notes.txt': 'original' } });
     const outer = tools.beginTransaction();
@@ -81,8 +88,10 @@ describe('MemoryToolRuntime', () => {
 
   it('searches off the main thread, stops at the first extra match and can be stopped', async () => {
     const atRoot = new MemoryToolRuntime({ files: { '/a.txt': 'one' } });
-    expect(await atRoot.commit(await prepare(atRoot, 'glob', { pattern: '*.txt' }, makeContext('/')), new AbortController().signal)).toEqual({ files: ['/a.txt'], truncated: false });
+    expect(await atRoot.commit(await prepare(atRoot, 'glob', { pattern: '*.txt', maxResults: 1 }, makeContext('/')), new AbortController().signal)).toEqual({ files: ['/a.txt'], truncated: false });
     const tools = new MemoryToolRuntime({ root: '/ws', files: { 'a.txt': 'one\ntwo\none', 'src/b.ts': 'one', 'src/c.md': 'one' } });
+    const listed = await tools.commit(await prepare(tools, 'glob', { pattern: '**', maxResults: 1 }), new AbortController().signal);
+    expect(listed).toEqual({ files: ['/ws/a.txt'], truncated: true });
     const found = await tools.commit(await prepare(tools, 'grep', { pattern: 'o.e', glob: '*.ts' }), new AbortController().signal);
     expect(found).toEqual({ matches: [{ file: '/ws/src/b.ts', line: 1, text: 'one' }], truncated: false });
     const capped = await tools.commit(await prepare(tools, 'grep', { pattern: 'ONE', ignoreCase: true, maxResults: 1 }), new AbortController().signal);
@@ -90,7 +99,7 @@ describe('MemoryToolRuntime', () => {
 
     const controller = new AbortController();
     const pending = tools.commit(await prepare(tools, 'grep', { pattern: 'one' }), controller.signal);
-    controller.abort();
+    queueMicrotask(() => controller.abort());
     await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
 
@@ -150,6 +159,10 @@ describe('MemoryToolRuntime', () => {
       await expect(prepare(tools, 'edit', { path: 'many.txt', oldString: 'a', newString: 'b', replaceAll: true })).rejects.toMatchObject({
         code: 'invalid-args',
         message: expect.stringContaining(`more than ${MAX_EDIT_REPLACEMENTS}`),
+      });
+      await expect(prepare(tools, 'edit', { path: 'many.txt', oldString: 'a', newString: 'b' })).rejects.toMatchObject({
+        code: 'invalid-args',
+        message: expect.stringContaining('split the edit'),
       });
       await expect(prepare(tools, 'edit', { path: 'long.txt', oldString: 'head', newString: 'y' })).rejects.toMatchObject({
         code: 'invalid-args',
