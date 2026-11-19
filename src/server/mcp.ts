@@ -118,10 +118,10 @@ export function createMcpServer(opts: McpServerOptions): Server {
 
   const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
 
-  const listRoots = async (): Promise<string[]> => {
+  const listRoots = async (signal: AbortSignal): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
     try {
-      const result = await server.listRoots(undefined, { timeout: opts.rootsTimeoutMs ?? 5_000 });
+      const result = await server.listRoots(undefined, { timeout: opts.rootsTimeoutMs ?? 5_000, signal });
       return rootPaths(result.roots);
     } catch {
       return [];
@@ -139,7 +139,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
       const meta: unknown = request.params._meta;
       const host = detectHost({ flag: opts.host, env, meta });
       const runtime = runtimeFor(host);
-      const roots = await listRoots();
+      const roots = await listRoots(extra.signal);
+      if (extra.signal.aborted) return respond(errorResult('the run was cancelled before context resolution'));
       const ctx = await runtime.contextProvider.resolve({ env, meta, roots, serverCwd });
       const recoveryWarnings = await recoverFor(ctx);
       const ran = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
