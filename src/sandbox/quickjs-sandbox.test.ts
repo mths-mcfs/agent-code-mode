@@ -202,9 +202,12 @@ describe('QuickJsSandbox: script semantics', () => {
     expect(logs.map((l) => l.text)).toEqual(['[ 1, [Getter/Setter] ]', 'a\u0000b']);
   });
 
-  it('keeps a concrete script error when the WASM memory starts close to its maximum, and reports oom below it', async () => {
+  it('keeps a script error when the WASM memory starts close to its maximum, and reports oom below it', async () => {
     const thrown = failure((await run('throw new Error("boom");', { memoryBytes: 17 * 1024 * 1024 })).outcome);
     expect(thrown).toMatchObject({ kind: 'error', error: { name: 'Error', message: 'boom' } });
+    for (const empty of ['null', 'undefined']) {
+      expect(failure((await run(`throw ${empty};`, { memoryBytes: 17 * 1024 * 1024 })).outcome)).toMatchObject({ kind: 'error', error: { message: `Uncaught ${empty}` } });
+    }
     const small = failure((await run('return 1;', { memoryBytes: 1024 * 1024 })).outcome);
     expect(small).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: expect.stringContaining('below') } });
   });

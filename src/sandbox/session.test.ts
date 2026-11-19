@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
 import type { ParentMessage, SandboxLimits } from './protocol.js';
 import { ChildSession } from './session.js';
@@ -113,11 +113,16 @@ describe('ChildSession: hostile child messages', () => {
     expect(await killed(t.session)).toContain('invalid message');
   });
 
-  it('ends the run once the child sent more bytes than the run budget, before decoding them', async () => {
-    const t = setup(() => new Promise<CallReply>(() => undefined), 300);
-    for (let id = 1; id <= 3; id++) t.line({ type: 'call', id, tool: 'read', args: JSON.stringify({ path: 'p'.repeat(60) }) });
-    expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'oom', error: { name: 'OutputLimit' } });
-    expect(t.calls).toHaveLength(2);
+  it('ends at the input budget and forwards the same complete frames regardless of chunking', async () => {
+    const frame = (id: number) => Buffer.from(`${JSON.stringify({ type: 'call', id, tool: 'read', args: '{"path":"sample.txt"}' })}\n`);
+    const first = frame(1);
+    const second = frame(2);
+    for (const chunks of [[first, second], [Buffer.concat([first, second])]]) {
+      const t = setup(undefined, first.length + 1);
+      for (const chunk of chunks) t.session.feed(chunk);
+      expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'oom', error: { name: 'OutputLimit' } });
+      expect(t.calls).toEqual([{ tool: 'read', args: { path: 'sample.txt' } }]);
+    }
   });
 
   it('handles no frame once the deadline has passed', async () => {
@@ -125,6 +130,34 @@ describe('ChildSession: hostile child messages', () => {
     t.line({ type: 'log', level: 'log', text: 'late' });
     expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'timeout', error: { name: 'Timeout' } });
     expect(t.logs).toEqual([]);
+  });
+
+  it('times out instead of forwarding, settling or replying once the deadline passes after the frame check', async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now++);
+    try {
+      for (const message of [
+        { type: 'call', id: 1, tool: 'read', args: '{"path":"sample.txt"}' },
+        { type: 'log', level: 'log', text: 'late' },
+        { type: 'done', outcome: { ok: true, value: '1' } },
+      ]) {
+        now = 0;
+        const t = setup(undefined, 100_000, 1);
+        t.line(message);
+        expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'timeout' });
+        expect([t.calls, t.logs]).toEqual([[], []]);
+      }
+      now = 0;
+      let answer!: (reply: CallReply) => void;
+      const t = setup(() => new Promise<CallReply>((resolve) => (answer = resolve)), 100_000, 2);
+      t.line({ type: 'call', id: 1, tool: 'read', args: '{"path":"sample.txt"}' });
+      expect(t.calls).toHaveLength(1);
+      answer({ ok: true, value: { files: [], truncated: false } });
+      expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'timeout' });
+      expect(t.sent).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('kills on a line that is not valid UTF-8 and on an empty line', async () => {

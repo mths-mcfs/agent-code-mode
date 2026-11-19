@@ -11,6 +11,8 @@ export interface BoundedWriterOptions {
   readonly maxPendingBytes: number;
   /** Most bytes written over the writer's lifetime. */
   readonly maxTotalBytes: number;
+  /** Stops writing and discards queued lines when the owning run expires. */
+  readonly expired?: () => boolean;
   /** Called once when a limit would be exceeded; nothing is written after it. */
   readonly onOverflow: (message: string) => void;
 }
@@ -44,12 +46,13 @@ export class BoundedWriter {
 
   /** Writes or queues `line`. Returns false when the writer is closed or a cap was hit. */
   write(line: string): boolean {
-    if (this.#closed || this.#stream.destroyed) return false;
+    if (!this.#ready()) return false;
     const bytes = Buffer.byteLength(line, 'utf8');
-    if (!this.#fits(bytes)) return false;
-    this.#totalBytes += bytes;
+    if (!this.#ready() || !this.#fits(bytes)) return false;
     // Buffers live outside the V8 heap, so pending replies do not count against the server's heap limit.
     const chunk = Buffer.from(line, 'utf8');
+    if (!this.#ready()) return false;
+    this.#totalBytes += bytes;
     if (this.#waitingForDrain || this.#queue.length > 0) {
       this.#queue.push(chunk);
       this.#queuedBytes += bytes;
@@ -61,9 +64,10 @@ export class BoundedWriter {
 
   /** Writes `value` as one JSON line, sized first so that a line over a cap is never built. */
   writeJson(value: unknown): boolean {
-    if (this.#closed || this.#stream.destroyed) return false;
+    if (!this.#ready()) return false;
     const room = Math.min(this.#options.maxTotalBytes - this.#totalBytes, this.#options.maxPendingBytes - this.pendingBytes);
-    return this.#fits(jsonBytes(value, room) + 1) && this.write(`${JSON.stringify(value)}\n`);
+    const bytes = jsonBytes(value, room) + 1;
+    return this.#ready() && this.#fits(bytes) && this.write(`${JSON.stringify(value)}\n`);
   }
 
   /** Drops queued lines; later writes are ignored. */
@@ -71,6 +75,13 @@ export class BoundedWriter {
     this.#closed = true;
     this.#queue = [];
     this.#queuedBytes = 0;
+  }
+
+  #ready(): boolean {
+    if (this.#closed || this.#stream.destroyed) return false;
+    if (!this.#options.expired?.()) return true;
+    this.close();
+    return false;
   }
 
   #fits(bytes: number): boolean {
@@ -98,7 +109,7 @@ export class BoundedWriter {
   }
 
   #flush(): void {
-    while (!this.#closed && !this.#waitingForDrain && this.#queue.length > 0 && !this.#stream.destroyed) {
+    while (!this.#waitingForDrain && this.#queue.length > 0 && this.#ready()) {
       const chunk = this.#queue.shift();
       if (chunk === undefined) break;
       this.#queuedBytes -= chunk.length;
@@ -120,12 +131,21 @@ export function jsonBytes(value: unknown, limit: number): number {
         // 0x3700 marks \b \t \n \f \r, the control characters with a two-character escape; lone surrogates become \uXXXX.
         n += pair ? 4 : c < 0x20 ? ((0x3700 >> c) & 1 ? 2 : 6) : c === 0x22 || c === 0x5c ? 2 : c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xd800 && c < 0xe000 ? 6 : 3;
       }
+    } else if (Array.isArray(v)) {
+      n += 2 + Math.max(0, v.length - 1);
+      for (let index = 0; index < v.length && n <= limit; index++) visit(v[index] ?? null);
     } else if (typeof v === 'object' && v !== null) {
-      const items = Array.isArray(v) ? v.map((item): [string | undefined, unknown] => [undefined, item ?? null]) : Object.entries(v).filter(([, item]) => item !== undefined);
-      n += 2 + Math.max(0, items.length - 1) + (Array.isArray(v) ? 0 : items.length);
-      for (const [key, item] of items) {
+      n += 2;
+      let first = true;
+      for (const key in v) {
         if (n > limit) return;
-        if (key !== undefined) visit(key);
+        if (!Object.hasOwn(v, key)) continue;
+        const item: unknown = Reflect.get(v, key);
+        if (item === undefined) continue;
+        n += first ? 1 : 2;
+        first = false;
+        visit(key);
+        if (n > limit) return;
         visit(item);
       }
     } else {

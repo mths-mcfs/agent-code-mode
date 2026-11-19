@@ -25,7 +25,7 @@ const WASM_PAGE_BYTES = 64 * 1024;
 
 /** The part of the WebAssembly API this file uses (the project's `lib` has no WebAssembly types). */
 interface WasmMemory {
-  readonly buffer: ArrayBuffer;
+  grow(deltaPages: number): number;
 }
 declare const WebAssembly: { readonly Memory: new (descriptor: { initial: number; maximum: number }) => WasmMemory };
 /** Initial memory of the WASM build (its INITIAL_MEMORY, 16 MiB). */
@@ -381,16 +381,27 @@ class VmRun {
   readonly #deadline: number;
   readonly #pending = new Map<number, QuickJSDeferredPromise>();
   readonly #timer: NodeJS.Timeout;
-  readonly #memory: WasmMemory;
-  readonly #memoryMaxBytes: number;
+  /** The last attempt to grow the WASM memory failed: the engine's allocator is out of memory. */
+  #growFailed = false;
   #nextId = 1;
   #logBytes = 0;
   #logCapped = false;
   #done = false;
 
   constructor(qjs: QuickJSWASMModule, memory: WasmMemory, start: StartMessage) {
-    this.#memory = memory;
-    this.#memoryMaxBytes = memoryPages(start.limits.memoryBytes) * WASM_PAGE_BYTES;
+    // The Emscripten glue grows the heap through `grow` and retries smaller sizes when one fails; an allocation
+    // fails only when its last attempt throws, and any later successful growth means the engine recovered.
+    const grow = memory.grow.bind(memory);
+    memory.grow = (deltaPages) => {
+      try {
+        const previous = grow(deltaPages);
+        this.#growFailed = false;
+        return previous;
+      } catch (err) {
+        this.#growFailed = true;
+        throw err;
+      }
+    };
     this.#limits = start.limits;
     this.#deadline = Date.now() + start.timeoutMs;
     this.#rt = qjs.newRuntime();
@@ -532,7 +543,7 @@ class VmRun {
       if (info.name === 'InternalError' && isOutOfMemory(info)) return this.#finish({ ok: false, kind: 'oom', error: info });
       // Out of memory can leave QuickJS unable to build an error object; the script then sees `null` thrown.
       const noError = typeof raw === 'object' && raw !== null && 'noError' in raw && raw.noError === true;
-      if (noError && this.#memoryFull()) return this.#finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
+      if (noError && this.#growFailed) return this.#finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
       this.#finish({ ok: false, kind: 'error', error: info });
     });
   }
@@ -569,7 +580,7 @@ class VmRun {
       return this.#finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: 'the script did not finish within its time limit' } });
     }
     const concrete = LooseErrorSchema.safeParse(raw).success && info.message !== '';
-    this.#finish({ ok: false, kind: isOutOfMemory(info) || (!concrete && this.#memoryFull()) ? 'oom' : 'error', error: info.message === '' ? { ...info, message: 'out of memory' } : info });
+    this.#finish({ ok: false, kind: isOutOfMemory(info) || (!concrete && this.#growFailed) ? 'oom' : 'error', error: info.message === '' ? { ...info, message: 'out of memory' } : info });
   }
 
   /** A host-side exception (e.g. a WASM trap when an allocation inside the bindings layer fails). */
@@ -579,7 +590,7 @@ class VmRun {
     if (err instanceof RangeError && /call stack/i.test(message)) {
       return this.#finish({ ok: false, kind: 'error', error: { name: 'RangeError', message: 'Maximum call stack size exceeded' } });
     }
-    const oom = this.#memoryFull() || /out of memory/i.test(message);
+    const oom = this.#growFailed || /out of memory/i.test(message);
     this.#finish({ ok: false, kind: oom ? 'oom' : 'error', error: { name: oom ? 'InternalError' : 'SandboxError', message: oom ? 'out of memory' : message.slice(0, MAX_ERROR_CHARS) } });
   }
 
@@ -587,13 +598,8 @@ class VmRun {
   #send(message: ChildMessage): void {
     const line = `${JSON.stringify(message)}\n`;
     const cap = this.#limits.maxPendingOutputBytes;
-    if (process.stdout.writableLength + Buffer.byteLength(line, 'utf8') <= cap) process.stdout.write(line);
+    if (process.stdout.writableLength + Buffer.byteLength(line, 'utf8') <= cap) process.stdout.write(Buffer.from(line, 'utf8'));
     else this.#finish({ ok: false, kind: 'oom', error: { name: 'OutputBufferFull', message: `messages the parent has not read yet exceeded ${cap} bytes` } });
-  }
-
-  /** True when the WASM memory grew to (nearly) its maximum. */
-  #memoryFull(): boolean {
-    return this.#memory.buffer.byteLength >= this.#memoryMaxBytes * 0.9;
   }
 
   /**

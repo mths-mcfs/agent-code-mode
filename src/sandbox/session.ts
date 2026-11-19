@@ -86,19 +86,18 @@ export class ChildSession {
 
   /** Feeds raw bytes from the child's stdout. */
   feed(chunk: Buffer): void {
-    // Counted before anything is buffered or decoded: calls the dispatcher has not answered yet stay bounded too.
-    this.#totalBytes += chunk.length;
-    if (this.#totalBytes > this.#maxTotalBytes) {
-      return this.finish({ ok: false, kind: 'oom', error: { name: 'OutputLimit', message: `the script sent more than ${this.#maxTotalBytes} bytes of calls and logs` } });
-    }
-    let rest = chunk;
-    while (!this.#finished) {
+    if (this.#finished) return;
+    const remaining = this.#maxTotalBytes - this.#totalBytes;
+    const overflow = chunk.length > remaining;
+    let rest = chunk.subarray(0, remaining);
+    this.#totalBytes += rest.length;
+    while (!this.#finished && rest.length > 0) {
       const nl = rest.indexOf(0x0a);
       if (nl === -1) {
         this.#chunkBytes += rest.length;
         if (this.#chunkBytes > this.#maxFrameBytes) return this.kill(`sandbox sent a message larger than ${this.#maxFrameBytes} bytes`);
-        if (rest.length > 0) this.#chunks.push(rest);
-        return;
+        if (!overflow) this.#chunks.push(rest);
+        break;
       }
       const head = rest.subarray(0, nl);
       if (this.#chunkBytes + head.length > this.#maxFrameBytes) {
@@ -116,6 +115,9 @@ export class ChildSession {
       }
       this.handleLine(text);
     }
+    if (overflow && !this.#finished) {
+      this.finish({ ok: false, kind: 'oom', error: { name: 'OutputLimit', message: `the script sent more than ${this.#maxTotalBytes} bytes of child output` } });
+    }
   }
 
   /** Handles one complete line from the child. */
@@ -130,7 +132,7 @@ export class ChildSession {
     const parsed = this.#schema.safeParse(raw);
     if (!parsed.success) return this.kill(`sandbox sent an invalid message: ${parsed.error.issues[0]?.message ?? 'unknown issue'}`);
     // Checked per frame: one stdout chunk can carry many frames that arrive after the deadline.
-    if (performance.now() >= this.#deadline) return this.timeOut();
+    if (this.expired()) return;
     this.#handle(parsed.data);
   }
 
@@ -167,6 +169,13 @@ export class ChildSession {
     this.finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: `the script did not finish within ${this.#timeoutMs} ms` } });
   }
 
+  /** Times the run out once the deadline has passed. Checked right before anything is forwarded, written or settled. */
+  expired(): boolean {
+    if (performance.now() < this.#deadline) return false;
+    this.timeOut();
+    return true;
+  }
+
   #handle(message: ChildMessage): void {
     switch (message.type) {
       case 'call':
@@ -187,6 +196,7 @@ export class ChildSession {
     } catch {
       return this.kill('sandbox sent call arguments that are not JSON');
     }
+    if (this.expired()) return;
     this.#nextCallId++;
     let pending: Promise<CallReply>;
     try {
@@ -197,7 +207,7 @@ export class ChildSession {
     pending
       .catch((err: unknown): CallReply => ({ ok: false, error: { name: 'ToolError', code: 'tool-error', message: errorMessage(err) } }))
       .then((reply) => {
-        if (this.#finished) return;
+        if (this.#finished || this.expired()) return;
         try {
           this.#hooks.send({ type: 'reply', id, reply });
         } catch (err) {
@@ -210,6 +220,7 @@ export class ChildSession {
     const bytes = Buffer.byteLength(text, 'utf8') + 1;
     if (this.#logBytes + bytes > this.#limits.maxLogBytes + LOG_SLACK_BYTES) return this.kill(`sandbox sent more than ${this.#limits.maxLogBytes} bytes of console output`);
     this.#logBytes += bytes;
+    if (this.expired()) return;
     this.#hooks.onLog(level, text);
   }
 
@@ -224,6 +235,7 @@ export class ChildSession {
     } catch {
       return this.kill('sandbox sent a return value that is not JSON');
     }
+    if (this.expired()) return;
     this.finish({ ok: true, value });
   }
 }

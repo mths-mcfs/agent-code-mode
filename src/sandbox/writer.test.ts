@@ -32,6 +32,19 @@ describe('BoundedWriter', () => {
     expect(stream.written).toEqual(['aaaaaaaaaaaa', 'b', 'c']);
   });
 
+  it('discards queued replies if the deadline passes before drain', () => {
+    const stream = new StalledStream();
+    let expired = false;
+    const writer = new BoundedWriter(stream, { maxPendingBytes: 100, maxTotalBytes: 1_000, expired: () => expired, onOverflow: () => undefined });
+    expect(writer.write('first reply\n')).toBe(true);
+    expect(writer.writeJson({ result: 'queued' })).toBe(true);
+    expired = true;
+    stream.drainAll();
+    expect(stream.written).toEqual(['first reply\n']);
+    expect(writer.pendingBytes).toBe(0);
+    expect(writer.writeJson({ result: 'late' })).toBe(false);
+  });
+
   it('calls onOverflow once and keeps memory bounded when the reader never reads', () => {
     const stream = new StalledStream();
     const overflows: string[] = [];
@@ -45,7 +58,7 @@ describe('BoundedWriter', () => {
   });
 
   it('sizes a JSON line exactly and never builds one that is over a cap', () => {
-    const value = { ok: true, value: { content: 'a"\\\n\u0001é€😀\ud800\udc00x', n: [1, null, undefined, -0.5], skip: undefined } };
+    const value = { ok: true, value: { content: 'a"\\\n\u0001é€😀\ud800\udc00x', n: [1, null, undefined, -0.5], sparse: Array<string>(2), skip: undefined } };
     expect(jsonBytes(value, Infinity)).toBe(Buffer.byteLength(JSON.stringify(value)));
     const stream = new StalledStream();
     const writer = new BoundedWriter(stream, { maxPendingBytes: 1_000, maxTotalBytes: 50, onOverflow: () => undefined });

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -85,7 +85,8 @@ export function childEnv(parentEnv: NodeJS.ProcessEnv = process.env, platform: N
 
 /** Packages the child imports; their runtime dependencies come from their package.json files. */
 const CHILD_PACKAGES = ['quickjs-emscripten-core', '@jitl/quickjs-ng-wasmfile-release-sync', 'zod'];
-const ManifestSchema = z.object({ dependencies: z.record(z.string(), z.string()).optional() });
+const packageName = z.string().regex(/^(?:@[a-z\d][a-z\d._~-]*\/)?[a-z\d][a-z\d._~-]*$/i);
+const ManifestSchema = z.object({ dependencies: z.record(packageName, z.string()).optional() });
 
 /**
  * What the child may read, with symlinks preserved: its entry directory, the directories of the packages it loads
@@ -95,8 +96,11 @@ export function readGrants(): { readonly dirs: string[]; readonly files: string[
   const dirs = new Set([here]);
   const files = new Set<string>();
   for (let dir = here; ; dir = dirname(dir)) {
-    files.add(join(dir, 'package.json'));
-    if (existsSync(join(dir, 'package.json')) || dirname(dir) === dir) break;
+    const path = join(dir, 'package.json');
+    const stat = statSync(path, { throwIfNoEntry: false });
+    if (stat && !stat.isFile()) throw new SandboxUnavailableError('Sandbox package metadata is not a regular file');
+    files.add(path);
+    if (stat || dirname(dir) === dir) break;
   }
   const visit = (from: string, name: string): void => {
     for (let dir = from; ; dir = dirname(dir)) {
@@ -108,6 +112,7 @@ export function readGrants(): { readonly dirs: string[]; readonly files: string[
         for (const dependency of Object.keys(manifest.dependencies ?? {})) visit(candidate, dependency);
         return;
       }
+      if (lstatSync(candidate, { throwIfNoEntry: false })) throw new SandboxUnavailableError(`Sandbox dependency ${name} has an unexpected lookup entry`);
       files.add(candidate);
       if (dirname(dir) === dir) return;
     }
@@ -147,6 +152,9 @@ export function childExecArgv(entry: string, heapMb: number, flags: ReadonlySet<
   if (entry.endsWith('.ts') && !('typescript' in process.features && process.features.typescript)) args.push('--experimental-strip-types');
   args.push(permission, '--preserve-symlinks', '--preserve-symlinks-main');
   const { dirs, files } = readGrants();
+  if ([...dirs, ...files].some((path) => path.includes('*'))) {
+    throw new SandboxUnavailableError('The sandbox cannot grant literal read access to a path containing an asterisk');
+  }
   // Node 22.0 to 22.12 grants a directory itself only, unless it ends with the `*` wildcard; one flag per path adds up on every version.
   const paths = [...files, ...(permission === '--permission' ? dirs : dirs.map((dir) => join(dir, '*')))];
   if (permission === '--experimental-permission' && paths.some((path) => path.includes(','))) {
@@ -223,6 +231,7 @@ export class QuickJsSandbox implements Sandbox {
     const writer = new BoundedWriter(stdin, {
       maxPendingBytes: positive(o.maxPendingReplyBytes, DEFAULTS.maxPendingReplyBytes),
       maxTotalBytes: positive(o.maxReplyBytes, DEFAULTS.maxReplyBytes),
+      expired: () => session?.expired() ?? false,
       onOverflow: (message) => session?.finish({ ok: false, kind: 'oom', error: { name: 'ReplyBufferFull', message } }),
     });
     const active = new ChildSession({
@@ -270,12 +279,11 @@ export class QuickJsSandbox implements Sandbox {
     child.on('close', (exitCode, signal) => active.exited(exitCode, signal));
 
     const timer = setTimeout(() => active.timeOut(), Math.max(0, deadline - performance.now()));
-    if (!active.finished && performance.now() >= deadline) active.timeOut();
-    if (!active.finished) {
+    if (!active.finished && !active.expired()) {
       // `start` has its own size limit; the reply quotas count only binding results.
       const start = Buffer.from(`${JSON.stringify({ type: 'start', code, timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), limits } satisfies ParentMessage)}\n`, 'utf8');
       if (start.length > MAX_START_BYTES) active.kill(`the script is larger than ${MAX_START_BYTES} bytes`);
-      else stdin.write(start);
+      else if (!active.expired()) stdin.write(start);
     }
 
     return active.outcome.finally(() => {
