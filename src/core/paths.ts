@@ -51,8 +51,13 @@ export function normalizeSeparators(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
-/** Normalizes drive-letter paths for comparison with the in-memory filesystem. */
+/**
+ * Normalizes drive-letter paths for comparison with the in-memory filesystem,
+ * and collapses redundant leading slashes of a POSIX path the way path
+ * resolution does (see `isUncPath`).
+ */
 export function normalizeDrivePath(p: string): string {
+  if (p.startsWith('///') && !isUncPath(p)) return p.replace(/^\/+/, '/');
   const normalized = normalizeSeparators(p);
   return /^[A-Za-z]:(\/|$)/.test(normalized) ? `/${normalized}` : normalized;
 }

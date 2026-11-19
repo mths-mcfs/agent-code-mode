@@ -16,6 +16,12 @@ describe('matchesPathPattern', () => {
     ['/C:/ws/project/notes.txt', 'C:\\ws\\project\\*.txt', true],
     ['/ws/a+b.txt', '/ws/a+b.txt', true],
     ['/ws/aab.txt', '/ws/a+b.txt', false],
+    ['/ws/.claude/settings.json', '///ws/.claude/settings*.json', true],
+    ['/ws/.claude/hooks/a.sh', '////ws/.claude/hooks/**', true],
+    ['///ws/.claude/hooks/a.sh', '/ws/.claude/hooks/**', true],
+    ['//ws/.claude/settings.json', '/ws/.claude/settings*.json', false],
+    ['/ws/.claude/settings.json', '//ws/.claude/settings*.json', false],
+    ['/ws/.claude/settings.json', '///ws\\.claude\\settings*.json', false],
   ])('%s vs %s → %s', (p, pattern, expected) => {
     expect(matchesPathPattern(p, pattern, false)).toBe(expected);
   });

@@ -206,6 +206,17 @@ describe('MemoryToolRuntime', () => {
     }
   });
 
+  it('uses one key for aliased local paths when setting, reading and deleting files', () => {
+    const tools = new MemoryToolRuntime({ root: '/ws', files: { 'note.txt': 'before' } });
+    const revision = tools.setFile('///ws/note.txt', 'after');
+    expect(tools.read('/ws/note.txt')).toBe('after');
+    expect(tools.revision('/ws/note.txt')).toBe(revision);
+    expect(tools.revision('///ws/note.txt')).toBe(revision);
+
+    tools.setFile('///ws/note.txt', null);
+    expect(tools.read('/ws/note.txt')).toBeUndefined();
+  });
+
   it('refuses network-share paths in setFile and revision', () => {
     const tools = new MemoryToolRuntime({});
     for (const file of ['\\\\server\\share\\note.txt', '//server/share/note.txt']) {
