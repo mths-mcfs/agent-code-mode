@@ -163,7 +163,7 @@ describe('Bash rules', () => {
   });
 
   it('allow rules approve only when every subcommand is approved', async () => {
-    const s = await setup({ user: { permissions: { allow: ['Bash(npm run *)', 'Bash(git status)'] } } });
+    const s = await setup({ user: { permissions: { allow: ['Bash(npm run *)', 'Bash(git status)'] } }, mode: 'default' });
     expect(check(s, bash('npm run build', s.project))).toBe('allow');
     expect(check(s, bash('npm run build && git status', s.project))).toBe('allow');
     expect(check(s, bash('timeout 30 npm run test', s.project))).toBe('allow');
@@ -232,7 +232,7 @@ describe('path rules', () => {
   });
 
   it('allow rules need both the requested and the real path to match', async () => {
-    const s = await setup({ user: { permissions: { allow: ['Read(//opt/shared/**)'] } } });
+    const s = await setup({ user: { permissions: { allow: ['Read(//opt/shared/**)'] } }, mode: 'default' });
     expect(check(s, read('/opt/shared/a'))).toBe('allow');
     expect(check(s, read('/opt/shared/link', '/etc/passwd'))).toBe('ask');
   });
@@ -263,7 +263,9 @@ describe('permission modes (no rule matches)', () => {
         grepIn: check(s, grep(s.project)),
         globIn: check(s, glob(s.project)),
       };
-      expect(got).toEqual(expected);
+      // On Windows no trusted record carries an unreadable mode: only what every mode allows runs.
+      const unknown = !posix && mode === 'not-a-mode';
+      expect(got).toEqual(unknown ? Object.fromEntries(Object.entries(expected).map(([k, v]) => [k, v === 'allow' ? v : 'deny'])) : expected);
     });
   }
 
@@ -277,7 +279,8 @@ describe('permission modes (no rule matches)', () => {
 
   it('takes the mode from the companion hook, else the CLI flag, else settings defaultMode', async () => {
     const fromFlag = await setup({ argv: ['--permission-mode', 'acceptEdits'], user: { permissions: { defaultMode: 'plan' } } });
-    expect(check(fromFlag, write(path.join(fromFlag.project, 'a.ts')))).toBe('allow');
+    // Windows has no trusted live mode, so neither the flag nor settings authorize a write there.
+    expect(check(fromFlag, write(path.join(fromFlag.project, 'a.ts')))).toBe(posix ? 'allow' : 'deny');
     const fromSettings = await setup({ user: { permissions: { defaultMode: 'plan' } } });
     expect(check(fromSettings, write(path.join(fromSettings.project, 'a.ts')))).toBe('deny');
     const fromCtx = await setup({ mode: 'bypassPermissions', argv: ['--permission-mode', 'plan'] });

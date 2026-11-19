@@ -299,6 +299,8 @@ describe('Bash allow rules keep word boundaries and exact approvals', () => {
     ['Bash(find *)', 'find . -name x -delete', 'ask'],
     ['Bash(find . -name x -delete)', 'find . -name x -delete', 'allow'],
     ['Bash(env *)', 'env A=1 make', 'ask'],
+    ['Bash(watch *)', 'watch ls', 'ask'],
+    ['Bash(find *)', 'find . -files0-from list', 'ask'],
   ])('%s with %j → %s', async (rule, command, expected) => {
     const s = await setup({ permissions: { allow: [rule] } }, 'default');
     expect(check(s, bash(command, s.project))).toBe(expected);
@@ -326,5 +328,64 @@ describe('sandbox settings the containment cannot express', () => {
     const s = await setup({ sandbox: { enabled: true, filesystem: { denyWrite: ['~/.ssh'] } } }, 'bypassPermissions');
     expect(s.adapter.checkStatic(bash('ls', s.project), s.ctx, s.policy)).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
     expect(check(s, read(path.join(s.project, 'a')))).toBe('allow');
+  });
+
+  const on = { enabled: true };
+  it.each([
+    [{ permissions: { deny: ['Read(./.env)'] }, sandbox: on }, 'deny'],
+    [{ permissions: { blockReadsOutsideWorkingDirectories: true }, sandbox: on }, 'deny'],
+    [{ permissions: { deny: ['Read(./.env)'] }, sandbox: { ...on, filesystem: { disabled: true } } }, 'allow'],
+  ])('with the sandbox on, the exclusions Claude projects into it from %j → bash %s', async (settings, expected) => {
+    const s = await setup(settings, 'bypassPermissions');
+    expect(check(s, bash('ls', s.project))).toBe(expected);
+  });
+});
+
+describe('second review round', () => {
+  it.skipIf(!posix)('protects the canonical location of a policy directory reached through a link', async () => {
+    const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'acm-regress-')));
+    const realHome = path.join(base, 'real-home');
+    await mkdir(path.join(realHome, '.claude'), { recursive: true });
+    await writeFile(path.join(realHome, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash'] } }));
+    await symlink(realHome, path.join(base, 'home'));
+    const project = path.join(base, 'project');
+    await mkdir(project);
+    const adapter = new ClaudeHostAdapter({ env: {}, home: path.join(base, 'home'), managedDir: null, stateDir: path.join(base, 'state'), readParent: async () => undefined });
+    const ctx = makeContext(project, { host: 'claude', permissionMode: 'bypassPermissions', sources: { cwd: 'roots', permissionMode: 'ctx-file' } });
+    const policy = await adapter.loadPolicy(ctx);
+    if ('error' in policy) throw new Error(policy.error);
+    expect(adapter.checkStatic(bash(`echo x > ${path.join(realHome, '.claude', 'settings.json')}`, project), ctx, policy).kind).toBe('deny');
+  });
+
+  it.skipIf(!posix)('a write through a link that does not resolve is not taken for a missing file', async () => {
+    const s = await setup({ permissions: { allow: ['Bash(echo *)'] } }, 'default');
+    await symlink(path.join(s.home, 'not-created', 'x'), path.join(s.project, 'dangling'));
+    const call = bash('echo x > dangling', s.project);
+    expect(check(s, call)).toBe('allow');
+    expect((await s.adapter.authorize(call, s.ctx, s.policy, new AbortController().signal)).kind).toBe('ask');
+  });
+
+  it('a blanket Bash allow rule keeps the working-directory boundary for redirection-only input', async () => {
+    const s = await setup({ permissions: { allow: ['Bash'] } }, 'default');
+    expect(check(s, bash(`> ${path.join(s.home, 'x').replace(/\\/g, '/')}`, s.project))).toBe('ask');
+    expect(check(s, bash('> inside.txt', s.project))).toBe('allow');
+  });
+
+  it('reading a protected file as a copy source is not a write to it', async () => {
+    const s = await setup({ permissions: { allow: ['Bash'] } }, 'bypassPermissions');
+    expect(check(s, bash('cp ~/.claude/settings.json backup.json', s.project))).toBe('allow');
+    expect(check(s, bash('mv ~/.claude/settings.json backup.json', s.project))).toBe('deny');
+  });
+
+  it.skipIf(!posix)('a malformed hook matcher with a wildcard denies instead of running', async () => {
+    const s = await setup({ hooks: { PreToolUse: [{ matcher: '**', hooks: [{ type: 'command', command: 'exit 0' }] }] } }, 'bypassPermissions');
+    expect(await s.adapter.authorize(bash('ls', s.project), s.ctx, s.policy, new AbortController().signal)).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+  });
+
+  it.skipIf(!posix)('hook failures report the outcome without the hook output', async () => {
+    const s = await setup({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo diagnostic-text >&2; exit 1' }] }] } }, 'bypassPermissions');
+    const decision = await s.adapter.authorize(bash('ls', s.project), s.ctx, s.policy, new AbortController().signal);
+    expect(decision).toMatchObject({ kind: 'deny', source: 'hook-error' });
+    expect(decision.kind === 'deny' ? decision.reason : '').not.toContain('diagnostic-text');
   });
 });

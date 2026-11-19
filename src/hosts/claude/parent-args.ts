@@ -61,13 +61,13 @@ async function linuxProcess(pid: number): Promise<{ argv: string[]; ppid: number
   }
 }
 
-function psProcess(pid: number): Promise<{ argv: string[]; ppid: number } | undefined> {
+function psProcess(pid: number): Promise<{ argv: string[]; ppid: number; joined: string } | undefined> {
   return new Promise((resolve) => {
     execFile('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { timeout: 2_000 }, (err, stdout) => {
       if (err) return resolve(undefined);
       const m = /^\s*(\d+)\s+(.*)$/s.exec(stdout.trim());
       if (!m?.[1] || m[2] === undefined) return resolve(undefined);
-      resolve({ ppid: Number(m[1]), argv: m[2].trim().split(/\s+/) });
+      resolve({ ppid: Number(m[1]), argv: m[2].trim().split(/\s+/), joined: m[2].trim() });
     });
   });
 }
@@ -77,9 +77,9 @@ export const readParentClaudeProcess: ParentArgsReader = async () => {
   if (process.platform !== 'linux' && process.platform !== 'darwin') return undefined;
   let pid = process.ppid;
   for (let i = 0; i < MAX_ANCESTORS && pid > 1; i++) {
-    const info: { argv: string[]; ppid: number; cwd?: string } | undefined = process.platform === 'linux' ? await linuxProcess(pid) : await psProcess(pid);
+    const info: { argv: string[]; ppid: number; cwd?: string; joined?: string } | undefined = process.platform === 'linux' ? await linuxProcess(pid) : await psProcess(pid);
     if (!info) return undefined;
-    if (looksLikeClaude(info.argv)) return { argv: info.argv, ...(info.cwd === undefined ? {} : { cwd: info.cwd }), ...(process.platform === 'linux' ? {} : { lossy: true }) };
+    if (looksLikeClaude(info.argv) || (info.joined !== undefined && joinedLooksLikeClaude(info.joined))) return { argv: info.argv, ...(info.cwd === undefined ? {} : { cwd: info.cwd }), ...(process.platform === 'linux' ? {} : { lossy: true }) };
     pid = info.ppid;
   }
   return undefined;
@@ -171,12 +171,31 @@ export function parseClaudeFlags(argv: readonly string[]): ClaudeCliFlags {
   };
 }
 
-/** Flags of a command line without word boundaries (macOS `ps`): grants are dropped, unreadable restrictions fail the load. */
-export function conservativeFlags(flags: ClaudeCliFlags): ClaudeCliFlags {
-  if (flags.settings.length > 0 || flags.disallowedTools.length > 0 || flags.settingSources !== undefined) {
+const RESTRICTIVE_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);
+
+/**
+ * Flags of a command line without word boundaries (macOS `ps`), scanned word by word rather than parsed: a
+ * restriction anywhere fails the load, grants are dropped, a permissive mode starts `default` and two modes fail.
+ */
+export function conservativeFlags(argv: readonly string[]): ClaudeCliFlags {
+  const words = argv.slice(1);
+  if (words.some((w) => /--(settings|disallowedTools|disallowed-tools|setting-sources)(?![A-Za-z-])/.test(w))) {
     throw new Error('--settings, --disallowedTools and --setting-sources cannot be read exactly from the Claude Code command line on this platform');
   }
-  const mode = flags.permissionMode;
-  const restrictive = mode === 'default' || mode === 'plan' || mode === 'dontAsk';
-  return { settings: [], allowedTools: [], disallowedTools: [], addDirs: [], ...(restrictive ? { permissionMode: mode } : {}) };
+  const modes: string[] = [];
+  words.forEach((w, i) => {
+    if (w === '--permission-mode') modes.push(words[i + 1] ?? '');
+    else if (w.startsWith('--permission-mode=')) modes.push(w.slice('--permission-mode='.length));
+    else if (w.includes('--permission-mode') || w.includes('--dangerously-skip-permissions')) modes.push('bypassPermissions');
+  });
+  if (new Set(modes).size > 1) throw new Error('the Claude Code permission mode cannot be read exactly from the command line on this platform');
+  const mode = modes[0];
+  const flags: ClaudeCliFlags = { settings: [], allowedTools: [], disallowedTools: [], addDirs: [] };
+  if (mode === undefined) return flags;
+  return { ...flags, permissionMode: RESTRICTIVE_MODES.has(mode) ? mode : 'default' };
+}
+
+/** A joined macOS command line that runs Claude Code (its path may contain spaces, so word splitting misses it). */
+function joinedLooksLikeClaude(command: string): boolean {
+  return /(^|\/)claude(\.exe)?(\s|$)/.test(command) || /claude-code\/\S*cli\.m?js(\s|$)/.test(command);
 }

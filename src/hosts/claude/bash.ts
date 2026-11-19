@@ -73,6 +73,8 @@ export interface Operand {
   readonly raw: string;
   /** Unquoted glob characters appear. */
   readonly glob: boolean;
+  /** A leading `~` that is quoted or escaped (a file name), or a prefix other than `~`, `~/` (`~user`, `~+`) that expands to an unknown directory. */
+  readonly tilde?: 'literal' | 'unknown';
 }
 
 /** One `rm` or `rmdir` call. */
@@ -95,34 +97,55 @@ const SHELL_OPTIONS_WITH_OPERAND = new Set(['-o', '+o', '-O', '+O', '--rcfile', 
 /** Builtins whose arguments become shell code: always uncertain. */
 const CODE_EVALUATORS = new Set(['eval', 'source', '.', 'trap', 'fc']);
 
+type Access = 'read' | 'write' | 'both';
+
 /**
- * Commands whose operands may be files they read, for Read rules. Every
- * non-option operand is treated as a possible file (a `sed` script or a `grep`
- * pattern too): matching a pattern text against path rules is harmless, and
- * missing a file is not.
+ * How a command touches the files it names. `operands` is the access of positional operands: `copy` writes
+ * the last one and reads the others, `pair` reads the first and writes the second (`uniq in out`). `files`
+ * are options whose value is a file; `values` are options whose value is not one. Any other option with a
+ * value attached (`-Xvalue`) may name a file: unknown.
  */
-const FILE_READERS = new Set([
-  'cat', 'head', 'tail', 'less', 'more', 'most', 'nl', 'tac', 'rev', 'strings', 'xxd', 'od', 'hexdump', 'base64', 'base32',
-  'sed', 'awk', 'gawk', 'mawk', 'nawk', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'zcat', 'zgrep', 'zless', 'bzcat', 'xzcat',
-  'cut', 'sort', 'uniq', 'wc', 'diff', 'cmp', 'comm', 'join', 'paste', 'column', 'fold', 'fmt', 'pr', 'expand', 'unexpand',
-  'jq', 'yq', 'xmllint', 'file', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'cksum', 'b2sum', 'iconv', 'dos2unix',
-  'vi', 'vim', 'nano', 'view', 'emacs', 'openssl', 'gpg', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'bzip2', 'xz', 'curl', 'wget', 'scp',
+interface FileSpec {
+  readonly operands: Access | 'copy' | 'pair';
+  readonly files?: Readonly<Record<string, Access>>;
+  readonly values?: readonly string[];
+}
+
+const BOTH: FileSpec = { operands: 'both' };
+const FROM_FILE: FileSpec = { operands: 'read', files: { '-f': 'read', '--file': 'read' } };
+const COPY: FileSpec = { operands: 'copy', files: { '-t': 'write', '--target-directory': 'write' } };
+
+/**
+ * Commands whose operands may be files. A non-option operand that is not a file (a `sed` script, a `grep`
+ * pattern) is checked as a path too: matching a pattern text against path rules is harmless, missing a file is not.
+ */
+const FILE_SPECS: ReadonlyMap<string, FileSpec> = new Map<string, FileSpec>([
+  ...['cat', 'head', 'tail', 'less', 'more', 'most', 'nl', 'tac', 'rev', 'strings', 'od', 'hexdump', 'base32', 'zcat', 'zless', 'bzcat', 'xzcat', 'wc', 'diff', 'cmp', 'comm', 'join', 'paste', 'column', 'fold', 'fmt', 'pr', 'expand', 'unexpand', 'file', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'cksum', 'b2sum', 'wget'].map((c) => [c, { operands: 'read' }] as const),
+  ...['grep', 'egrep', 'fgrep', 'zgrep', 'rg', 'ag', 'ack', 'sed'].map((c) => [c, FROM_FILE] as const),
+  ...['awk', 'gawk', 'mawk', 'nawk'].map((c) => [c, { ...FROM_FILE, values: ['-F'] }] as const),
+  ...['tee', 'touch', 'truncate', 'rm', 'rmdir', 'unlink', 'shred', 'mkdir', 'chmod', 'chown', 'chgrp', 'ln'].map((c) => [c, { operands: 'write' }] as const),
+  ...['dos2unix', 'zip', 'gzip', 'gunzip', 'bzip2', 'xz', 'openssl', 'yq', 'vi', 'vim', 'nano', 'view', 'emacs', 'mv'].map((c) => [c, BOTH] as const),
+  ...['cp', 'install'].map((c) => [c, COPY] as const),
+  ...['rsync', 'scp'].map((c) => [c, { operands: 'copy' }] as const),
+  ['cut', { operands: 'read', values: ['-d'] }],
+  ['sort', { operands: 'read', files: { '-o': 'write', '--output': 'write', '-T': 'write', '--temporary-directory': 'write' }, values: ['-t'] }],
+  ['uniq', { operands: 'pair', values: ['-f', '-s', '-w'] }],
+  ['xxd', { operands: 'pair', values: ['-c', '-g', '-l', '-s'] }],
+  ['iconv', { operands: 'read', files: { '-o': 'write', '--output': 'write' } }],
+  ['base64', { operands: 'read', files: { '-i': 'read', '-o': 'write' } }],
+  ['jq', { operands: 'read', files: { '-f': 'read', '--from-file': 'read' } }],
+  ['xmllint', { operands: 'read', files: { '-o': 'write', '--output': 'write' } }],
+  ['gpg', { operands: 'both', files: { '-o': 'write', '--output': 'write' } }],
+  ['tar', { operands: 'both', files: { '-f': 'both', '--file': 'both', '-C': 'both', '--directory': 'both' } }],
+  ['unzip', { operands: 'both', files: { '-d': 'write' } }],
+  ['curl', { operands: 'read', files: { '-o': 'write', '--output': 'write', '-D': 'write', '--dump-header': 'write', '-c': 'write', '--cookie-jar': 'write', '-K': 'read', '--config': 'read', '-T': 'read', '--upload-file': 'read', '-b': 'read', '--cookie': 'read' } }],
 ]);
 
-/** Commands that write (or delete) the files they name, for Edit rules. */
-const FILE_WRITERS = new Set(['tee', 'touch', 'truncate', 'rm', 'rmdir', 'unlink', 'shred', 'mkdir', 'chmod', 'chown', 'chgrp', 'ln']);
+/** `find` actions that run, write or delete, and `-files0-from`, which reads its paths from a file: only an exact allow rule approves them. */
+const FIND_ACTIONS = new Set(['-exec', '-execdir', '-ok', '-okdir', '-delete', '-rm', '-fprint', '-fprint0', '-fprintf', '-fls', '-files0-from']);
 
-/** Commands that read some operands and write others: every operand is both. */
-const FILE_COPIERS = new Set(['cp', 'mv', 'rsync', 'install', 'scp', 'dd']);
-
-/** Readers that can also write: every operand is both. The letters are short options taking a file (`-oout`). */
-const READ_WRITERS: Readonly<Record<string, string>> = {
-  sort: 'o', uniq: '', iconv: 'o', dos2unix: '', xxd: '', base64: 'io', tar: 'fC', zip: '', unzip: 'd', gzip: '', gunzip: '', bzip2: '', xz: '',
-  curl: 'oDcK', wget: 'OoaP', openssl: '', gpg: 'o', yq: '', xmllint: '', vi: '', vim: '', nano: '', emacs: '',
-};
-
-/** `find` actions that run, write or delete: only an exact allow rule approves them. */
-const FIND_ACTIONS = new Set(['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls']);
+/** Exec wrappers that run their arguments as a command (https://code.claude.com/docs/en/permissions, "Exec wrappers"): only an exact allow rule approves them. */
+const EXEC_WRAPPERS = new Set(['watch', 'setsid', 'ionice', 'flock']);
 
 /** Wrapper levels stripped before the command is reported as uncertain. */
 const MAX_WRAPPER_LEVELS = 64;
@@ -189,7 +212,28 @@ function decodeAnsi(lit: string): string | undefined {
   return out;
 }
 
-const UNQUOTED_GLOB = /(^|[^\\])[*?[]/;
+/** Whether raw unquoted text has one of `chars` that no backslash escapes (escape parity counted). */
+function hasUnescaped(lit: string, chars: string): boolean {
+  for (let i = 0; i < lit.length; i++) {
+    const ch = lit[i] ?? '';
+    if (ch === '\\') i++;
+    else if (chars.includes(ch)) return true;
+  }
+  return false;
+}
+
+/** A file path an operand names, or undefined when the shell may expand it into something else. */
+function pathOf(o: Operand): string | undefined {
+  if (o.value === undefined || o.glob || o.tilde === 'unknown') return undefined;
+  return o.tilde === 'literal' ? `./${o.value}` : o.value;
+}
+
+/** The path in an option's attached value (`-ofile`, `--file=x`); a leading `~` there may or may not expand. */
+function attachedPath(value: string, o: Operand): string | undefined {
+  return o.glob || value.startsWith('~') ? undefined : value;
+}
+
+type Ctx = { readonly bytes: Buffer; readonly depth: number };
 
 function partsValue(parts: readonly WordPart[], quoted: boolean): { value: string | undefined; glob: boolean } {
   let value: string | undefined = '';
@@ -198,7 +242,7 @@ function partsValue(parts: readonly WordPart[], quoted: boolean): { value: strin
     let piece: string | undefined;
     switch (part.type) {
       case 'Lit':
-        if (!quoted && UNQUOTED_GLOB.test(part.value)) glob = true;
+        if (!quoted && hasUnescaped(part.value, '*?[')) glob = true;
         piece = quoted ? decodeDoubleQuoted(part.value) : decodeUnquoted(part.value);
         break;
       case 'SglQuoted':
@@ -257,7 +301,8 @@ export class BashAnalyzer {
       this.#uncertain.push(`command could not be parsed: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    const ctx = { source, depth };
+    // Node offsets are UTF-8 byte offsets: slice the encoded source, never the JavaScript string.
+    const ctx: Ctx = { bytes: Buffer.from(source, 'utf8'), depth };
     walk(file, (node) => {
       switch (node.type) {
         case 'CallExpr':
@@ -281,19 +326,28 @@ export class BashAnalyzer {
     });
   }
 
-  #text(node: Node, ctx: { source: string }): string {
-    return ctx.source.slice(node.start, node.end);
+  #text(node: Node, ctx: Ctx): string {
+    return ctx.bytes.subarray(node.start, node.end).toString('utf8');
   }
 
-  #word(word: Word, ctx: { source: string }): WordValue {
+  #word(word: Word, ctx: Ctx): WordValue {
     const { value, glob } = partsValue(word.parts, false);
     const raw = this.#text(word, ctx);
     // Brace expansion (`{a,b}`, `{1..3}`) can turn one word into several: only known at run time.
-    const brace = word.parts.some((p) => p.type === 'Lit' && /(^|[^\\])\{/.test(p.value)) && /\{[\s\S]*(,|\.\.)[\s\S]*\}/.test(raw);
-    return { value: brace ? undefined : value, raw, glob };
+    const brace = word.parts.some((p) => p.type === 'Lit' && hasUnescaped(p.value, '{')) && /\{[\s\S]*(,|\.\.)[\s\S]*\}/.test(raw);
+    if (brace) return { value: undefined, raw, glob };
+    // Bash expands a leading `~` only when it is unquoted: `~` alone or `~/` is home; other prefixes are unknown here.
+    let tilde: Operand['tilde'];
+    if (value?.startsWith('~')) {
+      const first = word.parts[0];
+      const lit = first?.type === 'Lit' ? first.value : '';
+      if (!lit.startsWith('~')) tilde = 'literal';
+      else if (!(lit === value ? /^~(\/|$)/.test(lit) : lit.startsWith('~/'))) tilde = 'unknown';
+    }
+    return { value, raw, glob, ...(tilde === undefined ? {} : { tilde }) };
   }
 
-  #declClause(decl: DeclClause, ctx: { source: string; depth: number }): void {
+  #declClause(decl: DeclClause, ctx: Ctx): void {
     // `export`, `declare`, `local`, `readonly`, `typeset`, `nameref`: their own
     // words are assignments; nested substitutions are walked generically.
     const name = decl.variant?.value ?? 'declare';
@@ -301,7 +355,7 @@ export class BashAnalyzer {
     this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefixes: [name], dynamic: true, exactOnly: false });
   }
 
-  #redirect(redir: Redirect, ctx: { source: string; depth: number }): void {
+  #redirect(redir: Redirect, ctx: Ctx): void {
     if (REDIR_HDOC.has(redir.op)) {
       const body = redir.hdoc;
       if (body && body.parts.some((p) => p.type !== 'Lit')) {
@@ -313,7 +367,7 @@ export class BashAnalyzer {
     const target = this.#word(redir.word, ctx);
     // `>&2`, `<&0`, `>&-` duplicate or close descriptors; `>& file` opens a file.
     if (REDIR_DUP.has(redir.op) && target.value !== undefined && /^(\d+-?|-)$/.test(target.value)) return;
-    const path = target.value !== undefined && !target.glob ? target.value : undefined;
+    const path = pathOf(target);
     if (path === '/dev/null' || path === '/dev/stdout' || path === '/dev/stderr') return;
     if (REDIR_OUT.has(redir.op)) this.#files.push({ access: 'write', path });
     else if (REDIR_IN.has(redir.op)) this.#files.push({ access: 'read', path });
@@ -324,7 +378,7 @@ export class BashAnalyzer {
     // Here-strings (`<<<`) carry no file.
   }
 
-  #callExpr(call: CallExpr, ctx: { source: string; depth: number }): void {
+  #callExpr(call: CallExpr, ctx: Ctx): void {
     const raw = this.#text(call, ctx);
     const words = call.args.map((w) => this.#word(w, ctx));
     if (words.length === 0) return; // pure assignment, e.g. `A=$(rm x)`: nested commands are walked
@@ -332,47 +386,75 @@ export class BashAnalyzer {
   }
 
   #fileOperands(base: string, operands: readonly WordValue[]): void {
-    const fileLetters = READ_WRITERS[base];
-    const reads = FILE_READERS.has(base) || FILE_COPIERS.has(base) || fileLetters !== undefined;
-    let writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base) || fileLetters !== undefined;
-    if (base === 'sed' && operands.some((o) => o.value !== undefined && (o.value === '-i' || o.value.startsWith('--in-place') || /^-[a-zA-Z]*i/.test(o.value)))) writes = true;
-    if (!reads && !writes) return;
+    const push = (access: Access, path: string | undefined): void => {
+      if (access !== 'write') this.#files.push({ access: 'read', path });
+      if (access !== 'read') this.#files.push({ access: 'write', path });
+    };
+    if (base === 'dd') {
+      // `if=` is read and `of=` written; other operands are not files.
+      for (const o of operands) {
+        const m = o.value === undefined ? undefined : /^(if|of)=(.*)$/s.exec(o.value);
+        if (o.value === undefined) push('both', undefined);
+        else if (m?.[2] !== undefined) push(m[1] === 'if' ? 'read' : 'write', attachedPath(m[2], o));
+      }
+      return;
+    }
+    let spec = FILE_SPECS.get(base);
+    if (spec === undefined) return;
+    if (base === 'sed' && operands.some((o) => o.value !== undefined && /^(-[a-zA-Z]*i|--in-place)/.test(o.value))) spec = BOTH;
+    if (base === 'rsync' && operands.some((o) => o.value === undefined || o.value.startsWith('--remove-source'))) spec = BOTH;
     // `wget url`, `curl -O url`: the file name comes from the server.
     if (base === 'wget' || (base === 'curl' && operands.some((o) => o.value === undefined || /^-[a-zA-Z]*[OJ]|^--remote-name/.test(o.value)))) {
       this.#files.push({ access: 'write', path: undefined });
     }
+    const { operands: mode, files = {}, values = [] } = spec;
+    const unknownAccess: Access = mode === 'read' ? 'read' : 'both';
+    const positional: (string | undefined)[] = [];
     let options = true;
-    for (const operand of operands) {
-      if (operand.raw.startsWith('<(') || operand.raw.startsWith('>(')) continue;
-      let value = operand.value;
-      if (value === '-') continue;
-      if (options && value === '--') {
+    for (let i = 0; i < operands.length; i++) {
+      const o = operands[i];
+      if (!o || o.raw.startsWith('<(') || o.raw.startsWith('>(')) continue;
+      const v = o.value;
+      if (v === '-') continue;
+      if (options && v === '--') {
         options = false;
         continue;
       }
-      if (options && value !== undefined && value.startsWith('-')) {
-        // `--file=x`, `-oX`: the attached value may be a file; a separate value is the next operand.
-        const eq = value.indexOf('=');
-        if (eq !== -1) {
-          value = value.slice(eq + 1);
-        } else {
-          const at = value.startsWith('--') ? -1 : [...value.slice(1)].findIndex((ch) => fileLetters?.includes(ch) === true);
-          if (at === -1 || at + 2 >= value.length) continue;
-          value = value.slice(at + 2);
+      if (!options || v === undefined || !v.startsWith('-')) {
+        positional.push(pathOf(o));
+        continue;
+      }
+      if (v.startsWith('--')) {
+        const eq = v.indexOf('=');
+        const access = files[eq === -1 ? v : v.slice(0, eq)];
+        if (eq !== -1) push(access ?? unknownAccess, attachedPath(v.slice(eq + 1), o));
+        else if (access !== undefined) {
+          const next = operands[++i];
+          if (next) push(access, pathOf(next));
+        }
+        continue;
+      }
+      // A short cluster: flags up to the first option that takes a value, attached or as the next word.
+      for (let k = 1; k < v.length; k++) {
+        const flag = `-${v[k] ?? ''}`;
+        const access = files[flag];
+        const rest = v.slice(k + 1);
+        if (access !== undefined || values.includes(flag)) {
+          const next = rest === '' ? operands[++i] : undefined;
+          if (access !== undefined) push(access, rest !== '' ? attachedPath(rest, o) : next ? pathOf(next) : undefined);
+          break;
+        }
+        if (!/[A-Za-z]/.test(v[k] ?? '')) {
+          // An option outside the tables with a value attached: a count (`-n5`) is no file, anything else may be.
+          if (!/^[0-9][0-9,.:+-]*$/.test(v.slice(k))) push(unknownAccess, undefined);
+          break;
         }
       }
-      if (base === 'dd' && value !== undefined) {
-        const m = /^(if|of)=(.*)$/s.exec(operand.value ?? '');
-        if (!m) continue;
-        value = m[2];
-      }
-      const path = value !== undefined && !operand.glob ? value : undefined;
-      if (reads) this.#files.push({ access: 'read', path });
-      if (writes) this.#files.push({ access: 'write', path });
     }
+    positional.forEach((p, n) => push(mode === 'copy' ? (n === positional.length - 1 ? 'write' : 'read') : mode === 'pair' ? (n === 1 ? 'write' : 'read') : mode, p));
   }
 
-  #addCommand(raw: string, words: readonly WordValue[], hasAssigns: boolean, ctx: { source: string; depth: number }): void {
+  #addCommand(raw: string, words: readonly WordValue[], hasAssigns: boolean, ctx: Ctx): void {
     const denyForms = new Set<string>([raw]);
     const staticPrefixes = new Set<string>();
     const dynamic = words.some((w) => w.value === undefined);
@@ -425,7 +507,8 @@ export class BashAnalyzer {
       if (base === 'rm' || base === 'rmdir') {
         // An unquoted run-time word may split into flags such as `-rf`.
         const recursive = operands.some((o) => (o.value === undefined ? !/^["']/.test(o.raw) : /^-[a-zA-Z]*[rR]/.test(o.value) || o.value === '--recursive'));
-        this.#removals.push({ recursive, targets: operands.filter((o) => o.value === undefined || !o.value.startsWith('-')) });
+        const targets = operands.filter((o) => o.value === undefined || !o.value.startsWith('-'));
+        this.#removals.push({ recursive, targets: targets.map((o) => (o.tilde === undefined ? o : { ...o, value: pathOf(o) })) });
       }
       if (SHELLS.has(base)) this.#shell(current, ctx);
       if (base === 'find') this.#findExec(current, ctx);
@@ -454,7 +537,7 @@ export class BashAnalyzer {
 
     // An exec wrapper left after stripping the documented ones runs another command.
     const allowHead = allowStripped?.[0]?.value;
-    if (allowStripped !== undefined && allowHead !== undefined && unwrap(basename(allowHead), allowStripped) !== undefined) exactOnly = true;
+    if (allowStripped !== undefined && allowHead !== undefined && (EXEC_WRAPPERS.has(basename(allowHead)) || unwrap(basename(allowHead), allowStripped) !== undefined)) exactOnly = true;
     // Allow rules see the words as written, so word boundaries survive (`a 'b c'` is not `a b c`).
     const allowForm = allowStripped !== undefined && !dynamic ? allowStripped.map((w) => w.raw).join(' ') : undefined;
     this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefixes: [...staticPrefixes], dynamic, exactOnly });
@@ -464,7 +547,7 @@ export class BashAnalyzer {
    * `env -S 'cmd args'` / `env --split-string=...`: the string is split into a
    * command line. Returns true when the invocation had one (it was analyzed).
    */
-  #envSplitString(words: readonly WordValue[], ctx: { source: string; depth: number }): boolean {
+  #envSplitString(words: readonly WordValue[], ctx: Ctx): boolean {
     for (let i = 1; i < words.length; i++) {
       const w = words[i];
       if (!w) break;
@@ -499,7 +582,7 @@ export class BashAnalyzer {
     return false;
   }
 
-  #shell(words: readonly WordValue[], ctx: { source: string; depth: number }): void {
+  #shell(words: readonly WordValue[], ctx: Ctx): void {
     // Find `-c <script>` (flags may be combined, e.g. `-ec`, `-lc`).
     let script: WordValue | undefined;
     let sawScript = false;
@@ -549,7 +632,7 @@ export class BashAnalyzer {
     }
   }
 
-  #findExec(words: readonly WordValue[], ctx: { source: string; depth: number }): void {
+  #findExec(words: readonly WordValue[], ctx: Ctx): void {
     for (let i = 1; i < words.length; i++) {
       const v = words[i]?.value;
       if (v === '-exec' || v === '-execdir' || v === '-ok' || v === '-okdir') {
@@ -568,10 +651,31 @@ export class BashAnalyzer {
   }
 }
 
-/** `env -C dir`, `sudo -D dir`, `find -execdir`: the child runs in a directory the checker does not follow. */
+/**
+ * Whether the child of `env`, `sudo` or `find` may run in another directory, or that cannot be told, from the
+ * wrapper's own options (`env -iCdir`, `env -S`, `sudo -D dir`, `sudo -i`, `find -execdir`).
+ */
 function changesChildDir(base: string, operands: readonly WordValue[]): boolean {
-  const flags = base === 'env' ? ['-C', '--chdir'] : base === 'sudo' ? ['-D', '--chdir'] : base === 'find' ? ['-execdir', '-okdir'] : [];
-  return flags.length > 0 && operands.some((o) => o.value === undefined || flags.some((f) => o.value === f || o.value?.startsWith(f.length === 2 ? f : `${f}=`) === true));
+  if (base === 'find') return operands.some((o) => o.value === undefined || o.value === '-execdir' || o.value === '-okdir');
+  if (base !== 'env' && base !== 'sudo') return false;
+  const short = base === 'env' ? 'CS' : 'Di';
+  const withValue = OPTIONS_WITH_VALUE[base] ?? new Set<string>();
+  for (let i = 0; i < operands.length; i++) {
+    const v = operands[i]?.value;
+    if (v === undefined) return true;
+    if (base === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(v)) continue;
+    if (v === '--' || v === '-' || !v.startsWith('-')) return false;
+    // Long options may be abbreviated (`--ch`): any of them may change the directory.
+    if (v.startsWith('--')) return true;
+    for (let k = 1; k < v.length; k++) {
+      if (short.includes(v[k] ?? '')) return true;
+      if (withValue.has(`-${v[k] ?? ''}`)) {
+        if (k === v.length - 1) i++;
+        break;
+      }
+    }
+  }
+  return false;
 }
 
 function basename(name: string): string {

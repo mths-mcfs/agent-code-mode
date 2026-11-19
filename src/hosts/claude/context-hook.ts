@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { ensureStateDir, stateDirPath } from '../../core/state-dir.js';
-import { SAFE_TOOL_USE_ID, contextDir, type ContextFile } from './context.js';
+import { SAFE_TOOL_USE_ID, contextDir, isPrivateDir, type ContextFile } from './context.js';
 
 /**
  * Companion PreToolUse hook for Claude Code (`agent-code-mode hook`).
@@ -63,11 +63,17 @@ export async function runContextHook(stdin: string, opts: ContextHookOptions = {
     const input = parsed.data;
     if (input.hook_event_name !== undefined && input.hook_event_name !== 'PreToolUse') return 0;
     // Windows has no owner and mode bits, so no reader could trust a record: none is written.
-    if (process.platform === 'win32') return 0;
+    const uid = process.getuid?.();
+    if (process.platform === 'win32' || uid === undefined) return 0;
     const stateDir = await ensureStateDir(opts.stateDir ?? stateDirPath());
     const dir = contextDir(stateDir);
     await mkdir(dir, { recursive: true, mode: 0o700 });
+    // The state directory is private, so this entry cannot be swapped after the check. Never chmod through a
+    // link or another user's directory; write only into a directory the reader would also trust.
+    const entry = await lstat(dir);
+    if (!entry.isDirectory() || entry.uid !== uid) return 0;
     await chmod(dir, 0o700);
+    if (!(await isPrivateDir(dir, uid))) return 0;
     const record: ContextFile = {
       tool_use_id: input.tool_use_id,
       session_id: input.session_id,

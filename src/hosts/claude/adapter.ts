@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { errorMessage } from '../../core/errors.js';
@@ -77,6 +77,10 @@ export interface ClaudePolicy {
   readonly rules: { readonly deny: readonly Rule[]; readonly ask: readonly Rule[]; readonly allow: readonly Rule[] };
   /** Project root, MCP roots and additional directories: reads there need no approval. */
   readonly workingDirs: readonly string[];
+  /** Working directories for the block-outside settings: directories only repository settings add do not count. */
+  readonly blockDirs: readonly string[];
+  /** On Windows no trusted record carries the live permission mode: only calls every mode allows may run. */
+  readonly modeUnknown: boolean;
   readonly preHooks: readonly CompiledHook[];
   readonly postHooks: readonly CompiledHook[];
   /** Env added for every hook. */
@@ -205,10 +209,11 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
   const applicable = rules.filter((r) => r.matcher.type !== 'never' && !(policy.mode === 'auto' && broadShell(r)));
   if (prepared.tool === 'bash') {
     const analysis = view.analysis;
-    if (!analysis || analysis.uncertain.length > 0 || analysis.commands.length === 0) {
-      return applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all');
-    }
-    if (applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all') && view.bashFiles.length === 0) return true;
+    const blanket = applicable.some((r) => governs(r, 'Bash') && r.matcher.type === 'all');
+    // Files the command names must be inside the working directories, whatever approves the command.
+    const filesInside = view.bashFiles.every((f) => f.path !== undefined && policy.workingDirs.some((d) => isInsidePath(f.path ?? '', d)));
+    if (!analysis || analysis.uncertain.length > 0 || analysis.commands.length === 0) return blanket && filesInside;
+    if (blanket && view.bashFiles.length === 0) return true;
     // Every subcommand must be approved; files it names must be inside the working directories.
     const everyCommand = analysis.commands.every((cmd) => {
       const form = cmd.allowForm;
@@ -216,7 +221,6 @@ function allowedByRule(view: CallView, rules: readonly Rule[], policy: ClaudePol
       // An exec wrapper or effectful `find` needs an exact rule, not a wildcard one.
       return applicable.some((r) => governs(r, 'Bash') && (r.matcher.type === 'all' || (r.matcher.type === 'bash' && !(cmd.exactOnly && r.matcher.spec.includes('*')) && matchesBashSpec(r.matcher.spec, form))));
     });
-    const filesInside = view.bashFiles.every((f) => f.path !== undefined && policy.workingDirs.some((d) => isInsidePath(f.path ?? '', d)));
     return everyCommand && filesInside;
   }
   const paths = callPaths(prepared);
@@ -259,7 +263,7 @@ function modeDecision(view: CallView, policy: ClaudePolicy): Decision {
 /** Limits no rule or mode lifts: protected host paths and the block-outside settings; an unknown bash target asks. */
 function hardLimit(view: CallView, policy: ClaudePolicy, protectedPaths: readonly string[]): Decision | undefined {
   const { prepared } = view;
-  const outside = (p: string): boolean => !policy.workingDirs.some((d) => isInsidePath(p, d));
+  const outside = (p: string): boolean => !policy.blockDirs.some((d) => isInsidePath(p, d));
   const blocked = (access: 'read' | 'write'): boolean => (access === 'read' ? policy.blockReadsOutside : policy.blockWritesOutside);
   const deny = (reason: string): Decision => ({ kind: 'deny', source: 'rule', reason });
   if (prepared.tool !== 'bash') {
@@ -331,26 +335,40 @@ function nativePath(p: string): string {
   return process.platform === 'win32' ? p.replace(/^\/([A-Za-z])(\/|$)/, '$1:/') : p;
 }
 
-/** Resolves links (symlinks, junctions) of a command's file target: its deepest existing ancestor, plus the missing rest. */
-async function realTarget(p: string): Promise<string> {
+function errnoCode(err: unknown): unknown {
+  return err !== null && typeof err === 'object' && 'code' in err ? err.code : undefined;
+}
+
+/** Resolves links (symlinks, junctions) of a command's file target: its deepest existing ancestor, plus the missing rest; undefined when unknown. */
+async function realTarget(p: string): Promise<string | undefined> {
   const missing: string[] = [];
   for (let dir = p; ; ) {
     try {
       return path.posix.join(toPosixPath(await realpath(nativePath(dir))), ...missing);
-    } catch {
+    } catch (err) {
+      // Only an absent name is a missing suffix: a dangling link (also ENOENT for `realpath`) or another error is unknown.
+      if (errnoCode(err) !== 'ENOENT' || (await lstat(nativePath(dir)).then(() => true, (e: unknown) => errnoCode(e) !== 'ENOENT'))) return undefined;
       const parent = path.posix.dirname(dir);
-      if (parent === dir) return p;
+      if (parent === dir) return undefined;
       missing.unshift(path.posix.basename(dir));
       dir = parent;
     }
   }
 }
 
+/** The canonical location of a protected pattern written through a link (`~/.claude/**` under a linked home), if different. */
+async function canonicalPattern(pattern: string): Promise<string | undefined> {
+  const { head, rest } = literalHead(toPosixPath(pattern));
+  if (head === '') return undefined;
+  const real = await realTarget(head);
+  return real === undefined || real === head ? undefined : path.join(nativePath(real), rest);
+}
+
 function describe(rule: Rule): string {
   return `${rule.kind} rule ${JSON.stringify(rule.raw)} from ${rule.source} settings`;
 }
 
-function compileHooks(entries: readonly HookMatcherEntry[] | undefined, origin: string, env: Readonly<Record<string, string>>, platform: NodeJS.Platform, seen: Set<string>, http: { readonly urls: readonly string[][]; readonly envVars: readonly string[][] }): CompiledHook[] {
+function compileHooks(entries: readonly HookMatcherEntry[] | undefined, origin: string, env: Readonly<Record<string, string>>, platform: NodeJS.Platform, seen: Set<string>, http: { readonly urls: readonly string[][]; readonly envVars: readonly string[][] }, blocked?: string): CompiledHook[] {
   const out: CompiledHook[] = [];
   for (const entry of entries ?? []) {
     for (const configured of entry.hooks) {
@@ -358,13 +376,17 @@ function compileHooks(entries: readonly HookMatcherEntry[] | undefined, origin: 
       const key = JSON.stringify([entry.matcher ?? '', configured, env]);
       if (seen.has(key)) continue;
       seen.add(key);
-      let unsupported = invalidMatcher(entry.matcher) ?? unsupportedReason(configured, platform);
+      let unsupported = blocked ?? invalidMatcher(entry.matcher) ?? unsupportedReason(configured, platform);
       let handler = configured;
       if (configured.type === 'http') {
-        const url = configured.url ?? '';
-        if (unsupported === undefined && !http.urls.every((list) => list.some((pattern) => matchesParamValue(pattern, url)))) unsupported = 'http hook url is not allowed by allowedHttpHookUrls';
+        // The allowlists are matched against the URL fetch will request (`https://h` names `https://h/` too), and fetch gets that URL.
+        const raw = configured.url ?? '';
+        const href = URL.canParse(raw) ? new URL(raw).href : undefined;
+        const forms = href === `${raw}/` ? [href, raw] : [href ?? ''];
+        if (unsupported === undefined && href === undefined) unsupported = 'http hook url cannot be parsed';
+        else if (unsupported === undefined && !http.urls.every((list) => list.some((pattern) => forms.some((form) => matchesParamValue(pattern, form))))) unsupported = 'http hook url is not allowed by allowedHttpHookUrls';
         // A header may interpolate only variables every applicable list allows.
-        handler = { ...configured, allowedEnvVars: (configured.allowedEnvVars ?? []).filter((name) => http.envVars.every((list) => list.includes(name))) };
+        handler = { ...configured, ...(href === undefined ? {} : { url: href }), allowedEnvVars: (configured.allowedEnvVars ?? []).filter((name) => http.envVars.every((list) => list.includes(name))) };
       }
       out.push({ handler, matcher: entry.matcher, origin, env, unsupported });
     }
@@ -430,10 +452,14 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const stateDir = this.#opts.stateDir ?? stateDirPath(env, home);
     const managedDir = this.#opts.managedDir === null ? undefined : (this.#opts.managedDir ?? managedSettingsDir(platform));
     const parent = await (this.#opts.readParent ?? readParentClaudeProcess)();
-    const parsed = parent ? parseClaudeFlags(parent.argv) : NO_FLAGS;
-    const flags = parent?.lossy === true ? conservativeFlags(parsed) : parsed;
-    // Claude's live working directory holds project and local settings; CLAUDE_PROJECT_DIR stays the startup root.
-    const primaryDir = parent?.cwd !== undefined && path.isAbsolute(parent.cwd) ? parent.cwd : projectRoot;
+    // A joined command line (macOS `ps`) is never run through the exact-argv parser.
+    const flags = parent === undefined ? NO_FLAGS : parent.lossy === true ? conservativeFlags(parent.argv) : parseClaudeFlags(parent.argv);
+    const parentCwd = parent?.cwd !== undefined && path.isAbsolute(parent.cwd) ? parent.cwd : undefined;
+    const liveCwd = ctx.sources['cwd'] === 'ctx-file' ? ctx.cwd : undefined;
+    // Project and local settings and their rules anchor at the primary directory: Claude's process directory, else the
+    // companion record's cwd, else the first MCP root. Hooks run in the session's cwd. CLAUDE_PROJECT_DIR stays the startup root.
+    const primaryDir = parentCwd ?? liveCwd ?? projectRoot;
+    const sessionCwd = liveCwd ?? parentCwd ?? ctx.cwd;
     const settings: LoadedSettings = await loadSettings({ projectRoot: primaryDir, home, configDir, managedDir, env, flags, parentCwd: parent?.cwd });
     const docs = settings.docs;
 
@@ -464,30 +490,32 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       }
     }
 
-    // Working directories.
-    const workingDirs = new Set<string>([projectRoot, ctx.cwd, ...ctx.roots]);
+    // Working directories. The block-outside settings ignore directories only repository settings add.
+    const startDirs = [projectRoot, primaryDir, ctx.cwd, sessionCwd, ...ctx.roots];
+    const workingDirs = new Set<string>(startDirs);
+    const blockDirs = new Set<string>(startDirs);
     for (const doc of docs) {
       if (holdsCapability(doc)) continue;
-      for (const dir of doc.data.permissions?.additionalDirectories ?? []) workingDirs.add(resolveDir(dir, projectRoot, home));
+      for (const dir of doc.data.permissions?.additionalDirectories ?? []) {
+        const resolved = resolveDir(dir, primaryDir, home);
+        workingDirs.add(resolved);
+        if (doc.source !== 'project' && doc.source !== 'local') blockDirs.add(resolved);
+      }
     }
 
-    // Permission mode: the live mode from the companion hook, else the CLI flag, else settings, else default.
-    // Project and local settings cannot start auto or bypassPermissions, nor acceptEdits before the workspace is trusted.
+    // Permission mode: the live mode from the companion hook, else the CLI flag, else the highest settings default.
+    // Project and local settings cannot start auto or bypassPermissions, nor acceptEdits before the workspace is trusted:
+    // a rejected one starts Manual (default) mode, it does not fall through to a lower source.
     const fromCtx = ctx.sources['permissionMode'] !== undefined && ctx.sources['permissionMode'] !== 'default' ? toMode(ctx.permissionMode) : undefined;
-    const eligibleDefault = (doc: SettingsDoc): PermissionMode | undefined => {
-      const m = toMode(doc.data.permissions?.defaultMode);
-      if (doc.source !== 'project' && doc.source !== 'local') return m;
-      return m === 'auto' || m === 'bypassPermissions' || (m === 'acceptEdits' && !settings.projectTrusted) ? undefined : m;
-    };
-    let mode: PermissionMode = fromCtx ?? toMode(flags.permissionMode) ?? docs.map(eligibleDefault).find((m) => m !== undefined) ?? 'default';
+    const defaultDoc = docs.find((d) => toMode(d.data.permissions?.defaultMode) !== undefined);
+    const settingsMode = toMode(defaultDoc?.data.permissions?.defaultMode);
+    const rejected = (defaultDoc?.source === 'project' || defaultDoc?.source === 'local') && (settingsMode === 'auto' || settingsMode === 'bypassPermissions' || (settingsMode === 'acceptEdits' && !settings.projectTrusted));
+    let mode: PermissionMode = fromCtx ?? toMode(flags.permissionMode) ?? (rejected ? 'default' : settingsMode) ?? 'default';
     if (mode === 'bypassPermissions' && firstSetting(docs, (s) => s.permissions?.disableBypassPermissionsMode) === 'disable') mode = 'default';
     if (mode === 'auto' && firstSetting(docs, (s) => s.permissions?.disableAutoMode) === 'disable') mode = 'default';
 
-    // Hooks.
-    const managedDocs = docs.filter((d) => d.source === 'managed');
-    const managedDisable = firstSetting(managedDocs, (s) => s.disableAllHooks) === true;
-    const otherDisable = firstSetting(docs.filter((d) => d.source !== 'managed'), (s) => s.disableAllHooks) === true;
-    const managedOnlyHooks = firstSetting(managedDocs, (s) => s.allowManagedHooksOnly) === true;
+    // Hooks, under the controls the loader resolved.
+    const controls = settings.hookControls;
     // A handler defined in several sources runs once per event, never across events.
     const seenPre = new Set<string>();
     const seenPost = new Set<string>();
@@ -499,23 +527,24 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       envVars: docs.flatMap((d) => (d.data.httpHookAllowedEnvVars === undefined ? [] : [d.data.httpHookAllowedEnvVars])),
     };
     for (const doc of docs) {
-      const isManaged = doc.source === 'managed';
-      if (managedDisable) break;
-      if (!isManaged && (otherDisable || managedOnlyHooks)) continue;
+      if (controls.allOff) break;
+      if (doc.source !== 'managed' && controls.managedOnly) continue;
       const origin = `${doc.source} settings`;
       pre.push(...compileHooks(doc.data.hooks?.PreToolUse, origin, {}, platform, seenPre, http));
       post.push(...compileHooks(doc.data.hooks?.PostToolUse, origin, {}, platform, seenPost, http));
     }
-    // The loader already applied the hook controls to plugins (managed-enabled ones survive managed-only).
+    // The loader already applied the hook controls to plugins; an unverifiable plugin source makes its hooks deny.
+    const unverified = controls.commandPluginsBlocked ? 'the plugin installation source cannot be verified while command-sourced plugins are disabled' : undefined;
     for (const plugin of settings.plugins) {
       const env = { CLAUDE_PLUGIN_ROOT: plugin.root };
-      pre.push(...compileHooks(plugin.hooks.PreToolUse, `plugin ${plugin.plugin}`, env, platform, seenPre, http));
-      post.push(...compileHooks(plugin.hooks.PostToolUse, `plugin ${plugin.plugin}`, env, platform, seenPost, http));
+      pre.push(...compileHooks(plugin.hooks.PreToolUse, `plugin ${plugin.plugin}`, env, platform, seenPre, http, unverified));
+      post.push(...compileHooks(plugin.hooks.PostToolUse, `plugin ${plugin.plugin}`, env, platform, seenPost, http, unverified));
     }
 
     // Bash containment: Claude's sandbox when enabled.
     let bashContainment: BashContainment = { mode: 'none' };
     let bashUnsupported: string | undefined;
+    const blockReadsOutside = docs.some((d) => d.data.permissions?.blockReadsOutsideWorkingDirectories === true);
     if (firstSetting(docs, (s) => s.sandbox?.enabled) === true) {
       const roots = new Set<string>([projectRoot, ...workingDirs]);
       // Managed filesystem settings lock the key: lower sources cannot turn the filesystem sandbox off.
@@ -524,12 +553,20 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         docs.filter((d) => d.source === 'managed' || (!managedFs && (d.source === 'user' || d.source === 'flag-settings'))),
         (s) => s.sandbox?.filesystem?.disabled,
       );
-      // Containment has writable roots only: read and write exclusions cannot be enforced.
-      if (docs.some((d) => (d.data.sandbox?.filesystem?.denyWrite?.length ?? 0) > 0 || (d.data.sandbox?.filesystem?.denyRead?.length ?? 0) > 0)) {
-        bashUnsupported = 'sandbox.filesystem denyRead/denyWrite cannot be enforced by bash containment';
+      // Containment has writable roots only: no read or write exclusion the sandbox would enforce can be expressed.
+      // Claude adds Read and Edit deny rules to denyRead/denyWrite, and the read block narrows sandbox reads.
+      const projected = fsDisabled !== true && (blockReadsOutside || rules.deny.some((r) => (governs(r, 'Read') || governs(r, 'Edit')) && (r.matcher.type === 'path' || r.matcher.type === 'all')));
+      if (projected || docs.some((d) => (d.data.sandbox?.filesystem?.denyWrite?.length ?? 0) > 0 || (d.data.sandbox?.filesystem?.denyRead?.length ?? 0) > 0)) {
+        bashUnsupported = 'sandbox filesystem exclusions (denyRead/denyWrite, Read and Edit deny rules, blockReadsOutsideWorkingDirectories) cannot be enforced by bash containment';
       }
+      // Sandbox paths: `//` or `/` absolute, `~/` home, others relative to the settings file's anchor (project root or
+      // config directory); a relative path from a source without a documented anchor adds no root.
       for (const doc of docs) {
-        for (const entry of doc.data.sandbox?.filesystem?.allowWrite ?? []) roots.add(resolveDir(entry, projectRoot, home));
+        const anchored = doc.source === 'project' || doc.source === 'local' || doc.source === 'user';
+        for (const entry of doc.data.sandbox?.filesystem?.allowWrite ?? []) {
+          const e = entry.startsWith('//') ? entry.slice(1) : entry;
+          if (anchored || path.isAbsolute(e) || e === '~' || e.startsWith('~/')) roots.add(path.resolve(resolveDir(e, doc.anchorDir, home)));
+        }
       }
       bashContainment = {
         mode: 'sandbox',
@@ -541,9 +578,9 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       };
     }
 
-    const protectedPaths = [
+    const lexicalProtected = [
       ...new Set([
-        ...[projectRoot, primaryDir, ctx.cwd].flatMap((root) => [
+        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
           path.join(root, '.claude', 'settings*.json'),
           path.join(root, '.claude', 'hooks', '**'),
           path.join(root, '.claude', 'agents', '**'),
@@ -557,6 +594,9 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         ...docs.flatMap((d) => ((d.source === 'flag-settings' || d.source === 'local') && d.file !== undefined ? [d.file] : [])),
       ]),
     ];
+    // A write that resolves through a link is checked at its canonical location: protect that location too.
+    const canonical = await Promise.all(lexicalProtected.map(canonicalPattern));
+    const protectedPaths = [...new Set([...lexicalProtected, ...canonical.filter((p) => p !== undefined)])];
 
     return {
       host: 'claude',
@@ -564,17 +604,19 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       protectedPaths,
       payload: {
         projectRoot,
-        cwd: ctx.cwd,
+        cwd: sessionCwd,
         home,
         configDir,
         mode,
         rules,
         workingDirs: [...workingDirs],
+        blockDirs: [...blockDirs],
+        modeUnknown: platform === 'win32' && fromCtx === undefined,
         preHooks: pre,
         postHooks: post,
         hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
         bashUnsupported,
-        blockReadsOutside: docs.some((d) => d.data.permissions?.blockReadsOutsideWorkingDirectories === true),
+        blockReadsOutside,
         blockWritesOutside: docs.some((d) => d.data.permissions?.blockWritesOutsideWorkingDirectories === true),
         isReadDenied: (absPath: string): boolean =>
           rules.deny.some((r) => governs(r, 'Read') && (r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)))),
@@ -620,6 +662,19 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
   }
 
   #decide(view: CallView, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
+    const decision = this.#decideInMode(view, snapshot);
+    if (!snapshot.payload.modeUnknown || decision.kind === 'deny') return decision;
+    // Unknown live mode (Windows): only what every mode allows runs, which is a read that needs no prompt.
+    const readOnly = view.prepared.tool === 'read' || view.prepared.tool === 'grep' || view.prepared.tool === 'glob';
+    if (decision.kind === 'allow' && readOnly) return decision;
+    return {
+      kind: 'deny',
+      source: 'unsupported-config',
+      reason: `the live Claude Code permission mode is unknown on Windows (no trusted session record), so ${NATIVE_TOOL[view.prepared.tool]} cannot be authorized`,
+    };
+  }
+
+  #decideInMode(view: CallView, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
     const policy = snapshot.payload;
     const askOrDeny = (reason: string): Decision =>
       policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason };
@@ -686,7 +741,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       session_id: ctx.sessionId ?? null,
       transcript_path: ctx.transcriptPath ?? null,
       // For bash the command runs in the effect's cwd, so that is what the hook is told.
-      cwd: prepared.tool === 'bash' ? prepared.effect.cwd : ctx.cwd,
+      cwd: prepared.tool === 'bash' ? prepared.effect.cwd : policy.cwd,
       permission_mode: policy.mode,
       hook_event_name: event,
       tool_name: native.toolName,

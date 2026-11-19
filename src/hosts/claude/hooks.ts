@@ -116,7 +116,8 @@ export function matcherMatches(matcher: string | undefined, toolName: string): b
 
 /** Why a matcher cannot be evaluated (an invalid regular expression), or undefined. */
 export function invalidMatcher(matcher: string | undefined): string | undefined {
-  if (matcher === undefined || /^[A-Za-z0-9_ ,|*-]*$/.test(matcher)) return undefined;
+  // Exactly what `matcherMatches` reads as match-all or an exact list; anything else must compile.
+  if (matcher === undefined || /^([A-Za-z0-9_ ,|-]*|\*)$/.test(matcher)) return undefined;
   try {
     new RegExp(matcher);
     return undefined;
@@ -283,7 +284,8 @@ async function runCommand(hook: CompiledHook, opts: RunHookOptions): Promise<Hoo
   const command = handler.args === undefined ? shellForm : `exec ${[handler.command ?? '', ...handler.args].map((w) => shQuote(substitute(w, env))).join(' ')}`;
   const r = await runCommandHook({ command, stdin: JSON.stringify(opts.input), env, cwd: opts.cwd, timeoutMs: timeoutMs(handler), signal: opts.signal });
   if (r.aborted) return { kind: 'failure', source: 'hook-error', reason: `${label} was cancelled` };
-  if (r.spawnError !== null) return { kind: 'failure', source: 'hook-error', reason: `${label} could not start: ${r.spawnError}` };
+  // Runner diagnostics can quote the configured command or what it printed: only the outcome is reported.
+  if (r.spawnError !== null) return { kind: 'failure', source: 'hook-error', reason: `${label} could not start` };
   if (r.timedOut) return { kind: 'failure', source: 'hook-timeout', reason: `${label} did not finish within ${timeoutMs(handler)} ms` };
   if (r.exitCode === 2) {
     const stderr = r.stderr.trim();
@@ -291,8 +293,7 @@ async function runCommand(hook: CompiledHook, opts: RunHookOptions): Promise<Hoo
   }
   if (r.exitCode !== 0) {
     const detail = r.exitCode === null ? `was killed by ${r.signal ?? 'a signal'}` : `exited with code ${r.exitCode}`;
-    const stderr = r.stderr.trim();
-    return { kind: 'failure', source: 'hook-error', reason: `${label} ${detail}${stderr === '' ? '' : `: ${stderr.slice(0, 500)}`}` };
+    return { kind: 'failure', source: 'hook-error', reason: `${label} ${detail}` };
   }
   if (r.stdoutTruncated) return { kind: 'failure', source: 'hook-error', reason: `${label} printed more output than can be read` };
   return interpretOutput(r.stdout, opts.event, label);
