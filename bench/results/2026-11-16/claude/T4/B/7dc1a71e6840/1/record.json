@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "id": "claude-T4-B-r1",
+  "configHash": "7dc1a71e6840",
+  "config": {
+    "host": "claude",
+    "task": "T4",
+    "arm": "B",
+    "hostVersion": "2.1.325 (Claude Code)",
+    "model": "claude-sonnet-5-5",
+    "effort": "medium",
+    "maxTurns": 60,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+    "armDefinitionSha256": "223996d625321ced92fa4ba1543513a4fb34086759ae13b8c3af4a5d84bc6faa",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "claude",
+  "arm": "B",
+  "armLabel": "agent-code-mode (strict)",
+  "task": "T4",
+  "run": 1,
+  "round": 1,
+  "orderIndex": 13,
+  "dryRun": false,
+  "model": "claude-sonnet-5-5",
+  "effort": "medium",
+  "startedAt": "2026-11-16T01:48:34.765Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 9885,
+  "parsed": {
+    "turns": 4,
+    "hostDurationMs": 8208,
+    "usage": {
+      "input": 8,
+      "output": 791,
+      "cacheCreation": 5983,
+      "cacheRead": 14744,
+      "reasoning": 0
+    },
+    "hostCostUsd": 0.0333324,
+    "model": "claude-sonnet-5-5",
+    "finalAnswer": "The top three customers by paid total come from all 50 order files in `data/orders/`. I counted only orders with status \"paid\" and summed qty × unitPriceCents over each order's items. All 50 files parsed, and no order had a status other than paid, pending, cancelled or refunded. I didn't change any files.\n\n| Rank | Customer | Paid total (cents) |\n|---|---|---|\n| 1 | Globex | 421,149 |\n| 2 | Umbrella Labs | 365,117 |\n| 3 | Initech | 292,124 |\n\nCyberdyne Retail is a close fourth at 291,834 cents, 290 cents behind Initech.\n\nANSWER: Globex, Umbrella Labs, Initech",
+    "toolCalls": {
+      "native": 0,
+      "run": 3,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "mcp__agent-code-mode__run": 3
+      }
+    },
+    "innerCalls": {
+      "total": 56,
+      "byTool": {
+        "bash": 1,
+        "glob": 2,
+        "read": 53
+      }
+    },
+    "availableTools": [
+      "mcp__agent-code-mode__run"
+    ],
+    "denials": [
+      "{\"ok\":false,\"error\":{\"kind\":\"error\",\"name\":\"PermissionDenied\",\"message\":\"host would ask the user and no interactive channel exists: Bash needs approval in default mode\"},\"logs\":[],\"calls\":[{\"id\":\"c1\",\"tool\":\"bash\",\"summary\":\"bash ls data/orders | head -5; ls data/orders | wc -l; f=$(ls data/orders | head -1); cat data/orders/$f\",\"decision\":\"denied\",\"reason\":\"ask-unavailable: host would ask the user and no interactive channel exists: Bash needs approval in default mode\",\"durationMs\":15}],\"changed",
+      "bash bash ls data/orders | head -5; ls data/orders | wc -l; f=$(ls data/orders | head -1); cat data/orders/$f: ask-unavailable: host would ask the user and no interactive channel exists: Bash needs approval in default mode"
+    ],
+    "hostContext": {
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "plugins": [
+        "cc-plugin-agents-md@builtin",
+        "cc-plugin-telemetry@builtin",
+        "cc-plugin-privacy@builtin",
+        "cc-plugin-plugin-authoring@builtin"
+      ],
+      "memory": false
+    },
+    "hostError": null,
+    "evidence": {
+      "result": [
+        11
+      ],
+      "toolUse": [
+        2,
+        6,
+        8
+      ],
+      "innerCalls": [
+        4,
+        7,
+        9
+      ],
+      "init": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0333324,
+  "costSource": "host",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER: <c1>, <c2>, <c3>` line",
+      "ok top 3 in order: Globex, Umbrella Labs, Initech (got Globex, Umbrella Labs, Initech)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "claude-settings.json": "claude-settings.json",
+    "mcp-config.json": "mcp-config.json",
+    "command.txt": "command.txt",
+    "auth.txt": "auth.txt",
+    "isolation.txt": "isolation.txt",
+    "diff.patch": "diff.patch"
+  }
+}

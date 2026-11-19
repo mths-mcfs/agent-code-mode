@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "id": "codex-T7-B-r3",
+  "configHash": "202f49d5f824",
+  "config": {
+    "host": "codex",
+    "task": "T7",
+    "arm": "B",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "5680770c8e7d70635b40396c99e8b0f96ef4768e223ca6b12c4eb04e45a490a0",
+    "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "B",
+  "armLabel": "Codex code mode",
+  "task": "T7",
+  "run": 3,
+  "round": 3,
+  "orderIndex": 56,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:11:06.253Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 24186,
+  "parsed": {
+    "turns": 5,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 17528,
+      "output": 854,
+      "cacheCreation": 0,
+      "cacheRead": 79616,
+      "reasoning": 17
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "Fixed the pipeline to parse semicolon-separated fields, exclude zero-quantity lines, and subtract discounts from the total. The tests were not edited.\n\nVerification: `node --test` passes all five test files.",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 4,
+      "other": 0,
+      "byName": {
+        "exec": 4
+      }
+    },
+    "innerCalls": {
+      "total": 11,
+      "byTool": {
+        "command_execution": 10,
+        "file_change": 1
+      }
+    },
+    "availableTools": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "exec.apply_patch",
+      "exec.exec_command",
+      "exec.list_mcp_resource_templates",
+      "exec.list_mcp_resources",
+      "exec.read_mcp_resource",
+      "exec.write_stdin"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        31
+      ],
+      "agentMessage": [
+        30
+      ],
+      "innerItems": [
+        7,
+        9,
+        11,
+        13,
+        16,
+        18,
+        20,
+        23,
+        26,
+        27,
+        29
+      ],
+      "requests": [
+        2,
+        4,
+        6,
+        8,
+        9
+      ],
+      "calls": [
+        1,
+        3,
+        5,
+        7
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.025778799999999998,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok node --test passes (pass 13, fail 0)",
+      "ok test files unchanged",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

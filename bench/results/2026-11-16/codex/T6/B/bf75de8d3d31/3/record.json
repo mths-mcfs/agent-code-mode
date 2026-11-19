@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "id": "codex-T6-B-r3",
+  "configHash": "bf75de8d3d31",
+  "config": {
+    "host": "codex",
+    "task": "T6",
+    "arm": "B",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "5fbcc217e36cd90aff63bff88dfba930364f9bcf95927d3dd13d806b005ea1da",
+    "armDefinitionSha256": "8ca992e68fec458fe7016eff99d8ecb95928ff07f841aca6ac939f96b3094b67",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "B",
+  "armLabel": "Codex code mode",
+  "task": "T6",
+  "run": 3,
+  "round": 3,
+  "orderIndex": 50,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:09:03.768Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 19655,
+  "parsed": {
+    "turns": 3,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 17258,
+      "output": 661,
+      "cacheCreation": 0,
+      "cacheRead": 29312,
+      "reasoning": 23
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "Added `itemCount` to all 40 paid orders, using the sum of their item quantities. Verified the counts and confirmed that all other fields and the 10 non-paid orders remain unchanged.",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 2,
+      "other": 0,
+      "byName": {
+        "exec": 2
+      }
+    },
+    "innerCalls": {
+      "total": 4,
+      "byTool": {
+        "command_execution": 4
+      }
+    },
+    "availableTools": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "exec.apply_patch",
+      "exec.exec_command",
+      "exec.list_mcp_resource_templates",
+      "exec.list_mcp_resources",
+      "exec.read_mcp_resource",
+      "exec.write_stdin"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        15
+      ],
+      "agentMessage": [
+        14
+      ],
+      "innerItems": [
+        8,
+        9,
+        11,
+        13
+      ],
+      "requests": [
+        2,
+        4,
+        5
+      ],
+      "calls": [
+        1,
+        3
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0220286,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok paid orders kept as 2-space indented JSON",
+      "ok itemCount correct in all 40 paid orders, other fields kept",
+      "ok orders that are not paid unchanged",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

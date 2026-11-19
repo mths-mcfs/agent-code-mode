@@ -303,7 +303,7 @@ export class MemoryToolRuntime implements ToolRuntime {
           });
         }
         this.commits.push({ id: prepared.id, tool: 'grep', target: absRoot });
-        return { matches, truncated };
+        return { matches, truncated, filtered: 0 };
       }
       case 'glob': {
         const { absRoot, pattern, maxResults } = prepared.effect;
@@ -311,7 +311,7 @@ export class MemoryToolRuntime implements ToolRuntime {
           .filter((file) => file.startsWith(`${absRoot}/`) && matchesPathPattern(posix.relative(absRoot, file), pattern, false))
           .sort();
         this.commits.push({ id: prepared.id, tool: 'glob', target: absRoot });
-        return { files: all.slice(0, maxResults), truncated: all.length > maxResults };
+        return { files: all.slice(0, maxResults), truncated: all.length > maxResults, filtered: 0 };
       }
     }
   }

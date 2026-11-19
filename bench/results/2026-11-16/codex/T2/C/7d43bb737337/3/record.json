@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "id": "codex-T2-C-r3",
+  "configHash": "7d43bb737337",
+  "config": {
+    "host": "codex",
+    "task": "T2",
+    "arm": "C",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+    "armDefinitionSha256": "ae7a92518ed29ac6e7667e0ea1ab3a3307d544e8af4ba63c65b2438a10a68d0d",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "C",
+  "armLabel": "agent-code-mode (strict)",
+  "task": "T2",
+  "run": 3,
+  "round": 3,
+  "orderIndex": 62,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:12:59.384Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 23869,
+  "parsed": {
+    "turns": 5,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 29568,
+      "output": 863,
+      "cacheCreation": 0,
+      "cacheRead": 39296,
+      "reasoning": 62
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "Fixed `truncate` in [strings.js](<workspace>/src/lib/strings.js:14) to reserve space for the ellipsis.\n\n`node --test` now passes all 13 tests. No tests were changed.",
+    "toolCalls": {
+      "native": 0,
+      "run": 4,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "mcp__agent_code_mode.run": 4
+      }
+    },
+    "innerCalls": {
+      "total": 15,
+      "byTool": {
+        "bash": 9,
+        "read": 5,
+        "edit": 1
+      }
+    },
+    "availableTools": [
+      "functions.list_mcp_resources",
+      "functions.list_mcp_resource_templates",
+      "functions.read_mcp_resource",
+      "functions.request_user_input",
+      "mcp__agent_code_mode.run"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        16
+      ],
+      "agentMessage": [
+        15
+      ],
+      "innerItems": [
+        7,
+        10,
+        12,
+        14
+      ],
+      "requests": [
+        2,
+        4,
+        6,
+        8,
+        9
+      ],
+      "calls": [
+        1,
+        3,
+        5,
+        7
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.035847800000000006,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok node --test passes (pass 13, fail 0)",
+      "ok test files unchanged",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

@@ -1,0 +1,521 @@
+ M data/orders/ord-001.json
+ M data/orders/ord-002.json
+ M data/orders/ord-003.json
+ M data/orders/ord-005.json
+ M data/orders/ord-006.json
+ M data/orders/ord-007.json
+ M data/orders/ord-008.json
+ M data/orders/ord-009.json
+ M data/orders/ord-010.json
+ M data/orders/ord-011.json
+ M data/orders/ord-012.json
+ M data/orders/ord-013.json
+ M data/orders/ord-015.json
+ M data/orders/ord-016.json
+ M data/orders/ord-017.json
+ M data/orders/ord-018.json
+ M data/orders/ord-019.json
+ M data/orders/ord-020.json
+ M data/orders/ord-023.json
+ M data/orders/ord-024.json
+ M data/orders/ord-025.json
+ M data/orders/ord-026.json
+ M data/orders/ord-027.json
+ M data/orders/ord-028.json
+ M data/orders/ord-029.json
+ M data/orders/ord-030.json
+ M data/orders/ord-031.json
+ M data/orders/ord-032.json
+ M data/orders/ord-033.json
+ M data/orders/ord-034.json
+ M data/orders/ord-035.json
+ M data/orders/ord-036.json
+ M data/orders/ord-037.json
+ M data/orders/ord-039.json
+ M data/orders/ord-040.json
+ M data/orders/ord-041.json
+ M data/orders/ord-044.json
+ M data/orders/ord-047.json
+ M data/orders/ord-049.json
+ M data/orders/ord-050.json
+
+diff --git a/data/orders/ord-001.json b/data/orders/ord-001.json
+index 0bd8685..76401fa 100644
+--- a/data/orders/ord-001.json
++++ b/data/orders/ord-001.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-001",
+   "customer": "Umbrella Labs",
+   "status": "paid",
++  "itemCount": 6,
+   "createdAt": "2026-05-21",
+   "items": [
+     {
+diff --git a/data/orders/ord-002.json b/data/orders/ord-002.json
+index 2fc3222..03d7757 100644
+--- a/data/orders/ord-002.json
++++ b/data/orders/ord-002.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-002",
+   "customer": "Globex",
+   "status": "paid",
++  "itemCount": 11,
+   "createdAt": "2026-02-15",
+   "items": [
+     {
+diff --git a/data/orders/ord-003.json b/data/orders/ord-003.json
+index 5bf543a..3ad64fc 100644
+--- a/data/orders/ord-003.json
++++ b/data/orders/ord-003.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-003",
+   "customer": "Umbrella Labs",
+   "status": "paid",
++  "itemCount": 8,
+   "createdAt": "2026-02-14",
+   "items": [
+     {
+diff --git a/data/orders/ord-005.json b/data/orders/ord-005.json
+index c1e4bbd..ee0cdef 100644
+--- a/data/orders/ord-005.json
++++ b/data/orders/ord-005.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-005",
+   "customer": "Soylent Foods",
+   "status": "paid",
++  "itemCount": 7,
+   "createdAt": "2026-06-01",
+   "items": [
+     {
+diff --git a/data/orders/ord-006.json b/data/orders/ord-006.json
+index 94d0418..7b2695c 100644
+--- a/data/orders/ord-006.json
++++ b/data/orders/ord-006.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-006",
+   "customer": "Initech",
+   "status": "paid",
++  "itemCount": 15,
+   "createdAt": "2026-05-03",
+   "items": [
+     {
+diff --git a/data/orders/ord-007.json b/data/orders/ord-007.json
+index df75e2f..8d44d15 100644
+--- a/data/orders/ord-007.json
++++ b/data/orders/ord-007.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-007",
+   "customer": "Cyberdyne Retail",
+   "status": "paid",
++  "itemCount": 2,
+   "createdAt": "2026-06-25",
+   "items": [
+     {
+diff --git a/data/orders/ord-008.json b/data/orders/ord-008.json
+index bf871f6..8fdde5f 100644
+--- a/data/orders/ord-008.json
++++ b/data/orders/ord-008.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-008",
+   "customer": "Hooli",
+   "status": "paid",
++  "itemCount": 6,
+   "createdAt": "2026-04-04",
+   "items": [
+     {
+diff --git a/data/orders/ord-009.json b/data/orders/ord-009.json
+index aaeee0a..44fad51 100644
+--- a/data/orders/ord-009.json
++++ b/data/orders/ord-009.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-009",
+   "customer": "Globex",
+   "status": "paid",
++  "itemCount": 25,
+   "createdAt": "2026-01-15",
+   "items": [
+     {
+diff --git a/data/orders/ord-010.json b/data/orders/ord-010.json
+index f43d522..0a50f71 100644
+--- a/data/orders/ord-010.json
++++ b/data/orders/ord-010.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-010",
+   "customer": "Soylent Foods",
+   "status": "paid",
++  "itemCount": 9,
+   "createdAt": "2026-03-22",
+   "items": [
+     {
+diff --git a/data/orders/ord-011.json b/data/orders/ord-011.json
+index a5350b4..e8f5fe6 100644
+--- a/data/orders/ord-011.json
++++ b/data/orders/ord-011.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-011",
+   "customer": "Globex",
+   "status": "paid",
++  "itemCount": 16,
+   "createdAt": "2026-02-13",
+   "items": [
+     {
+diff --git a/data/orders/ord-012.json b/data/orders/ord-012.json
+index c807d3d..4ab6c6c 100644
+--- a/data/orders/ord-012.json
++++ b/data/orders/ord-012.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-012",
+   "customer": "Hooli",
+   "status": "paid",
++  "itemCount": 11,
+   "createdAt": "2026-07-26",
+   "items": [
+     {
+diff --git a/data/orders/ord-013.json b/data/orders/ord-013.json
+index dfa7828..31ede1d 100644
+--- a/data/orders/ord-013.json
++++ b/data/orders/ord-013.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-013",
+   "customer": "Soylent Foods",
+   "status": "paid",
++  "itemCount": 3,
+   "createdAt": "2026-01-04",
+   "items": [
+     {
+diff --git a/data/orders/ord-015.json b/data/orders/ord-015.json
+index f2f79ff..a9c9018 100644
+--- a/data/orders/ord-015.json
++++ b/data/orders/ord-015.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-015",
+   "customer": "Cyberdyne Retail",
+   "status": "paid",
++  "itemCount": 15,
+   "createdAt": "2026-06-22",
+   "items": [
+     {
+diff --git a/data/orders/ord-016.json b/data/orders/ord-016.json
+index b77dbc8..f216942 100644
+--- a/data/orders/ord-016.json
++++ b/data/orders/ord-016.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-016",
+   "customer": "Vandelay Imports",
+   "status": "paid",
++  "itemCount": 5,
+   "createdAt": "2026-03-02",
+   "items": [
+     {
+diff --git a/data/orders/ord-017.json b/data/orders/ord-017.json
+index 2fe2633..cb578e2 100644
+--- a/data/orders/ord-017.json
++++ b/data/orders/ord-017.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-017",
+   "customer": "Cyberdyne Retail",
+   "status": "paid",
++  "itemCount": 14,
+   "createdAt": "2026-08-14",
+   "items": [
+     {
+diff --git a/data/orders/ord-018.json b/data/orders/ord-018.json
+index 655264f..357f17a 100644
+--- a/data/orders/ord-018.json
++++ b/data/orders/ord-018.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-018",
+   "customer": "Acme Corp",
+   "status": "paid",
++  "itemCount": 9,
+   "createdAt": "2026-01-15",
+   "items": [
+     {
+diff --git a/data/orders/ord-019.json b/data/orders/ord-019.json
+index 413c626..ee43499 100644
+--- a/data/orders/ord-019.json
++++ b/data/orders/ord-019.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-019",
+   "customer": "Acme Corp",
+   "status": "paid",
++  "itemCount": 7,
+   "createdAt": "2026-09-11",
+   "items": [
+     {
+diff --git a/data/orders/ord-020.json b/data/orders/ord-020.json
+index ad1842d..aac7f8f 100644
+--- a/data/orders/ord-020.json
++++ b/data/orders/ord-020.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-020",
+   "customer": "Initech",
+   "status": "paid",
++  "itemCount": 18,
+   "createdAt": "2026-03-10",
+   "items": [
+     {
+diff --git a/data/orders/ord-023.json b/data/orders/ord-023.json
+index f6f898f..abd327e 100644
+--- a/data/orders/ord-023.json
++++ b/data/orders/ord-023.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-023",
+   "customer": "Vandelay Imports",
+   "status": "paid",
++  "itemCount": 17,
+   "createdAt": "2026-04-12",
+   "items": [
+     {
+diff --git a/data/orders/ord-024.json b/data/orders/ord-024.json
+index 2e606d4..75bdca1 100644
+--- a/data/orders/ord-024.json
++++ b/data/orders/ord-024.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-024",
+   "customer": "Wayne Freight",
+   "status": "paid",
++  "itemCount": 8,
+   "createdAt": "2026-07-15",
+   "items": [
+     {
+diff --git a/data/orders/ord-025.json b/data/orders/ord-025.json
+index 2ca7923..d89b922 100644
+--- a/data/orders/ord-025.json
++++ b/data/orders/ord-025.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-025",
+   "customer": "Cyberdyne Retail",
+   "status": "paid",
++  "itemCount": 11,
+   "createdAt": "2026-06-02",
+   "items": [
+     {
+diff --git a/data/orders/ord-026.json b/data/orders/ord-026.json
+index 0ca30c1..1c29057 100644
+--- a/data/orders/ord-026.json
++++ b/data/orders/ord-026.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-026",
+   "customer": "Globex",
+   "status": "paid",
++  "itemCount": 14,
+   "createdAt": "2026-03-23",
+   "items": [
+     {
+diff --git a/data/orders/ord-027.json b/data/orders/ord-027.json
+index fd39518..0221e80 100644
+--- a/data/orders/ord-027.json
++++ b/data/orders/ord-027.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-027",
+   "customer": "Cyberdyne Retail",
+   "status": "paid",
++  "itemCount": 5,
+   "createdAt": "2026-04-10",
+   "items": [
+     {
+diff --git a/data/orders/ord-028.json b/data/orders/ord-028.json
+index 1830e98..c3ae898 100644
+--- a/data/orders/ord-028.json
++++ b/data/orders/ord-028.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-028",
+   "customer": "Cyberdyne Retail",
+   "status": "paid",
++  "itemCount": 3,
+   "createdAt": "2026-02-11",
+   "items": [
+     {
+diff --git a/data/orders/ord-029.json b/data/orders/ord-029.json
+index 44496b1..0573654 100644
+--- a/data/orders/ord-029.json
++++ b/data/orders/ord-029.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-029",
+   "customer": "Globex",
+   "status": "paid",
++  "itemCount": 11,
+   "createdAt": "2026-06-22",
+   "items": [
+     {
+diff --git a/data/orders/ord-030.json b/data/orders/ord-030.json
+index a576f31..88bc386 100644
+--- a/data/orders/ord-030.json
++++ b/data/orders/ord-030.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-030",
+   "customer": "Wonka Sweets",
+   "status": "paid",
++  "itemCount": 13,
+   "createdAt": "2026-01-12",
+   "items": [
+     {
+diff --git a/data/orders/ord-031.json b/data/orders/ord-031.json
+index af8f0e2..6c99378 100644
+--- a/data/orders/ord-031.json
++++ b/data/orders/ord-031.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-031",
+   "customer": "Tyrell Systems",
+   "status": "paid",
++  "itemCount": 4,
+   "createdAt": "2026-04-02",
+   "items": [
+     {
+diff --git a/data/orders/ord-032.json b/data/orders/ord-032.json
+index c6f4bec..c8426ba 100644
+--- a/data/orders/ord-032.json
++++ b/data/orders/ord-032.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-032",
+   "customer": "Umbrella Labs",
+   "status": "paid",
++  "itemCount": 16,
+   "createdAt": "2026-09-06",
+   "items": [
+     {
+diff --git a/data/orders/ord-033.json b/data/orders/ord-033.json
+index 0b20c8b..0e8fb4b 100644
+--- a/data/orders/ord-033.json
++++ b/data/orders/ord-033.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-033",
+   "customer": "Vandelay Imports",
+   "status": "paid",
++  "itemCount": 17,
+   "createdAt": "2026-05-15",
+   "items": [
+     {
+diff --git a/data/orders/ord-034.json b/data/orders/ord-034.json
+index 2f5de38..09c161f 100644
+--- a/data/orders/ord-034.json
++++ b/data/orders/ord-034.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-034",
+   "customer": "Umbrella Labs",
+   "status": "paid",
++  "itemCount": 27,
+   "createdAt": "2026-08-03",
+   "items": [
+     {
+diff --git a/data/orders/ord-035.json b/data/orders/ord-035.json
+index 51a87ff..c1932b7 100644
+--- a/data/orders/ord-035.json
++++ b/data/orders/ord-035.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-035",
+   "customer": "Initech",
+   "status": "paid",
++  "itemCount": 16,
+   "createdAt": "2026-09-21",
+   "items": [
+     {
+diff --git a/data/orders/ord-036.json b/data/orders/ord-036.json
+index 6006257..d7e4859 100644
+--- a/data/orders/ord-036.json
++++ b/data/orders/ord-036.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-036",
+   "customer": "Umbrella Labs",
+   "status": "paid",
++  "itemCount": 6,
+   "createdAt": "2026-01-17",
+   "items": [
+     {
+diff --git a/data/orders/ord-037.json b/data/orders/ord-037.json
+index ba8177a..b142715 100644
+--- a/data/orders/ord-037.json
++++ b/data/orders/ord-037.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-037",
+   "customer": "Stark Supply",
+   "status": "paid",
++  "itemCount": 10,
+   "createdAt": "2026-02-01",
+   "items": [
+     {
+diff --git a/data/orders/ord-039.json b/data/orders/ord-039.json
+index 59c4578..5361945 100644
+--- a/data/orders/ord-039.json
++++ b/data/orders/ord-039.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-039",
+   "customer": "Globex",
+   "status": "paid",
++  "itemCount": 7,
+   "createdAt": "2026-09-04",
+   "items": [
+     {
+diff --git a/data/orders/ord-040.json b/data/orders/ord-040.json
+index 40891bc..cf824c4 100644
+--- a/data/orders/ord-040.json
++++ b/data/orders/ord-040.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-040",
+   "customer": "Soylent Foods",
+   "status": "paid",
++  "itemCount": 13,
+   "createdAt": "2026-08-18",
+   "items": [
+     {
+diff --git a/data/orders/ord-041.json b/data/orders/ord-041.json
+index 6f9225f..ed5c539 100644
+--- a/data/orders/ord-041.json
++++ b/data/orders/ord-041.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-041",
+   "customer": "Acme Corp",
+   "status": "paid",
++  "itemCount": 18,
+   "createdAt": "2026-06-01",
+   "items": [
+     {
+diff --git a/data/orders/ord-044.json b/data/orders/ord-044.json
+index 5d07281..188f74b 100644
+--- a/data/orders/ord-044.json
++++ b/data/orders/ord-044.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-044",
+   "customer": "Acme Corp",
+   "status": "paid",
++  "itemCount": 17,
+   "createdAt": "2026-03-17",
+   "items": [
+     {
+diff --git a/data/orders/ord-047.json b/data/orders/ord-047.json
+index af979e0..58199cb 100644
+--- a/data/orders/ord-047.json
++++ b/data/orders/ord-047.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-047",
+   "customer": "Wayne Freight",
+   "status": "paid",
++  "itemCount": 9,
+   "createdAt": "2026-02-11",
+   "items": [
+     {
+diff --git a/data/orders/ord-049.json b/data/orders/ord-049.json
+index 68ec5f9..6637584 100644
+--- a/data/orders/ord-049.json
++++ b/data/orders/ord-049.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-049",
+   "customer": "Wonka Sweets",
+   "status": "paid",
++  "itemCount": 3,
+   "createdAt": "2026-01-28",
+   "items": [
+     {
+diff --git a/data/orders/ord-050.json b/data/orders/ord-050.json
+index 2ba9274..da84074 100644
+--- a/data/orders/ord-050.json
++++ b/data/orders/ord-050.json
+@@ -2,6 +2,7 @@
+   "id": "ORD-050",
+   "customer": "Stark Supply",
+   "status": "paid",
++  "itemCount": 4,
+   "createdAt": "2026-08-11",
+   "items": [
+     {

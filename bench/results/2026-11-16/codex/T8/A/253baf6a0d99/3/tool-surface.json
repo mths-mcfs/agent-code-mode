@@ -1,0 +1,9 @@
+[
+  "functions.exec_command",
+  "functions.write_stdin",
+  "functions.list_mcp_resources",
+  "functions.list_mcp_resource_templates",
+  "functions.read_mcp_resource",
+  "functions.request_user_input",
+  "functions.apply_patch"
+]

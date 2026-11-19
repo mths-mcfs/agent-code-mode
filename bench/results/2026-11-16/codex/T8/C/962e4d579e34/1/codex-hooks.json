@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"<repo>/bench/hooks/protect-file.mjs\" \"src/handlers/inventory.js\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

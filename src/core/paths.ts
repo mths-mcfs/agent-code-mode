@@ -8,6 +8,8 @@
  * separators so Windows paths match too.
  */
 
+import path from 'node:path';
+
 const cache = new Map<string, RegExp>();
 
 function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
@@ -65,4 +67,17 @@ export function findMatchingPattern(
   caseInsensitive = DEFAULT_CASE_INSENSITIVE,
 ): string | undefined {
   return patterns.find((pattern) => matchesPathPattern(path, pattern, caseInsensitive));
+}
+
+/**
+ * How a workspace file is named in diffs and `changedFiles`: its path
+ * relative to the real session cwd, `/`-separated (`src/a.ts`, or
+ * `../extra/x` for a file in an additional root). Unambiguous, and still a
+ * valid diff path; absolute only when no relative path exists (another
+ * Windows drive).
+ */
+export function workspaceDisplayPath(abs: string, cwd: string): string {
+  const rel = path.relative(cwd, abs);
+  if (rel === '') return '.';
+  return (path.isAbsolute(rel) ? abs : rel).split(path.sep).join('/');
 }

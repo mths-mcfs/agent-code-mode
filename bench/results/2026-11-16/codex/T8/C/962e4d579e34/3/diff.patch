@@ -1,0 +1,118 @@
+ M src/handlers/customers.js
+ M src/handlers/health.js
+ M src/handlers/orders.js
+ M src/handlers/payments.js
+ M src/handlers/reports.js
+ M src/handlers/returns.js
+ M src/handlers/search.js
+ M src/handlers/shipping.js
+ M src/handlers/webhooks.js
+
+diff --git a/src/handlers/customers.js b/src/handlers/customers.js
+index ae48f4e..c896e97 100644
+--- a/src/handlers/customers.js
++++ b/src/handlers/customers.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles customers requests. */
+ export function handleCustomers(request) {
+diff --git a/src/handlers/health.js b/src/handlers/health.js
+index 39ef5d9..8e4db2f 100644
+--- a/src/handlers/health.js
++++ b/src/handlers/health.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles health requests. */
+ export function handleHealth(request) {
+diff --git a/src/handlers/orders.js b/src/handlers/orders.js
+index 74ef197..209fb36 100644
+--- a/src/handlers/orders.js
++++ b/src/handlers/orders.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles orders requests. */
+ export function handleOrders(request) {
+diff --git a/src/handlers/payments.js b/src/handlers/payments.js
+index 784ae8a..2521e71 100644
+--- a/src/handlers/payments.js
++++ b/src/handlers/payments.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles payments requests. */
+ export function handlePayments(request) {
+diff --git a/src/handlers/reports.js b/src/handlers/reports.js
+index 723822f..e7c0993 100644
+--- a/src/handlers/reports.js
++++ b/src/handlers/reports.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles reports requests. */
+ export function handleReports(request) {
+diff --git a/src/handlers/returns.js b/src/handlers/returns.js
+index 82a4c3f..1499537 100644
+--- a/src/handlers/returns.js
++++ b/src/handlers/returns.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles returns requests. */
+ export function handleReturns(request) {
+diff --git a/src/handlers/search.js b/src/handlers/search.js
+index fe33446..c2844d5 100644
+--- a/src/handlers/search.js
++++ b/src/handlers/search.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles search requests. */
+ export function handleSearch(request) {
+diff --git a/src/handlers/shipping.js b/src/handlers/shipping.js
+index 02a94b3..6edf71a 100644
+--- a/src/handlers/shipping.js
++++ b/src/handlers/shipping.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles shipping requests. */
+ export function handleShipping(request) {
+diff --git a/src/handlers/webhooks.js b/src/handlers/webhooks.js
+index 7fa1b4c..bd25343 100644
+--- a/src/handlers/webhooks.js
++++ b/src/handlers/webhooks.js
+@@ -1,6 +1,6 @@
+ import { formatCurrency } from '../lib/money.js';
+ 
+-export const TIMEOUT_MS = 3000;
++export const TIMEOUT_MS = 5000;
+ 
+ /** Handles webhooks requests. */
+ export function handleWebhooks(request) {

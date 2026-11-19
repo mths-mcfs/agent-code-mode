@@ -8,7 +8,9 @@ import type { SessionContext } from '../core/types.js';
 import { FakeSandbox } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter } from '../testing/static-host-adapter.js';
-import { ClaudeContextProvider, CodexContextProvider, GenericContextProvider } from './context.js';
+import { ClaudeContextProvider } from '../hosts/claude/context.js';
+import { CodexContextProvider } from '../hosts/codex/context.js';
+import { GenericContextProvider } from './context.js';
 import { createMcpServer } from './mcp.js';
 import type { Runtime } from './runtime.js';
 

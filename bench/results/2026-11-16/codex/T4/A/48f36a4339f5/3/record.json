@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "id": "codex-T4-A-r3",
+  "configHash": "48f36a4339f5",
+  "config": {
+    "host": "codex",
+    "task": "T4",
+    "arm": "A",
+    "hostVersion": "codex-cli 0.169.0",
+    "model": "gpt-6.1-terra",
+    "effort": "medium",
+    "maxTurns": null,
+    "timeoutMin": 15,
+    "seed": 20261115,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "promptSha256": "44c6bac704258b56be23482315e3a0ee5bf1811599529c5e9118178c72391224",
+    "armDefinitionSha256": "12713fedb09bde507e0f67239c5f7d546edaacc027fdc97dd46c47b525d3ded4",
+    "agentCodeModeCommit": "35260ce7807bef3b1a3f33bc1a0a80638026263d",
+    "agentCodeModeDirty": false,
+    "dryRun": false
+  },
+  "host": "codex",
+  "arm": "A",
+  "armLabel": "native tools (direct)",
+  "task": "T4",
+  "run": 3,
+  "round": 3,
+  "orderIndex": 67,
+  "dryRun": false,
+  "model": "gpt-6.1-terra",
+  "effort": "medium",
+  "startedAt": "2026-11-16T02:14:30.279Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 12447,
+  "parsed": {
+    "turns": 4,
+    "hostDurationMs": null,
+    "usage": {
+      "input": 7984,
+      "output": 269,
+      "cacheCreation": 0,
+      "cacheRead": 40192,
+      "reasoning": 0
+    },
+    "hostCostUsd": null,
+    "model": null,
+    "finalAnswer": "The highest paid totals are Globex (421,149 cents), Umbrella Labs (365,117 cents), and Initech (292,124 cents).\n\nANSWER: Globex, Umbrella Labs, Initech",
+    "toolCalls": {
+      "native": 3,
+      "run": 0,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "exec_command": 3
+      }
+    },
+    "innerCalls": null,
+    "availableTools": [
+      "functions.exec_command",
+      "functions.write_stdin",
+      "functions.list_mcp_resources",
+      "functions.list_mcp_resource_templates",
+      "functions.read_mcp_resource",
+      "functions.request_user_input",
+      "functions.apply_patch"
+    ],
+    "denials": [],
+    "hostContext": null,
+    "hostError": null,
+    "evidence": {
+      "turnCompleted": [
+        13
+      ],
+      "agentMessage": [
+        12
+      ],
+      "innerItems": [
+        7,
+        9,
+        11
+      ],
+      "requests": [
+        2,
+        4,
+        6,
+        7
+      ],
+      "calls": [
+        1,
+        3,
+        5
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0113386,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER: <c1>, <c2>, <c3>` line",
+      "ok top 3 in order: Globex, Umbrella Labs, Initech (got Globex, Umbrella Labs, Initech)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "requests.jsonl": "requests.jsonl",
+    "codex-config.toml": "codex-config.toml",
+    "command.txt": "command.txt",
+    "tool-surface.json": "tool-surface.json",
+    "auth.txt": "auth.txt",
+    "diff.patch": "diff.patch"
+  }
+}

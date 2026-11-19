@@ -1,0 +1,23 @@
+model = "gpt-6.1-terra"
+model_reasoning_effort = "medium"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+suppress_unstable_features_warning = true
+web_search = "disabled"
+model_catalog_json = "<codex-home>/catalog.json"
+
+[features]
+hooks = true
+apps = false
+view_image = false
+image_generation = false
+goals = false
+multi_agent = false
+sleep_tool = false
+
+[agents]
+enabled = false
+
+[mcp_servers.bench-empty]
+command = "node"
+args = ["<repo>/bench/lib/empty-mcp-server.mjs"]

@@ -29,6 +29,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Install bash containment tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap socat ripgrep
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0 || true
+          # Its bwrap profile also forbids the nested user namespace the sandbox's seccomp helper needs.
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict || true; fi
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-user --unshare-net bwrap --ro-bind / / --dev /dev --unshare-user true && echo "nested bubblewrap works" || echo "nested bubblewrap fails"
+          echo "ACM_REQUIRE_CONTAINMENT=1" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm run verify
 

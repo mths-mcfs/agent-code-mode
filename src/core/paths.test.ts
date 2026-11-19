@@ -1,5 +1,6 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { matchesPathPattern } from './paths.js';
+import { matchesPathPattern, workspaceDisplayPath } from './paths.js';
 
 describe('matchesPathPattern', () => {
   it.each([
@@ -21,5 +22,18 @@ describe('matchesPathPattern', () => {
   it('can match case-insensitively', () => {
     expect(matchesPathPattern('/ws/.Claude/Settings.json', '/ws/.claude/settings*.json', true)).toBe(true);
     expect(matchesPathPattern('/ws/.Claude/Settings.json', '/ws/.claude/settings*.json', false)).toBe(false);
+  });
+});
+
+describe('workspaceDisplayPath', () => {
+  const sep = (p: string): string => p.split('/').join(path.sep);
+  it('is the path relative to the cwd, also for files in other roots', () => {
+    const cwd = sep('/w/proj');
+    expect(workspaceDisplayPath(sep('/w/proj/src/a.ts'), cwd)).toBe('src/a.ts');
+    expect(workspaceDisplayPath(cwd, cwd)).toBe('.');
+    expect(workspaceDisplayPath(sep('/w/extra/x'), cwd)).toBe('../extra/x');
+    // A cwd folder and an additional root with the same name stay distinct.
+    expect(workspaceDisplayPath(sep('/w/proj/extra/x'), cwd)).toBe('extra/x');
+    expect(workspaceDisplayPath(sep('/data/deep/y'), cwd)).toBe('../../data/deep/y');
   });
 });
