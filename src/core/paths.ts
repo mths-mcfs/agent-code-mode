@@ -60,9 +60,10 @@ export function normalizeDrivePath(p: string): string {
 /**
  * Whether `p` is a Windows network-share (UNC) path such as `\\server\share`
  * or `//server/share`, including `\\?\` device paths. Not supported.
+ * Three or more leading forward slashes in a POSIX path are redundant.
  */
 export function isUncPath(p: string): boolean {
-  return /^[\\/]{2}/.test(p);
+  return /^[\\/]{2}/.test(p) && !(p.startsWith('///') && !p.includes('\\'));
 }
 
 /** Whether file names on this platform are usually case-insensitive. */

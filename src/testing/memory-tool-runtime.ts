@@ -134,7 +134,9 @@ const { names, lines, maxResults, files } = workerData;
 const nameRe = names === null ? null : new RegExp(names.source, names.flags);
 const keep = [];
 for (let i = 0; i < files.length; i++) {
-  if (nameRe === null || files[i][1].some((name) => nameRe.test(name))) keep.push(i);
+  if (nameRe !== null && !files[i][1].some((name) => nameRe.test(name))) continue;
+  keep.push(i);
+  if (lines === null && keep.length > maxResults) break;
 }
 if (lines === null) {
   const truncated = keep.length > maxResults;
@@ -199,10 +201,6 @@ function searchInWorker<T>(
   onExit: () => void,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      onExit();
-      return reject(new ToolError('cancelled', 'the search was stopped'));
-    }
     let worker: Worker;
     try {
       worker = new Worker(SEARCH_WORKER, { eval: true, workerData: job });
@@ -462,12 +460,11 @@ export class MemoryToolRuntime implements ToolRuntime {
         const matches = scanMatches(before, oldString, MAX_EDIT_REPLACEMENTS + 1);
         const count = matches.count;
         if (count === 0) throw new ToolError('not-found', `oldString not found in ${absPath}`);
-        if (count > 1 && call.args.replaceAll !== true) {
-          const times = count > MAX_EDIT_REPLACEMENTS ? `more than ${MAX_EDIT_REPLACEMENTS}` : `${count}`;
-          throw new ToolError('invalid-args', `oldString matches ${times} times in ${absPath}; pass replaceAll or a longer oldString`);
-        }
         if (count > MAX_EDIT_REPLACEMENTS) {
           throw new ToolError('invalid-args', `oldString matches more than ${MAX_EDIT_REPLACEMENTS} times in ${absPath}; split the edit`);
+        }
+        if (count > 1 && call.args.replaceAll !== true) {
+          throw new ToolError('invalid-args', `oldString matches ${count} times in ${absPath}; pass replaceAll or a longer oldString`);
         }
         const replacements = call.args.replaceAll === true ? count : 1;
         const afterLength = before.length + replacements * (newString.length - oldString.length);
@@ -576,6 +573,7 @@ export class MemoryToolRuntime implements ToolRuntime {
     const release = await this.#takeSearchSlot(signal);
     let pending: Promise<ToolResult>;
     try {
+      if (signal.aborted) throw new ToolError('cancelled', 'the search was stopped');
       pending = this.#startSearch(prepared, signal, release);
     } catch (err) {
       // No worker started, so the slot is free again.
