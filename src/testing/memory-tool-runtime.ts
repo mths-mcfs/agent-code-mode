@@ -28,22 +28,42 @@ export const MAX_DIFF_LINES = 200_000;
 /** Replacements one prepared edit may make. */
 export const MAX_EDIT_REPLACEMENTS = 50_000;
 
-/**
- * Non-overlapping literal occurrences of `needle` (not empty) in `text`,
- * counting at most `limit`, without building arrays.
- */
-function countOccurrences(text: string, needle: string, limit: number): number {
-  let count = 0;
-  for (let at = text.indexOf(needle); at !== -1 && count < limit; at = text.indexOf(needle, at + needle.length)) count++;
-  return count;
+/** Where the non-overlapping literal occurrences of a needle sit in a text. */
+interface Matches {
+  /** Occurrences found, at most the scan limit. */
+  readonly count: number;
+  /** Start of the first occurrence, or -1. */
+  readonly first: number;
+  /** End of the last occurrence found. */
+  readonly lastEnd: number;
+  /** Start of the run of back-to-back occurrences that ends with the last one. */
+  readonly lastRunStart: number;
 }
 
 /**
- * Diff lines a text of this length and number of line breaks counts against
- * `MAX_DIFF_LINES`: an upper bound of its diff rows that needs no text, so an
- * edit can be sized before its result exists.
+ * Scans the non-overlapping literal occurrences of `needle` (not empty) in
+ * `text`, stopping after `limit`, without building arrays.
  */
-const budgetLines = (length: number, newlines: number): number => (length === 0 ? 0 : newlines + 1);
+function scanMatches(text: string, needle: string, limit: number): Matches {
+  let count = 0;
+  let first = -1;
+  let lastEnd = -1;
+  let lastRunStart = -1;
+  for (let at = text.indexOf(needle); at !== -1 && count < limit; at = text.indexOf(needle, at + needle.length)) {
+    if (count === 0) first = at;
+    if (at !== lastEnd) lastRunStart = at;
+    lastEnd = at + needle.length;
+    count++;
+  }
+  return { count, first, lastEnd, lastRunStart };
+}
+
+/** Line breaks in `text`, counting at most one more than `MAX_DIFF_LINES`. */
+const countNewlines = (text: string): number => scanMatches(text, '\n', MAX_DIFF_LINES + 1).count;
+
+/** Diff rows of a text from its length, line breaks and whether it ends with one, as `simpleDiff` counts them. */
+const diffRows = (length: number, newlines: number, endsWithNewline: boolean): number =>
+  length === 0 ? 0 : endsWithNewline ? newlines : newlines + 1;
 
 /** Refuses a diff over `MAX_DIFF_LINES` before any of it is built. */
 function checkDiffLines(lines: number): void {
@@ -57,21 +77,18 @@ function checkDiffLines(lines: number): void {
  * arrays and refuses, before building anything, a diff over `MAX_DIFF_LINES`.
  */
 export function simpleDiff(file: string, before: string | null, after: string): string {
-  const measure = (content: string): { newlines: number; rows: number } => {
-    const newlines = countOccurrences(content, '\n', MAX_DIFF_LINES + 1);
-    return { newlines, rows: content === '' ? 0 : content.endsWith('\n') ? newlines : newlines + 1 };
-  };
-  const a = measure(before ?? '');
-  checkDiffLines(budgetLines(before?.length ?? 0, a.newlines));
-  const b = measure(after);
-  checkDiffLines(budgetLines(before?.length ?? 0, a.newlines) + budgetLines(after.length, b.newlines));
+  const rows = (content: string): number => diffRows(content.length, countNewlines(content), content.endsWith('\n'));
+  const rowsBefore = rows(before ?? '');
+  checkDiffLines(rowsBefore);
+  const rowsAfter = rows(after);
+  checkDiffLines(rowsBefore + rowsAfter);
   const side = (prefix: string, content: string): string => {
     if (content === '') return '';
     const newline = content.endsWith('\n');
     const body = newline ? content.slice(0, -1) : content;
     return `${prefix}${body.replaceAll('\n', `\n${prefix}`)}\n${newline ? '' : '\\ No newline at end of file\n'}`;
   };
-  const head = `--- ${before === null ? '/dev/null' : `a${file}`}\n+++ b${file}\n@@ -${a.rows > 0 ? 1 : 0},${a.rows} +${b.rows > 0 ? 1 : 0},${b.rows} @@\n`;
+  const head = `--- ${before === null ? '/dev/null' : `a${file}`}\n+++ b${file}\n@@ -${rowsBefore > 0 ? 1 : 0},${rowsBefore} +${rowsAfter > 0 ? 1 : 0},${rowsAfter} @@\n`;
   return head + side('-', before ?? '') + side('+', after);
 }
 
@@ -239,6 +256,18 @@ function searchInWorker<T>(
 const regExpSource = (re: RegExp): { source: string; flags: string } => ({ source: re.source, flags: re.flags });
 
 /**
+ * Whether the edited text ends with a line break, read from where the
+ * replaced occurrences sit instead of from the text, which does not exist yet.
+ * The character before a replaced run is never itself replaced.
+ */
+function editEndsWithNewline(before: string, matches: Matches, replaceAll: boolean, oldString: string, newString: string): boolean {
+  const replacedEnd = replaceAll ? matches.lastEnd : matches.first + oldString.length;
+  if (replacedEnd !== before.length) return before.endsWith('\n');
+  if (newString !== '') return newString.endsWith('\n');
+  return before[(replaceAll ? matches.lastRunStart : matches.first) - 1] === '\n';
+}
+
+/**
  * Returns `p`, or refuses a network-share (UNC) path: POSIX resolution folds
  * its leading `//` while protected-path patterns keep it, so the two would
  * name the same share differently.
@@ -333,6 +362,7 @@ export class MemoryToolRuntime implements ToolRuntime {
 
   /** Sets a file, or deletes it when `content` is null, and returns its new revision. */
   setFile(absPath: string, content: string | null, revision: number = this.#nextRevision++): number {
+    refuseUnc(absPath);
     if (content === null) this.files.delete(absPath);
     else this.files.set(absPath, content);
     if (revision === 0) this.#revisions.delete(absPath);
@@ -342,7 +372,7 @@ export class MemoryToolRuntime implements ToolRuntime {
 
   /** Revision of the last change made through this runtime, if any. */
   revision(absPath: string): number {
-    return this.#revisions.get(absPath) ?? 0;
+    return this.#revisions.get(refuseUnc(absPath)) ?? 0;
   }
 
   /** Simulates a change made outside the run. */
@@ -356,8 +386,10 @@ export class MemoryToolRuntime implements ToolRuntime {
 
   /** Resolves `p` against the session cwd and keeps it inside the fixed root, or else the session cwd and roots. */
   #resolve(p: string, ctx: SessionContext): string {
+    // The session cwd and roots are refused even when a fixed root replaces them.
+    for (const root of ctx.roots) refuseUnc(root);
     const abs = posix.resolve(normalizeDrivePath(refuseUnc(ctx.cwd)), normalizeDrivePath(refuseUnc(p)));
-    const roots = this.root === undefined ? [ctx.cwd, ...ctx.roots].map((root) => posix.resolve(normalizeDrivePath(refuseUnc(root)))) : [this.root];
+    const roots = this.root === undefined ? [ctx.cwd, ...ctx.roots].map((root) => posix.resolve(normalizeDrivePath(root))) : [this.root];
     if (!roots.some((root) => isInside(abs, root))) {
       throw new ToolError('outside-workspace', `${p} is outside the workspace ${roots.join(', ')}`);
     }
@@ -427,7 +459,8 @@ export class MemoryToolRuntime implements ToolRuntime {
         const before = this.files.get(absPath);
         if (before === undefined) throw new ToolError('not-found', `${absPath} does not exist`);
         const { oldString, newString } = call.args;
-        const count = countOccurrences(before, oldString, MAX_EDIT_REPLACEMENTS + 1);
+        const matches = scanMatches(before, oldString, MAX_EDIT_REPLACEMENTS + 1);
+        const count = matches.count;
         if (count === 0) throw new ToolError('not-found', `oldString not found in ${absPath}`);
         if (count > 1 && call.args.replaceAll !== true) {
           const times = count > MAX_EDIT_REPLACEMENTS ? `more than ${MAX_EDIT_REPLACEMENTS}` : `${count}`;
@@ -440,11 +473,11 @@ export class MemoryToolRuntime implements ToolRuntime {
         const afterLength = before.length + replacements * (newString.length - oldString.length);
         if (afterLength > MAX_ARG_CHARS) throw new ToolError('invalid-args', 'edited content is too large');
         // Size the diff from counts alone, so an oversized edit builds neither its text nor its diff.
-        const newlines = (text: string): number => countOccurrences(text, '\n', MAX_DIFF_LINES + 1);
-        const newlinesBefore = newlines(before);
-        checkDiffLines(budgetLines(before.length, newlinesBefore));
-        const newlinesAfter = newlinesBefore + replacements * (newlines(newString) - newlines(oldString));
-        checkDiffLines(budgetLines(before.length, newlinesBefore) + budgetLines(afterLength, newlinesAfter));
+        const newlinesBefore = countNewlines(before);
+        const rowsBefore = diffRows(before.length, newlinesBefore, before.endsWith('\n'));
+        checkDiffLines(rowsBefore);
+        const newlinesAfter = newlinesBefore + replacements * (countNewlines(newString) - countNewlines(oldString));
+        checkDiffLines(rowsBefore + diffRows(afterLength, newlinesAfter, editEndsWithNewline(before, matches, call.args.replaceAll === true, oldString, newString)));
         const afterContent =
           call.args.replaceAll === true ? before.replaceAll(call.args.oldString, () => newString) : before.replace(call.args.oldString, () => newString);
         return {

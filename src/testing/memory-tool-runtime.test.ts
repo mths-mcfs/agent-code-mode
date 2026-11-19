@@ -142,7 +142,7 @@ describe('MemoryToolRuntime', () => {
 
   it('refuses an edit over the replacement or diff budget before building its text or diff', async () => {
     const tooMany = 'a'.repeat(MAX_EDIT_REPLACEMENTS + 1);
-    const tooLong = `head\n${'x\n'.repeat(MAX_DIFF_LINES / 2 - 1)}`;
+    const tooLong = `head\n${'x\n'.repeat(MAX_DIFF_LINES / 2)}`;
     const tools = new MemoryToolRuntime({ root: '/ws', files: { 'many.txt': tooMany, 'long.txt': tooLong } });
     const replaceAll = vi.spyOn(String.prototype, 'replaceAll');
     const replace = vi.spyOn(String.prototype, 'replace');
@@ -182,5 +182,52 @@ describe('MemoryToolRuntime', () => {
     expect(tall.tool === 'edit' && tall.effect.diff).toBe(
       `--- a/ws/long.txt\n+++ b/ws/long.txt\n@@ -1,${lines} +1,${lines} @@\n-head\n${'-x\n'.repeat(lines - 1)}+y\n${'+x\n'.repeat(lines - 1)}`,
     );
+  });
+
+  it('refuses a network-share session root even when a fixed root replaces the session roots', async () => {
+    for (const share of ['\\\\server\\share', '//server/share']) {
+      const tools = new MemoryToolRuntime({ root: '/ws', files: { 'note.txt': 'before' } });
+      const ctx = makeContext('/ws', { roots: ['/ws', share] });
+      await expect(prepare(tools, 'write', { path: 'note.txt', content: 'after' }, ctx)).rejects.toMatchObject({ code: 'outside-workspace', message: expect.stringContaining('network share') });
+      expect(tools.read('note.txt')).toBe('before');
+    }
+  });
+
+  it('refuses network-share paths in setFile and revision', () => {
+    const tools = new MemoryToolRuntime({});
+    for (const file of ['\\\\server\\share\\note.txt', '//server/share/note.txt']) {
+      expect(() => tools.setFile(file, 'x')).toThrow(expect.objectContaining({ code: 'outside-workspace' }));
+      expect(() => tools.revision(file)).toThrow(expect.objectContaining({ code: 'outside-workspace' }));
+    }
+    expect(tools.files.size).toBe(0);
+  });
+
+  it('counts diff rows exactly at the line budget when both texts end with a line break', async () => {
+    // 100,000 rows before; the edits below leave 99,999, 100,000 or 100,001 rows after.
+    const before = `head\n${'x\n'.repeat(MAX_DIFF_LINES / 2 - 2)}x\n`;
+    const rows = (diff: string): number => {
+      const header = /^@@ -\d+,(\d+) \+\d+,(\d+) @@$/m.exec(diff);
+      return Number(header?.[1]) + Number(header?.[2]);
+    };
+    for (const [oldString, total] of [['head\nx\n', MAX_DIFF_LINES - 1], ['head\n', MAX_DIFF_LINES]] as const) {
+      const tools = new MemoryToolRuntime({ root: '/ws', files: { 'a.txt': before } });
+      const newString = 'post\n';
+      const edit = await prepare(tools, 'edit', { path: 'a.txt', oldString, newString });
+      const after = `${newString}${before.slice(oldString.length)}`;
+      expect(edit).toMatchObject({ effect: { afterContent: after, diff: simpleDiff('/ws/a.txt', before, after) } });
+      expect(edit.tool === 'edit' && rows(edit.effect.diff)).toBe(total);
+    }
+    const over = new MemoryToolRuntime({ root: '/ws', files: { 'a.txt': before } });
+    await expect(prepare(over, 'edit', { path: 'a.txt', oldString: 'head\n', newString: 'post\nnew\n' })).rejects.toMatchObject({ code: 'invalid-args' });
+    // Deleting a back-to-back run at the end leaves a text ending with the line break before the run:
+    // 100,002 rows before and 99,998 after, since the first match also joins two lines.
+    const lines = 'x\n'.repeat(MAX_DIFF_LINES / 2 - 3);
+    const trimmed = new MemoryToolRuntime({ root: '/ws', files: { 'a.txt': `a\nzb\n${lines}\nz\nz` } });
+    const trim = await prepare(trimmed, 'edit', { path: 'a.txt', oldString: '\nz', newString: '', replaceAll: true });
+    expect(trim).toMatchObject({ effect: { afterContent: `ab\n${lines}`, replacements: 3 } });
+    expect(trim.tool === 'edit' && rows(trim.effect.diff)).toBe(MAX_DIFF_LINES);
+    expect(rows(simpleDiff('/f', before, before.slice('head\n'.length)))).toBe(MAX_DIFF_LINES - 1);
+    expect(rows(simpleDiff('/f', before, `y${before}`))).toBe(MAX_DIFF_LINES);
+    expect(() => simpleDiff('/f', before, `y\n${before}`)).toThrow(expect.objectContaining({ code: 'invalid-args' }));
   });
 });
