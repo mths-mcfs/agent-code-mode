@@ -1,4 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCommandHook } from './command-hook.js';
 
@@ -36,6 +38,32 @@ describe.skipIf(!posix)('runCommandHook (POSIX)', () => {
     expect(grandchild).toBeGreaterThan(0);
     await new Promise((res) => setTimeout(res, 100));
     expect(alive(grandchild)).toBe(false);
+  });
+
+  it('kills a backgrounded descendant when the hook exits normally', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-hook-'));
+    const marker = path.join(dir, 'late');
+    try {
+      const r = await runCommandHook({ ...base, command: `(sleep 0.5; touch '${marker}') & echo started`, stdin: '' });
+      expect(r).toMatchObject({ exitCode: 0, timedOut: false, stdout: 'started\n' });
+      await new Promise((res) => setTimeout(res, 1_000));
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('kills a backgrounded descendant when the hook exits with an error', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-hook-'));
+    const marker = path.join(dir, 'late');
+    try {
+      const r = await runCommandHook({ ...base, command: `(sleep 0.5; touch '${marker}') & exit 2`, stdin: '' });
+      expect(r.exitCode).toBe(2);
+      await new Promise((res) => setTimeout(res, 1_000));
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('caps huge stdout', async () => {
