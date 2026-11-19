@@ -72,6 +72,23 @@ function containmentEquals(a: BashContainment, b: BashContainment): boolean {
   );
 }
 
+/**
+ * For a hook rewrite bound to the prepared file: why the re-prepared call is
+ * not the file version the hook evaluated, or undefined when it is.
+ */
+function boundFileMismatch(first: PreparedCall, second: PreparedCall): string | undefined {
+  if ((first.tool !== 'write' && first.tool !== 'edit') || (second.tool !== 'write' && second.tool !== 'edit') || first.tool !== second.tool) {
+    return 'hook bound its rewrite to a file version, but the call has no file effect';
+  }
+  if (second.effect.absPath !== first.effect.absPath) {
+    return `hook rewrite changed the destination after the hook evaluated ${first.effect.absPath}`;
+  }
+  if (second.effect.beforeHash !== first.effect.beforeHash) {
+    return `${first.effect.absPath} changed after the hook evaluated it; the rewrite was not applied`;
+  }
+  return undefined;
+}
+
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
   if (signal.aborted) {
     promise.catch(() => undefined);
@@ -103,7 +120,9 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typ
  *   `authorize`. `ask` becomes deny `ask-unavailable`. A throwing or malformed
  *   adapter becomes deny `hook-error`.
  * - `updatedArgs` are re-parsed, re-prepared and re-checked statically; a
- *   failure there is a deny (source `hook`).
+ *   failure there is a deny (source `hook`). With `bindsPreparedFile`, the
+ *   re-prepared write/edit must keep the first preparation's `absPath` and
+ *   `beforeHash`, or it is denied (source `hook`) and nothing is committed.
  * - write/edit on a protected path is refused even if the tool runtime missed
  *   it; a bash call whose containment differs from the policy is denied
  *   `containment-unavailable`.
@@ -313,6 +332,10 @@ export class Dispatcher<P = unknown> {
       if ('kind' in second) {
         const reason = second.kind === 'deny' ? second.reason : second.error.message;
         return fail({ kind: 'deny', source: second.kind === 'deny' ? second.source : 'hook', reason: `hook updated input was refused: ${reason}` });
+      }
+      if (decision.bindsPreparedFile === true) {
+        const unbound = boundFileMismatch(prepared, second.prepared);
+        if (unbound !== undefined) return fail({ kind: 'deny', source: 'hook', reason: unbound });
       }
       const recheck = this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);

@@ -21,7 +21,7 @@ export type HookBehavior =
   | { readonly kind: 'allow' }
   | { readonly kind: 'deny'; readonly reason: string }
   | { readonly kind: 'ask'; readonly reason: string }
-  | { readonly kind: 'updatedArgs'; readonly args: unknown }
+  | { readonly kind: 'updatedArgs'; readonly args: unknown; readonly bindsPreparedFile?: true }
   | { readonly kind: 'throw'; readonly message: string }
   | { readonly kind: 'hang' }
   | { readonly kind: 'malformed' };
@@ -86,7 +86,9 @@ export class StaticHostAdapter implements HostAdapter<null> {
       case 'ask':
         return Promise.resolve({ kind: 'ask', reason: behavior.reason });
       case 'updatedArgs':
-        return Promise.resolve({ kind: 'allow', updatedArgs: behavior.args });
+        return Promise.resolve(
+          behavior.bindsPreparedFile ? { kind: 'allow', updatedArgs: behavior.args, bindsPreparedFile: true } : { kind: 'allow', updatedArgs: behavior.args },
+        );
       case 'throw':
         throw new Error(behavior.message);
       case 'malformed':

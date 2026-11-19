@@ -138,6 +138,76 @@ describe('Dispatcher', () => {
     expect(adapter.staticChecked).toHaveLength(2);
   });
 
+  describe('a rewrite bound to the prepared file', () => {
+    it('commits the rewrite when the file is unchanged', async () => {
+      const { dispatcher, tools } = await setup(
+        { hook: { kind: 'updatedArgs', args: { path: 'a.txt', content: 'rewritten' }, bindsPreparedFile: true } },
+        { files: { 'a.txt': 'old' } },
+      );
+      expect((await dispatcher.dispatch('write', { path: 'a.txt', content: 'new' })).ok).toBe(true);
+      expect(tools.read('a.txt')).toBe('rewritten');
+    });
+
+    it('commits a bound rewrite of a write that creates the file', async () => {
+      const { dispatcher, tools } = await setup({ hook: { kind: 'updatedArgs', args: { path: 'new.txt', content: 'rewritten' }, bindsPreparedFile: true } });
+      expect((await dispatcher.dispatch('write', { path: 'new.txt', content: 'x' })).ok).toBe(true);
+      expect(tools.read('new.txt')).toBe('rewritten');
+    });
+
+    it('denies when the file changed between the hook and the second preparation', async () => {
+      let runtime: MemoryToolRuntime | undefined;
+      const { dispatcher, tools } = await setup(
+        {
+          hook: () => {
+            // The file moves on after the hook evaluated the first version.
+            runtime?.externalWrite('a.txt', 'changed meanwhile');
+            return { kind: 'updatedArgs', args: { path: 'a.txt', content: 'rewritten' }, bindsPreparedFile: true };
+          },
+        },
+        { files: { 'a.txt': 'old' } },
+      );
+      runtime = tools;
+      const err = errorOf(await dispatcher.dispatch('write', { path: 'a.txt', content: 'new' }));
+      expect(err).toMatchObject({ name: 'PermissionDenied', source: 'hook' });
+      expect(err.message).toContain('changed after the hook evaluated it');
+      expect(tools.read('a.txt')).toBe('changed meanwhile');
+      expect(tools.commits).toHaveLength(0);
+    });
+
+    it('denies when the file was created between the hook and the second preparation', async () => {
+      let runtime: MemoryToolRuntime | undefined;
+      const { dispatcher, tools } = await setup({
+        hook: () => {
+          runtime?.externalWrite('a.txt', 'created meanwhile');
+          return { kind: 'updatedArgs', args: { path: 'a.txt', content: 'rewritten' }, bindsPreparedFile: true };
+        },
+      });
+      runtime = tools;
+      expect(errorOf(await dispatcher.dispatch('write', { path: 'a.txt', content: 'new' }))).toMatchObject({ source: 'hook' });
+      expect(tools.read('a.txt')).toBe('created meanwhile');
+      expect(tools.commits).toHaveLength(0);
+    });
+
+    it('denies a bound rewrite that targets another file with the same bytes', async () => {
+      const { dispatcher, tools } = await setup(
+        { hook: { kind: 'updatedArgs', args: { path: 'b.txt', content: 'rewritten' }, bindsPreparedFile: true } },
+        { files: { 'a.txt': 'same', 'b.txt': 'same' } },
+      );
+      const err = errorOf(await dispatcher.dispatch('write', { path: 'a.txt', content: 'new' }));
+      expect(err).toMatchObject({ name: 'PermissionDenied', source: 'hook' });
+      expect(err.message).toContain('destination');
+      expect(tools.read('a.txt')).toBe('same');
+      expect(tools.read('b.txt')).toBe('same');
+      expect(tools.commits).toHaveLength(0);
+    });
+
+    it('denies a bound rewrite of a call that has no file effect', async () => {
+      const { dispatcher, tools } = await setup({ hook: { kind: 'updatedArgs', args: { command: 'echo b' }, bindsPreparedFile: true } });
+      expect(errorOf(await dispatcher.dispatch('bash', { command: 'echo a' }))).toMatchObject({ source: 'hook' });
+      expect(tools.commits).toHaveLength(0);
+    });
+  });
+
   it('refuses updatedArgs that point outside the workspace', async () => {
     const { dispatcher, tools } = await setup({ hook: { kind: 'updatedArgs', args: { path: '../etc/passwd', content: 'x' } } });
     const err = errorOf(await dispatcher.dispatch('write', { path: 'a.txt', content: 'x' }));

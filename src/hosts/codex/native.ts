@@ -122,7 +122,11 @@ const UpdatedCommandSchema = z.looseObject({ command: z.string() });
 /** Result of mapping a hook rewrite back to binding args. */
 export type MappedUpdate =
   | { readonly kind: 'unchanged' }
-  | { readonly kind: 'updated'; readonly args: unknown }
+  /**
+   * `bindsPreparedFile`: the args were computed from the file version the hook
+   * evaluated, so the dispatcher must commit them only against that version.
+   */
+  | { readonly kind: 'updated'; readonly args: unknown; readonly bindsPreparedFile?: true }
   | { readonly kind: 'invalid'; readonly reason: string }
   | { readonly kind: 'unsupported'; readonly reason: string };
 
@@ -150,11 +154,11 @@ function mapPatch(prepared: PreparedCallOf<'write'> | PreparedCallOf<'edit'>, na
   }
   if (prepared.tool === 'write') {
     const args: WriteArgs = { path: prepared.args.path, content };
-    return { kind: 'updated', args };
+    return { kind: 'updated', args, bindsPreparedFile: true };
   }
   if (before === null || before === '') return { kind: 'unsupported', reason: 'hook apply_patch cannot be expressed as an edit of an empty file' };
   const args: EditArgs = { path: prepared.args.path, oldString: before, newString: content };
-  return { kind: 'updated', args };
+  return { kind: 'updated', args, bindsPreparedFile: true };
 }
 
 /** Maps a hook's `updatedInput` (untrusted) back to binding args for the same tool. */
