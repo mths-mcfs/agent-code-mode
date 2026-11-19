@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, vi } from 'vitest';
+import { afterAll, expect, vi } from 'vitest';
 import { DEFAULT_FIXTURE_SEED } from '../fixture/generate.ts';
 import { createWorkspace } from '../lib/workspace.ts';
 import { TASKS } from '../tasks/index.ts';
@@ -28,5 +28,26 @@ export async function verifierWorkspaces() {
     return createWorkspace(path.join(root, `${task}-${n}`), TASKS[task], host, DEFAULT_FIXTURE_SEED);
   }
 
-  return { workspace };
+  /** A T15 workspace with the reference solution applied, to break in one place. */
+  async function solvedT15() {
+    const ws = await workspace('T15');
+    await TASKS.T15.solution(ws.dir, ws.fixture.facts);
+    const verify = () => TASKS.T15.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    const restore = async (rel: string): Promise<void> => {
+      await writeFile(path.join(ws.dir, ...rel.split('/')), ws.initial.get(rel) ?? '');
+    };
+    return { ws, verify, restore };
+  }
+
+  return { workspace, solvedT15 };
 }
+
+/** Replaces `from` (which must be there, once) with `to` in a workspace file. */
+export async function edit(dir: string, rel: string, from: string, to: string): Promise<void> {
+  const file = path.join(dir, ...rel.split('/'));
+  const text = await readFile(file, 'utf8');
+  expect(text.split(from).length, `${rel} has ${JSON.stringify(from)} once`).toBe(2);
+  await writeFile(file, text.replace(from, () => to));
+}
+
+export const hiddenLine = (details: readonly string[]): string => details.find((d) => d.startsWith('FAIL hidden tests pass')) ?? '';

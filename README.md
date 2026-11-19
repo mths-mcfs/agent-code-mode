@@ -17,8 +17,10 @@ npx -y agent-code-mode install --host claude --scope project
 User scope prints the registration command and the companion hook for `~/.claude/settings.json`:
 
 ```sh
-claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude
+claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude --hybrid
 ```
+
+Install uses `--hybrid` by default because Claude Code keeps its native file and shell tools enabled next to `run`: the tool description then says when to batch calls with `run` and when a native tool is enough. Drop `--hybrid` only if you turn the native tools off and the model works through `run` alone.
 
 ```json
 {
@@ -58,11 +60,11 @@ The script is the body of an async function. All bindings are async globals; `re
 
 ```js
 const hits = await grep({ pattern: 'TODO', glob: '*.ts' });
-for (const file of [...new Set(hits.matches.map((m) => m.file))]) {
+for (const file of [...new Set(hits.rows.map(([file]) => file))]) {
   await edit({ path: file, oldString: 'TODO', newString: 'DONE', replaceAll: true });
 }
 const test = await bash({ command: 'npm test --silent' });
-return { files: hits.matches.length, exitCode: test.exitCode };
+return { matches: hits.count, exitCode: test.exitCode };
 ```
 
 | Binding | Returns |
@@ -71,10 +73,11 @@ return { files: hits.matches.length, exitCode: test.exitCode };
 | `read({path, offset?, limit?})` | `{path, content, startLine, totalLines, truncated}` |
 | `write({path, content})` | `{path, created, diff}` |
 | `edit({path, oldString, newString, replaceAll?})` | `{path, replacements, matchStrategy, diff}` |
-| `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{matches: [{file, line, text}], truncated, filtered}` |
+| `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{columns: ['file', 'line', 'text'], rows: [[file, line, text]], count, truncated, filtered}` |
 | `glob({pattern, path?, maxResults?})` | `{files, truncated, filtered}` |
+| `readOverflow(id, offset?, limit?)` | `{text, offset, totalChars, truncated}`: a slice of a result a response cut |
 
-`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `run` takes `{code, transaction?, timeoutMs?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The result holds the return value, logs, a call log, the changed files and a combined diff.
+`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `read` returns the exact text of the lines, final newline included, and paths in results are relative to the working directory when inside it. `run` takes `{code, transaction?, timeoutMs?, verbose?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied; if the server process dies mid-run, the next start restores them from its journal (inside the roots of that run only). The response is a JSON block: `{ok, result | error, logs, calls: {total, byTool, denied, errors}, changedFiles, diff | diffStat, warnings}`, with empty fields left out. Every denied and failed call is listed with its reason, and every changed file is listed. A multi-line string result longer than 200 characters comes as plain text in a second block instead of an escaped JSON string. A diff above 1,500 characters becomes `diffStat` (lines added and removed for up to 10 files, plus the totals). A response stays under about 10,000 tokens (40,000 characters; 9,500 for an error): above that, the result and the logs keep their start and end, long lists keep their first entries, each cut is marked and `truncated: true` is set. Denied and failed calls are never cut by entry: when they do not fit whole, they are grouped by tool and reason as `{tool, reason, count, first}` (`first` is the summary of the first call), so every distinct reason shows with its exact count. Only with thousands of distinct reasons is each reason cut to 200 characters and, if that is still too much, the last groups replaced by a `…[N more reasons (M calls)]` marker. With `verbose: true`, a call log above the cap keeps its first entries and the compact calls come beside it as `callSummary`. Whenever something is left out, the whole result is kept in the server's memory for 30 minutes and the response carries `overflow: {id, chars}`; a later script reads it with `readOverflow(id)`. The id is random, works only in the same server process and nothing is written to disk. `verbose: true` returns the log of every call and the whole diff.
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` says which rung matched.
 
@@ -92,6 +95,7 @@ Semantics:
 - **`ask` is denied.** The server has no way to prompt you. When the host would ask, the call is refused with source `ask-unavailable`. Allow what the script needs with your usual rules or permission mode.
 - **Auto mode (Claude).** Claude's classifier reviews the whole `run` call once. Deny and ask rules still apply to every inner call. If an allow rule approves `run` itself, the classifier never saw the script, so inner calls no rule decides follow auto mode's fallback: reads and edits inside the working directories pass, everything else asks.
 - **Paths.** Calls are confined to the session cwd, the client's roots and the host's additional directories. Symlinks leading out are refused. Host policy files (`.claude/settings*.json`, `.claude/hooks/`, `.mcp.json`, `.codex/`, `~/.claude/`, `$CODEX_HOME`, the server state dir) cannot be written. `grep` and `glob` drop files your Read rules deny and count them in `filtered`.
+- **Globs in `bash` (Claude).** A relative glob read by `cat`, `head`, `tail`, `wc` or `ls` (with options from a fixed list, no `ls -R`, no redirection, no `..`, `~`, `$VAR`, `$(...)` or backticks) is expanded before authorization, and the command names each match literally, single-quoted after `--`: `wc -l src/*` becomes `wc -l -- 'src/a.js' 'src/b.js'`. Rules, hooks and the result (`command`) see that command. The matches and their order come from the same bash, in the same environment and locale, with startup files (`BASH_ENV`) left out so expanding runs no code; on Windows (Git Bash) globs are not expanded. Each match must resolve inside the workspace and be a regular file (or a directory for `ls`, whose listed children must pass your Read rules); otherwise the call fails. A glob that matches nothing, or any other command, stays as written. Right before the command starts, every match is checked again (device, inode and type, of the link and of what it points to); if one changed, nothing runs. What remains is the moment between that check and the reader opening the file, a few milliseconds in which a process that can write the workspace could swap a file. Native Claude Code checks a command's paths and then runs it with no second check at all, so that window is larger there.
 - **`bash` containment** mirrors the host. When Claude's sandbox is enabled, or Codex runs `read-only`/`workspace-write`, commands run in an OS sandbox (bubblewrap on Linux, Seatbelt on macOS) with the host's writable roots. If that cannot be enforced, the call is refused, never run unconfined.
 - **Overlapping transactions.** Within one server, a transactional run may not write a file that another unfinished transactional run already changed: that write fails, so both runs can still roll back to the true original.
 - **Rollback covers files only.** Effects of `bash` (processes, network, files a command wrote) are never undone; the result warns when a rolled-back run had committed `bash` calls.
@@ -110,7 +114,7 @@ Output is capped below the hosts' MCP limits (about 30,000 characters, less for 
 
 ## Compared with the built-in code modes
 
-- **Claude Code's official Code Mode** applies the same per-call rules and hooks, but only in interactive sessions. agent-code-mode also works in `claude -p`, the Agent SDK and Codex, and every call shows up in a call log you get back.
+- **Claude Code's official Code Mode** applies the same per-call rules and hooks, but only in interactive sessions. agent-code-mode also works in `claude -p`, the Agent SDK and Codex, and every denied or failed call shows up in the result you get back (every call with `verbose: true`).
 - **Codex's own code mode.** Codex 0.169 models already run in Codex's code mode by default (its `exec` tool calls nested tools). agent-code-mode gives Codex the same binding surface as Claude, with transactions, the call log and your hooks applied to file reads and edits made inside the script.
 
 ## Benchmark

@@ -15,6 +15,7 @@ import type {
   PolicyLoadError,
   PolicySnapshot,
   PreparedCall,
+  ScriptValue,
   SessionContext,
   ToolCall,
   ToolResult,
@@ -434,7 +435,7 @@ export class Dispatcher<P = unknown> {
     }
 
     this.#calls[slot] = { id: prepared.id, tool: prepared.tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
-    return { ok: true, value: result };
+    return { ok: true, value: scriptResult(result, this.#canonicalCwd) };
   }
 
   #toolFailure(err: unknown): Failure {
@@ -560,10 +561,29 @@ function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall
   return requested === undefined ? rest : { ...rest, requestedPath: requested };
 }
 
-/** Path relative to `cwd` when inside it, else the absolute path. */
+/** Path relative to `cwd` when inside it (a name like `..env` is inside), else the absolute path. */
 export function displayPath(absPath: string, cwd: string): string {
   const rel = path.relative(cwd, absPath);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
+  const inside = rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+  return inside ? rel.split(path.sep).join('/') : absPath;
+}
+
+/**
+ * The result as the script sees it: paths inside `cwd` are relative to it
+ * (they resolve back to the same file when passed to a binding), so a result
+ * the script returns does not repeat the workspace path in every entry, and
+ * grep matches are rows under one `columns` header. `cwd` is the real path of
+ * the session cwd, the form the tool runtime's paths take. Hooks and the diff
+ * keep the tool runtime's absolute paths.
+ */
+export function scriptResult(result: ToolResult, cwd: string): ScriptValue {
+  if ('matches' in result) {
+    const rows = result.matches.map((m) => [displayPath(m.file, cwd), m.line, m.text] as const);
+    return { columns: ['file', 'line', 'text'], rows, count: rows.length, truncated: result.truncated, filtered: result.filtered };
+  }
+  if ('files' in result) return { ...result, files: result.files.map((f) => displayPath(f, cwd)) };
+  if ('path' in result) return { ...result, path: displayPath(result.path, cwd) };
+  return result;
 }
 
 /** Short description of a call for the call log. */

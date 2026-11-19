@@ -130,13 +130,19 @@ export interface BashResult {
   readonly truncated: boolean;
   /** True when the command hit its timeout and was killed. */
   readonly timedOut: boolean;
+  /**
+   * The command that ran, present only when it is not the one the script
+   * passed: its globs were expanded to the literal list of files before it was
+   * authorized (see `BashEffect.expansion`).
+   */
+  readonly command?: string;
 }
 
 /** Result of `read`. */
 export interface ReadResult {
-  /** Absolute real path that was read. */
+  /** Real path that was read; the script sees it relative to the session cwd when inside it. */
   readonly path: string;
-  /** The returned lines, joined with `\n`. */
+  /** Exact text of the returned lines: each keeps its newline, except a last line the file leaves unterminated. */
   readonly content: string;
   /** 1-based line number of the first returned line. */
   readonly startLine: number;
@@ -148,7 +154,7 @@ export interface ReadResult {
 
 /** Result of `write`. */
 export interface WriteResult {
-  /** Absolute real path that was written. */
+  /** Real path that was written; the script sees it relative to the session cwd when inside it. */
   readonly path: string;
   /** True when the file did not exist before. */
   readonly created: boolean;
@@ -168,7 +174,7 @@ export type MatchStrategy = 'exact' | 'line-endings' | 'line-numbers' | 'trailin
 
 /** Result of `edit`. */
 export interface EditResult {
-  /** Absolute real path that was edited. */
+  /** Real path that was edited; the script sees it relative to the session cwd when inside it. */
   readonly path: string;
   /** Number of occurrences replaced. */
   readonly replacements: number;
@@ -179,7 +185,7 @@ export interface EditResult {
 
 /** One `grep` match. */
 export interface GrepMatch {
-  /** Absolute real path of the file. */
+  /** Real path of the file; the script sees it relative to the session cwd when inside it. */
   readonly file: string;
   /** 1-based line number. */
   readonly line: number;
@@ -198,7 +204,7 @@ export interface GrepResult {
 
 /** Result of `glob`. */
 export interface GlobResult {
-  /** Absolute real paths. */
+  /** Real paths; the script sees them relative to the session cwd when inside it. */
   readonly files: readonly string[];
   /** True when more files existed than were returned. */
   readonly truncated: boolean;
@@ -218,6 +224,29 @@ export interface ToolResultMap {
 
 /** Any tool result. */
 export type ToolResult = ToolResultMap[ToolName];
+
+/** `grep` result as the script sees it: one row per match, paths relative to the session cwd when inside it. */
+export interface ScriptGrepResult {
+  readonly columns: readonly ['file', 'line', 'text'];
+  readonly rows: readonly (readonly [file: string, line: number, text: string])[];
+  /** Number of rows. */
+  readonly count: number;
+  readonly truncated: boolean;
+  readonly filtered: number;
+}
+
+/** What `readOverflow(id, offset?, limit?)` resolves to: a slice of a result a response cut. */
+export interface OverflowSlice {
+  readonly text: string;
+  /** Character offset of `text` in the kept result. */
+  readonly offset: number;
+  readonly totalChars: number;
+  /** True when the kept result goes on after `text`. */
+  readonly truncated: boolean;
+}
+
+/** A binding's resolved value as the script receives it. */
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice;
 
 // ---------------------------------------------------------------------------
 // Prepared calls: the exact effect that is authorized and then committed.
@@ -249,6 +278,51 @@ export interface BashEffect {
   readonly timeoutMs: number;
   /** Containment the tool runtime will enforce; must equal the policy's `bashContainment`. */
   readonly containment: BashContainment;
+  /**
+   * Present when globs of the command were expanded at prepare (see
+   * `PolicySnapshot.planBashExpansion`): `command` then names every file
+   * literally, and commit refuses to run it unless each entry still has the
+   * identity recorded here.
+   */
+  readonly expansion?: BashExpansion;
+}
+
+/** What a glob expansion of a `bash` command replaced and the entries it named. */
+export interface BashExpansion {
+  /** The command as it would have run without the expansion. */
+  readonly original: string;
+  /** Every file or directory the globs expanded to, in command order. */
+  readonly entries: readonly BashExpandedEntry[];
+}
+
+/** One expanded entry and its identity at prepare. */
+export interface BashExpandedEntry {
+  /** Absolute path as named in the command (its last component not resolved). */
+  readonly path: string;
+  /** `dev:ino:type` of the entry itself (lstat, a symbolic link is not followed). */
+  readonly identity: string;
+  /** `dev:ino:type` of what the command opens (stat, symbolic links followed). */
+  readonly targetIdentity: string;
+}
+
+/**
+ * Where a host can expand the globs of a `bash` command (built by the host
+ * adapter, which owns the shell parser; the tool runtime does the I/O).
+ * `globs` lists each glob word to expand; `render` returns the command with
+ * the i-th glob replaced by `matches[i]` (paths relative to the command's cwd,
+ * in the order given).
+ */
+export interface BashGlobPlan {
+  readonly globs: readonly BashGlob[];
+  render(matches: readonly (readonly string[])[]): string;
+}
+
+/** One glob word of a `bash` command. */
+export interface BashGlob {
+  /** The word as written: literal text, quotes and glob characters only. */
+  readonly raw: string;
+  /** Whether a match may be a directory (`ls`); otherwise only regular files. */
+  readonly directories: boolean;
 }
 
 /** Effect of a `read` call. */
@@ -437,6 +511,13 @@ export interface PolicySnapshot<P = unknown> {
    * path inside the workspace is readable.
    */
   readonly readFilter?: (realAbsPath: string) => boolean;
+  /**
+   * Plans the expansion of globs in a `bash` command (relative patterns read
+   * by a known pure reader such as `cat` or `wc`). Undefined, or a result of
+   * undefined, leaves the command as written. The tool runtime expands the
+   * plan at prepare against the command's cwd and validates every match.
+   */
+  readonly planBashExpansion?: (command: string) => BashGlobPlan | undefined;
   readonly payload: P;
 }
 
@@ -582,7 +663,7 @@ export type BindingError =
 
 /** Reply to one binding call. Never thrown: the dispatcher always resolves. */
 export type CallReply =
-  | { readonly ok: true; readonly value: ToolResult }
+  | { readonly ok: true; readonly value: ScriptValue }
   | { readonly ok: false; readonly error: BindingError };
 
 /** Options of `Sandbox.run`. */
@@ -674,6 +755,4 @@ export interface RunResult {
   readonly rolledBack?: RollbackReport;
   /** Notes the model must know, e.g. bash effects that were not rolled back. */
   readonly warnings: readonly string[];
-  /** Set by output shaping when the full result was written to a file. */
-  readonly overflowPath?: string;
 }

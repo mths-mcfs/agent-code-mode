@@ -22,7 +22,8 @@ type ExecMode = 'hang' | 'exit' | 'refresh-hang' | 'refresh-exit' | 'refresh-con
 /**
  * A fake `codex` that answers the harness's preflight calls. In `exec` it can refresh the token the
  * way Codex does (write a temp file, rename it over $CODEX_HOME/auth.json), change the real auth file
- * behind the harness's back (conflict), and then hang or print a minimal finished transcript.
+ * behind the harness's back (conflict), and then hang or print a minimal finished transcript. The
+ * refresh and the conflict happen on the first exec only: that is the warmup run, which comes first.
  */
 function fakeCodex(pidFile: string, mode: ExecMode, realAuth: string): string {
   return `#!${process.execPath}
@@ -34,12 +35,13 @@ if (a[0] === '--version') { console.log('codex-cli 0.169.0'); process.exit(0); }
 if (a[0] === 'debug' && a[1] === 'models') { process.stdout.write(fs.readFileSync(${JSON.stringify(CATALOG)}, 'utf8')); process.exit(0); }
 if (a[0] === 'debug' && a[1] === 'prompt-input') { console.log(JSON.stringify([{ type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: ${JSON.stringify(ARM_A_TOOLS)} }] }])); process.exit(0); }
 if (a[0] !== 'exec') process.exit(2);
-if (mode.startsWith('refresh')) {
+const first = !fs.existsSync(${JSON.stringify(pidFile)});
+if (first && mode.startsWith('refresh')) {
   const auth = path.join(process.env.CODEX_HOME, 'auth.json');
   fs.writeFileSync(auth + '.tmp', ${JSON.stringify(REFRESHED)}, { mode: 0o600 });
   fs.renameSync(auth + '.tmp', auth);
 }
-if (mode === 'refresh-conflict-exit') fs.writeFileSync(${JSON.stringify(realAuth)}, ${JSON.stringify(OTHER)});
+if (first && mode === 'refresh-conflict-exit') fs.writeFileSync(${JSON.stringify(realAuth)}, ${JSON.stringify(OTHER)});
 fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 if (mode.endsWith('hang')) setInterval(() => {}, 1000);
 else {
@@ -128,10 +130,16 @@ async function cleanup(h: Harness): Promise<void> {
   await rm(h.root, { recursive: true, force: true });
 }
 
-async function findFile(dir: string, name: string): Promise<string> {
-  const files = (await readdir(dir, { recursive: true })).filter((f) => path.basename(f) === name);
-  if (files[0] === undefined) throw new Error(`no ${name} under ${dir}`);
-  return readFile(path.join(dir, files[0]), 'utf8');
+/**
+ * A file of the one warmup run or the one matrix run, picked by the `warmup` flag of the record next to
+ * it: directory order (and so which run comes first) differs between filesystems.
+ */
+async function runFile(dir: string, name: string, warmup: boolean): Promise<string> {
+  const records = (await readdir(dir, { recursive: true })).filter((f) => path.basename(f) === 'record.json');
+  const hits: string[] = [];
+  for (const r of records) if (z.object({ warmup: z.boolean() }).parse(JSON.parse(await readFile(path.join(dir, r), 'utf8'))).warmup === warmup) hits.push(r);
+  if (hits.length !== 1 || hits[0] === undefined) throw new Error(`expected one ${warmup ? 'warmup' : 'matrix'} record under ${dir}, found ${hits.length}`);
+  return readFile(path.join(dir, path.dirname(hits[0]), name), 'utf8');
 }
 
 describe.skipIf(!posix)('temporary CODEX_HOME: interruption', () => {
@@ -188,7 +196,9 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
       expect(await readFile(h.realAuth, 'utf8')).toBe(REFRESHED);
       expect((await stat(h.realAuth)).mode & 0o777).toBe(0o600);
       expect(await authFiles(h.work)).toEqual([]);
-      expect(await findFile(path.join(h.root, 'results'), 'auth.txt')).toBe('auth.json: written-back\n');
+      // The warmup run is the one that refreshed; the matrix run after it found nothing to write back.
+      expect(await runFile(path.join(h.root, 'results'), 'auth.txt', true)).toBe('auth.json: written-back\n');
+      expect(await runFile(path.join(h.root, 'results'), 'auth.txt', false)).toBe('auth.json: unchanged\n');
     } finally {
       await cleanup(h);
     }
@@ -199,7 +209,7 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
     try {
       expect(await readFile(h.realAuth, 'utf8')).toBe(OTHER);
       expect(h.stderr).toContain('kept the real file');
-      expect(await findFile(path.join(h.root, 'results'), 'auth.txt')).toBe('auth.json: conflict-kept-real\n');
+      expect(await runFile(path.join(h.root, 'results'), 'auth.txt', true)).toBe('auth.json: conflict-kept-real\n');
       expect(await authFiles(h.work)).toEqual([]);
     } finally {
       await cleanup(h);
@@ -210,9 +220,10 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
     const h = await harness('exit');
     try {
       expect(await readFile(h.realAuth, 'utf8')).toBe(ORIGINAL);
-      expect(await findFile(path.join(h.root, 'results'), 'auth.txt')).toBe('auth.json: unchanged\n');
+      expect(await runFile(path.join(h.root, 'results'), 'auth.txt', true)).toBe('auth.json: unchanged\n');
+      expect(await runFile(path.join(h.root, 'results'), 'auth.txt', false)).toBe('auth.json: unchanged\n');
       // A real (non-dry) Codex run whose tool surface was observed is a valid run.
-      const record = JSON.parse(await findFile(path.join(h.root, 'results'), 'record.json'));
+      const record = JSON.parse(await runFile(path.join(h.root, 'results'), 'record.json', false));
       expect(record.invalidReasons).toEqual([]);
       expect(record.valid).toBe(true);
       expect(record.parsed.availableTools).toContain('functions.exec_command');

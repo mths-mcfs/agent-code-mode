@@ -120,9 +120,16 @@ function withCompanionHook(text: string | null, file: string, local: boolean): s
   return `${JSON.stringify(next, null, 2)}\n`;
 }
 
+/**
+ * How Claude Code starts the server: `--hybrid`, since the native file and
+ * shell tools stay enabled next to `run` (the description then says when to
+ * batch with `run` and when a native tool is enough).
+ */
+const CLAUDE_SERVE = ['serve', '--host', 'claude', '--hybrid'];
+
 /** The `.mcp.json` server entry for Claude Code. */
 export function mcpJsonEntry(local: boolean): { type: 'stdio'; command: string; args: string[] } {
-  const [command = 'npx', ...args] = [...cliArgv(local), 'serve', '--host', 'claude'];
+  const [command = 'npx', ...args] = [...cliArgv(local), ...CLAUDE_SERVE];
   return { type: 'stdio', command, args };
 }
 
@@ -210,7 +217,7 @@ export async function planInstall(o: InstallOptions): Promise<InstallPlan> {
   const refusals: string[] = [];
   if (o.host === 'claude') {
     const settingsFile = o.scope === 'user' ? path.join(claudeConfigDir(o.env, o.home), 'settings.json') : path.join(o.cwd, '.claude', 'settings.json');
-    const serverArgv = [...cliArgv(o.local), 'serve', '--host', 'claude'];
+    const serverArgv = [...cliArgv(o.local), ...CLAUDE_SERVE];
     if (o.scope === 'user') {
       const add = shellLine(['claude', 'mcp', 'add', '--scope', 'user', REGISTERED_SERVER_NAME, '--', ...serverArgv]);
       commands.push(add);

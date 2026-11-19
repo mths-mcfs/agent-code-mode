@@ -13,7 +13,7 @@ import type {
   ToolRuntime,
   Transaction,
 } from '../core/types.js';
-import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
+import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, expandBashGlobs, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace } from './edit-match.js';
 import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
@@ -178,8 +178,12 @@ export class NodeToolRuntime implements ToolRuntime {
           if (!st) throw new ToolError('not-found', `bash cwd ${call.args.cwd} does not exist`);
           if (!st.isDirectory()) throw new ToolError('invalid-args', `bash cwd ${call.args.cwd} is not a directory`);
         }
+        // Globs of pure readers become the literal files they match (the host plans, prepare expands and validates).
+        const plan = policy.planBashExpansion?.(call.args.command);
+        const expanded = plan === undefined ? undefined : await expandBashGlobs(plan, cwd, jail, policy.readFilter);
         // What hooks see is exactly what runs: another cwd becomes part of the command.
-        const command = cwd === jail.cwd ? call.args.command : `cd -- ${shellQuote(cwd)} && ${call.args.command}`;
+        const inCwd = (c: string): string => (cwd === jail.cwd ? c : `cd -- ${shellQuote(cwd)} && ${c}`);
+        const command = inCwd(expanded?.command ?? call.args.command);
         const timeoutMs = Math.min(call.args.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
         const containment = policy.bashContainment;
         assertContainmentShape(containment);
@@ -191,7 +195,13 @@ export class NodeToolRuntime implements ToolRuntime {
           id: call.id,
           tool: 'bash',
           args: { command, timeoutMs },
-          effect: { command, cwd: jail.cwd, timeoutMs, containment },
+          effect: {
+            command,
+            cwd: jail.cwd,
+            timeoutMs,
+            containment,
+            ...(expanded === undefined ? {} : { expansion: { original: inCwd(call.args.command), entries: expanded.entries } }),
+          },
         };
         this.#meta.put(prepared, meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)));
         return prepared;
@@ -382,7 +392,10 @@ export class NodeToolRuntime implements ToolRuntime {
       bytes += size;
     }
     if (offset - 1 + window.length < lines.length) truncated = true;
-    return { path: absPath, content: window.join('\n'), startLine: offset, totalLines: lines.length, truncated };
+    // Exact text of the window: every line keeps its newline, except a last line the file leaves unterminated.
+    const unterminated = offset - 1 + window.length >= lines.length && !text.endsWith('\n');
+    const content = window.length === 0 ? '' : `${window.join('\n')}${unterminated ? '' : '\n'}`;
+    return { path: absPath, content, startLine: offset, totalLines: lines.length, truncated };
   }
 
   async #commitWrite(

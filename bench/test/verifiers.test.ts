@@ -1,4 +1,4 @@
-// The per-task verifier cases. The verifier cases are split across files so that Vitest runs them in parallel processes.
+// The per-task verifier cases for T1-T11. The verifier cases are split across files so that Vitest runs them in parallel processes.
 import { describe, expect, it } from 'vitest';
 import { TASKS } from '../tasks/index.ts';
 import { TASK_IDS } from '../tasks/types.ts';
@@ -6,7 +6,7 @@ import { verifierWorkspaces } from './verifier-workspaces.ts';
 
 const { workspace } = await verifierWorkspaces();
 
-describe.each(TASK_IDS)('verifier %s', (id) => {
+describe.each(TASK_IDS.slice(0, 11))('verifier %s', (id) => {
   const task = TASKS[id];
 
   it('fails on the untouched fixture', async () => {

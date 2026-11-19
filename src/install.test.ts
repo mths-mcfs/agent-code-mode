@@ -46,15 +46,25 @@ describe('install', () => {
       hooks: { PreToolUse: [{ matcher: 'mcp__agent-code-mode__run', hooks: [{ type: 'command', command: 'npx -y agent-code-mode hook' }] }] },
     });
     const mcp: unknown = JSON.parse(readFileSync(path.join(project, '.mcp.json'), 'utf8'));
-    expect(mcp).toEqual({ mcpServers: { 'agent-code-mode': { type: 'stdio', command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'claude'] } } });
+    expect(mcp).toEqual({ mcpServers: { 'agent-code-mode': { type: 'stdio', command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'claude', '--hybrid'] } } });
     // Idempotent: a second run changes nothing.
     expect((await planInstall(opts({}))).changes).toEqual([]);
   });
 
   it('Claude user scope: prints the claude mcp add command and only touches the user settings', async () => {
     const plan = await planInstall(opts({ scope: 'user' }));
-    expect(plan.commands).toEqual(['claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude']);
+    expect(plan.commands).toEqual(['claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude --hybrid']);
     expect(plan.changes.map((c) => c.file)).toEqual([path.join(home, '.claude', 'settings.json')]);
+  });
+
+  it('starts the Claude server with --hybrid and the Codex server without it', async () => {
+    const claude = await planInstall(opts({ scope: 'user' }));
+    expect(claude.text).toContain('serve --host claude --hybrid');
+    const codexHome = path.join(base, 'codex-hybrid');
+    mkdirSync(codexHome);
+    const codex = await planInstall(opts({ host: 'codex', scope: 'user', env: { CODEX_HOME: codexHome } }));
+    expect(codex.text).toContain('"serve", "--host", "codex"');
+    expect(codex.text).not.toContain('--hybrid');
   });
 
   it('refuses to rewrite a settings file it cannot parse', async () => {

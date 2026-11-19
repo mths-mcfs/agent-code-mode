@@ -105,10 +105,12 @@ export function snapshot(dir: string): Record<string, string> {
 }
 
 export interface Server {
-  /** Calls `run` and returns the parsed result. */
+  /** Calls `run` with `verbose: true` and returns the parsed result (full call log and diff). */
   run(code: string, opts?: { transaction?: boolean; timeoutMs?: number; signal?: AbortSignal }): Promise<RunOutput>;
-  /** Calls `run` and returns the raw text of the response. */
+  /** Calls `run` and returns the raw text of the response (all content blocks, joined). */
   runText(code: string): Promise<string>;
+  /** Calls `run` and returns each content block's text. */
+  runBlocks(code: string): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -126,20 +128,26 @@ async function serve(runtime: Runtime, lab: Lab, meta: Record<string, unknown>, 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  const call = async (args: Record<string, unknown>, signal?: AbortSignal): Promise<string> => {
+  const call = async (args: Record<string, unknown>, signal?: AbortSignal): Promise<string[]> => {
     const res = await client.callTool({ name: 'run', arguments: args, _meta: meta }, CallToolResultSchema, { timeout: 120_000, ...(signal ? { signal } : {}) });
-    const parsed = z.object({ content: z.array(z.object({ type: z.literal('text'), text: z.string() })).min(1) }).parse(res);
-    return parsed.content[0]?.text ?? '';
+    const parsed = z.object({ content: z.array(z.object({ type: z.literal('text'), text: z.string() })).min(1).max(2) }).parse(res);
+    return parsed.content.map((c) => c.text);
   };
   return {
     async run(code, opts = {}) {
       const text = await call(
-        { code, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
+        // verbose: the attack tests assert on the entry of every call, which the compact view reduces to counts.
+        { code, verbose: true, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
         opts.signal,
       );
-      return RunOutputSchema.parse(JSON.parse(text));
+      const [head = '', plain] = text;
+      const body: unknown = JSON.parse(head);
+      // A multi-line string result comes as plain text in the second block.
+      const whole = plain !== undefined && body !== null && typeof body === 'object' ? { ...body, result: plain } : body;
+      return RunOutputSchema.parse(whole);
     },
-    runText: (code) => call({ code }),
+    runText: async (code) => (await call({ code })).join(''),
+    runBlocks: (code) => call({ code }),
     async close() {
       await client.close();
       await server.close();

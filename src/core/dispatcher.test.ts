@@ -1,8 +1,12 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeContext } from '../testing/context.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter, type StaticHostAdapterOptions } from '../testing/static-host-adapter.js';
-import { Dispatcher } from './dispatcher.js';
+import { NodeToolRuntime } from '../tools/runtime.js';
+import { Dispatcher, displayPath } from './dispatcher.js';
 import type { CallReply, PolicyLoadError, PolicySnapshot, Transaction } from './types.js';
 
 async function setup(
@@ -350,5 +354,49 @@ describe('Dispatcher', () => {
     const dispatcher = new Dispatcher({ adapter, tools, ctx, policy: await adapter.loadPolicy(ctx) });
     expect((await dispatcher.dispatch('write', { path: 'a.txt', content: 'x' })).ok).toBe(true);
     expect(dispatcher.warnings[0]).toContain('post failed');
+  });
+});
+
+describe('script-facing paths', () => {
+  it('D4: a name starting with .. inside the cwd stays relative; .. and outside paths stay absolute', () => {
+    expect(displayPath('/ws/..env', '/ws')).toBe('..env');
+    expect(displayPath('/ws/..cache/a.ts', '/ws')).toBe('..cache/a.ts');
+    expect(displayPath('/ws/src/a.ts', '/ws')).toBe('src/a.ts');
+    expect(displayPath('/', '/ws')).toBe('/');
+    expect(displayPath('/other/a.ts', '/ws')).toBe('/other/a.ts');
+    expect(displayPath('/ws', '/ws')).toBe('/ws');
+  });
+
+  it.runIf(process.platform !== 'win32')('D4: with the cwd reached through a symlink, results are relative to the real cwd', async () => {
+    const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-d4-')));
+    try {
+      const real = path.join(base, 'real-ws');
+      mkdirSync(path.join(real, 'src'), { recursive: true });
+      writeFileSync(path.join(real, 'src', 'a.ts'), 'const X = 1;\n');
+      writeFileSync(path.join(real, '..env'), 'X\n');
+      const link = path.join(base, 'link-ws');
+      symlinkSync(real, link);
+      const ctx = makeContext(link);
+      const adapter = new StaticHostAdapter({});
+      const dispatcher = new Dispatcher<null>({ adapter, tools: new NodeToolRuntime({ stateDir: path.join(base, 'state') }), ctx, policy: await adapter.loadPolicy(ctx) });
+      const value = async (tool: string, args: unknown): Promise<unknown> => {
+        const reply = await dispatcher.dispatch(tool, args);
+        if (!reply.ok) throw new Error(JSON.stringify(reply.error));
+        return reply.value;
+      };
+      expect(await value('read', { path: 'src/a.ts' })).toMatchObject({ path: 'src/a.ts' });
+      expect(await value('glob', { pattern: '**/*' })).toMatchObject({ files: expect.arrayContaining(['src/a.ts', '..env']) });
+      expect(await value('grep', { pattern: 'X' })).toEqual({
+        columns: ['file', 'line', 'text'],
+        rows: expect.arrayContaining([['..env', 1, 'X'], ['src/a.ts', 1, 'const X = 1;']]),
+        count: 2,
+        truncated: false,
+        filtered: 0,
+      });
+      expect(await value('edit', { path: 'src/a.ts', oldString: 'X = 1', newString: 'X = 2' })).toMatchObject({ path: 'src/a.ts' });
+      expect(dispatcher.changedFiles).toEqual(['src/a.ts']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

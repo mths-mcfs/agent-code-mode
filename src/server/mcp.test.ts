@@ -11,7 +11,7 @@ import { StaticHostAdapter } from '../testing/static-host-adapter.js';
 import { ClaudeContextProvider } from '../hosts/claude/context.js';
 import { CodexContextProvider } from '../hosts/codex/context.js';
 import { GenericContextProvider } from './context.js';
-import { createMcpServer } from './mcp.js';
+import { createMcpServer, HYBRID_GUIDANCE, RUN_DESCRIPTION } from './mcp.js';
 import type { Runtime } from './runtime.js';
 
 const root = os.tmpdir();
@@ -20,7 +20,7 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic' } = {}) {
+async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; hybrid?: boolean } = {}) {
   const seen: SessionContext[] = [];
   const tools = new MemoryToolRuntime({ root, files: { 'notes.txt': 'hello\n' } });
   const adapter = new StaticHostAdapter({
@@ -46,6 +46,7 @@ async function connect(opts: { env?: Record<string, string>; host?: 'claude' | '
     stateDir: `${root}/acm-test-state`,
     createRuntime: runtime,
     ...(opts.host ? { host: opts.host } : {}),
+    ...(opts.hybrid === undefined ? {} : { hybrid: opts.hybrid }),
   });
   const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
   client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(root).href }] }));
@@ -67,7 +68,23 @@ function textOf(result: unknown): string {
 }
 
 describe('MCP server', () => {
-  it('lists the run tool with annotations, _meta and instructions', async () => {
+  it('appends the hybrid guidance to the run description only with the hybrid option', async () => {
+    const plain = (await (await connect()).client.listTools()).tools;
+    const off = (await (await connect({ hybrid: false })).client.listTools()).tools;
+    const hybrid = (await (await connect({ hybrid: true })).client.listTools()).tools;
+    expect(plain[0]?.description).toBe(RUN_DESCRIPTION);
+    expect(off).toEqual(plain);
+    expect(plain[0]?.description).not.toContain('Native file and shell tools');
+    expect(hybrid).toHaveLength(1);
+    expect(hybrid[0]?.description).toBe(`${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}`);
+    expect(hybrid[0]?.description?.split('\n').at(-1)).toBe(
+      'Native file and shell tools are also available: use them for a single read, edit or command; use run when a step needs 3+ file/shell calls, a loop over files, or filtering a large output.',
+    );
+    // Only the description differs.
+    expect({ ...hybrid[0], description: '' }).toEqual({ ...plain[0], description: '' });
+  });
+
+  it('lists the run tool with annotations and _meta, and documents the bindings in its description (no server instructions)', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     expect(tools).toHaveLength(1);
@@ -77,7 +94,14 @@ describe('MCP server', () => {
       _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: { type: 'object', required: ['code'] },
     });
-    expect(client.getInstructions()).toContain('bash({command');
+    const description = tools[0]?.description ?? '';
+    for (const binding of ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow']) expect(description).toContain(`declare function ${binding}(`);
+    expect(description).toContain('QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits');
+    expect(description).toContain("columns: ['file', 'line', 'text']");
+    expect(description).not.toMatch(/overflowPath|Example/);
+    expect(tools[0]?.inputSchema.properties).toHaveProperty('verbose');
+    // Claude Code writes server instructions to the prompt cache again in every session.
+    expect(client.getInstructions()).toBeUndefined();
   });
 
   it('runs a script end to end: FakeSandbox → Dispatcher → StaticHostAdapter → MemoryToolRuntime, with one denied call', async () => {
@@ -87,7 +111,7 @@ describe('MCP server', () => {
       { tool: 'bash', args: { command: 'rm -rf /' } },
       { tool: 'read', args: { path: 'notes.txt' } },
     ]);
-    const result = await client.callTool({ name: 'run', arguments: { code } });
+    const result = await client.callTool({ name: 'run', arguments: { code, verbose: true } });
     expect(result.isError).toBe(false);
     const body = JSON.parse(textOf(result)) as {
       ok: boolean;
@@ -110,6 +134,23 @@ describe('MCP server', () => {
     expect(body.diff).toContain('+written');
     expect(tools.read('out.txt')).toBe('written\n');
     expect(tools.commits.some((c) => c.tool === 'bash')).toBe(false);
+  });
+
+  it('returns the compact view by default: call counts, the denied call in full, no empty fields', async () => {
+    const { client } = await connect();
+    const code = JSON.stringify([
+      { tool: 'read', args: { path: 'notes.txt' } },
+      { tool: 'bash', args: { command: 'rm -rf /' } },
+      { tool: 'read', args: { path: 'notes.txt' } },
+    ]);
+    const result = await client.callTool({ name: 'run', arguments: { code } });
+    const body = JSON.parse(textOf(result)) as Record<string, unknown>;
+    expect(body['calls']).toEqual({
+      total: 3,
+      byTool: { read: 2, bash: 1 },
+      denied: [{ id: 'c2', tool: 'bash', summary: 'bash rm -rf /', reason: 'rule: rm is not allowed' }],
+    });
+    expect(Object.keys(body).sort()).toEqual(['calls', 'ok', 'result']);
   });
 
   it('rolls back a transaction when a call is denied and reports isError', async () => {
@@ -158,9 +199,10 @@ describe('MCP server', () => {
     expect(unknown.isError).toBe(true);
     const text = textOf(unknown);
     expect(text.length).toBeLessThanOrEqual(9_500);
-    const body = JSON.parse(text) as { overflowPath?: string; truncated?: boolean };
+    const body = JSON.parse(text) as { overflow?: { id: string }; truncated?: boolean };
     expect(body.truncated).toBe(true);
-    expect(typeof body.overflowPath).toBe('string');
+    expect(body.overflow?.id).toMatch(/^ov_/);
+    expect(text).not.toContain('acm-test-state');
 
     const invalid = await client.callTool({ name: 'run', arguments: { code: 'x', transaction: 'y'.repeat(100_000) } });
     expect(invalid.isError).toBe(true);

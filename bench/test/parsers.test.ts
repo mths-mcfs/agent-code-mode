@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { claudeIsolationIssues, parseClaudeTranscript } from '../lib/claude.ts';
 import { classifyCodexTool, codexToolSurface, extractCodexRequests, parseCodexTranscript } from '../lib/codex.ts';
 import { costFromUsage, loadPricing } from '../lib/pricing.ts';
-import { checkArm, checkSurface } from '../lib/record.ts';
+import { checkArm, checkSurface, isAcmArm, type ToolCalls } from '../lib/record.ts';
+import { runInnerCalls } from '../lib/run-result.ts';
 
 const F = path.join(import.meta.dirname, '..', 'parser-fixtures');
 const read = (name: string): string => readFileSync(path.join(F, name), 'utf8');
@@ -13,6 +14,7 @@ describe('Claude transcript parser', () => {
   it('reads the metrics of a real native run (claude-A.jsonl, Claude Code 2.1.325)', () => {
     const p = parseClaudeTranscript(read('claude-A.jsonl'));
     expect(p.turns).toBe(2);
+    expect(p.requests).toBe(2);
     expect(p.hostDurationMs).toBe(2414);
     expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0 });
     expect(p.hostCostUsd).toBeCloseTo(0.0116847, 10);
@@ -41,12 +43,56 @@ describe('Claude transcript parser', () => {
     expect(checkSurface('claude', 'B', p.availableTools ?? [])).toEqual([]);
   });
 
+  it('reads a hybrid run: native calls and run calls in one transcript (claude-C.jsonl, synthetic)', () => {
+    const p = parseClaudeTranscript(read('claude-C.jsonl'));
+    expect(p.toolCalls).toEqual({ native: 1, run: 1, codeMode: 0, other: 0, byName: { Read: 1, 'mcp__agent-code-mode__run': 1 } });
+    expect(p.innerCalls).toEqual({ total: 3, byTool: { grep: 1, read: 2 } });
+    expect(p.requests).toBe(3);
+    expect(checkArm('claude', 'C', p.toolCalls)).toEqual({ fallback: false, reasons: [] });
+    expect(checkSurface('claude', 'C', p.availableTools ?? [])).toEqual([]);
+    // The same transcript is neither arm A nor arm B.
+    expect(checkSurface('claude', 'A', p.availableTools ?? []).join()).toMatch(/expected exactly/);
+    expect(checkSurface('claude', 'B', p.availableTools ?? []).join()).toMatch(/expected exactly/);
+    expect(checkArm('claude', 'A', p.toolCalls).reasons).toContain('arm made agent-code-mode run calls');
+    expect(checkArm('claude', 'B', p.toolCalls).fallback).toBe(true);
+  });
+
+  it('the hybrid arm accepts native only, run only and any mix, and nothing outside its surface', () => {
+    const calls = (native: number, run: number, extra: Partial<ToolCalls> = {}): ToolCalls => ({ native, run, codeMode: 0, other: 0, byName: {}, ...extra });
+    for (const c of [calls(3, 2), calls(5, 0), calls(0, 4), calls(0, 0)]) expect(checkArm('claude', 'C', c)).toEqual({ fallback: false, reasons: [] });
+    expect(checkArm('claude', 'C', calls(1, 1, { other: 2 })).reasons).toEqual(['hybrid agent-code-mode arm made 2 call(s) to tools outside its surface']);
+    expect(checkArm('claude', 'C', calls(1, 1, { codeMode: 1 })).reasons).toEqual(['hybrid agent-code-mode arm used Codex code mode']);
+    // Its surface is exactly the six native tools plus run.
+    const surface = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__agent-code-mode__run'];
+    expect(checkSurface('claude', 'C', surface)).toEqual([]);
+    expect(checkSurface('claude', 'C', [...surface, 'Task']).join()).toMatch(/expected exactly/);
+    expect(checkSurface('claude', 'C', surface.filter((t) => t !== 'Bash')).join()).toMatch(/expected exactly/);
+    expect(checkSurface('claude', 'C', surface.slice(0, 6)).join()).toMatch(/expected exactly/);
+    // Codex C is still the strict agent-code-mode arm.
+    expect(checkArm('codex', 'C', calls(1, 2))).toEqual({ fallback: true, reasons: ['strict agent-code-mode arm made 1 native file/shell tool call(s)'] });
+    expect(checkArm('codex', 'C', calls(0, 0)).reasons).toEqual(['agent-code-mode arm made no run call']);
+    expect(isAcmArm('claude', 'C')).toBe(true);
+    expect(isAcmArm('claude', 'B0')).toBe(true);
+    expect(isAcmArm('claude', 'A')).toBe(false);
+    expect(isAcmArm('codex', 'B')).toBe(false);
+    expect(isAcmArm('codex', 'C0')).toBe(true);
+  });
+
   it('counts a replayed tool result once (same tool_use_id)', () => {
     const raw = read('claude-B.jsonl');
     const replay = raw.split('\n').filter((l) => l.includes('tool_result'));
     expect(replay).toHaveLength(1);
     const p = parseClaudeTranscript(`${raw}\n${replay.join('\n')}\n${replay.join('\n')}`);
     expect(p.innerCalls).toEqual({ total: 3, byTool: { read: 2, grep: 1 } });
+  });
+
+  it('reads the compact run response: call counts and the denied calls', () => {
+    const compact = { ok: true, result: 1, calls: { total: 5, byTool: { read: 3, bash: 2 }, denied: [{ id: 'c2', tool: 'bash', summary: 'bash rm x', reason: 'rule: no rm' }, '…[1 more]'] } };
+    expect(runInnerCalls(JSON.stringify(compact))).toEqual({ total: 5, byTool: { read: 3, bash: 2 }, denials: ['bash bash rm x: rule: no rm'] });
+    const full = { ok: true, calls: [{ id: 'c1', tool: 'read', summary: 'read a', decision: 'allowed' }, { id: 'c2', tool: 'bash', summary: 'bash rm x', decision: 'denied', reason: 'rule: no rm' }] };
+    expect(runInnerCalls(JSON.stringify(full))).toEqual({ total: 2, byTool: { read: 1, bash: 1 }, denials: ['bash bash rm x: rule: no rm'] });
+    expect(runInnerCalls('not json')).toBeNull();
+    expect(runInnerCalls('{"ok":true}')).toBeNull();
   });
 
   it('collects denied calls from hook errors and the run call log', () => {
@@ -224,5 +270,22 @@ describe('Codex transcript parser', () => {
       { type: 'additional_tools', tools: [{ type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec_command' }, { type: 'custom', name: 'apply_patch' }] }, { type: 'tool_search' }] },
     ]);
     expect(codexToolSurface(input)).toEqual(['functions.exec_command', 'functions.apply_patch', 'tool_search']);
+  });
+});
+
+describe('model requests', () => {
+  it('counts distinct Claude assistant message ids, not num_turns', () => {
+    const usage = { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 10 };
+    const lines = [
+      { type: 'assistant', message: { id: 'msg_1', usage, content: [{ type: 'tool_use', id: 't1', name: 'Edit', input: {} }] } },
+      { type: 'assistant', message: { id: 'msg_1', usage, content: [{ type: 'tool_use', id: 't2', name: 'Edit', input: {} }] } },
+      { type: 'assistant', message: { id: 'msg_1', usage, content: [{ type: 'tool_use', id: 't3', name: 'Edit', input: {} }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+      { type: 'assistant', message: { id: 'msg_2', usage, content: [{ type: 'text', text: 'done' }] } },
+      { type: 'result', subtype: 'success', is_error: false, num_turns: 4, duration_ms: 10, total_cost_usd: 0.001, result: 'done', usage },
+    ];
+    const p = parseClaudeTranscript(lines.map((l) => JSON.stringify(l)).join('\n'));
+    expect(p.turns).toBe(4);
+    expect(p.requests).toBe(2);
   });
 });
