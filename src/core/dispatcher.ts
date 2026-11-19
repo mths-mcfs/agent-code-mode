@@ -3,7 +3,7 @@ import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
 import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
-import { isMutating, parseToolCall } from './schemas.js';
+import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
 import type {
   BashContainment,
   BindingError,
@@ -34,6 +34,8 @@ export interface DispatcherOptions<P> {
   readonly transaction?: Transaction;
   /** Called once, on the first denied call. A transactional run aborts there. */
   readonly onDeny?: (entry: CallLogEntry) => void;
+  /** Lets a run stop this dispatcher when its deadline has passed. */
+  readonly checkDeadline?: () => void;
   /** Clock, for tests. */
   readonly now?: () => number;
 }
@@ -58,7 +60,7 @@ function clip(s: string, max: number): string {
 }
 
 function oneLine(s: string): string {
-  return s.replace(/\s*\n\s*/g, ' ⏎ ');
+  return clip(s, MAX_SUMMARY_CHARS).replace(/\s*\n\s*/g, ' ⏎ ');
 }
 
 function containmentEquals(a: BashContainment, b: BashContainment): boolean {
@@ -69,18 +71,6 @@ function containmentEquals(a: BashContainment, b: BashContainment): boolean {
     a.writableRoots.length === b.writableRoots.length &&
     a.writableRoots.every((root, i) => root === b.writableRoots[i])
   );
-}
-
-/** Fail-closed shape check of a decision coming from an adapter. */
-function isDecision(value: unknown): value is Decision {
-  if (value === null || typeof value !== 'object' || !('kind' in value)) return false;
-  const kind: unknown = value.kind;
-  if (kind === 'allow') return true;
-  if (kind === 'ask') return 'reason' in value && typeof value.reason === 'string';
-  if (kind === 'deny') {
-    return 'reason' in value && typeof value.reason === 'string' && 'source' in value && typeof value.source === 'string';
-  }
-  return false;
 }
 
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
@@ -130,6 +120,7 @@ export class Dispatcher<P = unknown> {
   #stopReason: StopReason | undefined;
   #nextId = 1;
   #mutationTail: Promise<unknown> = Promise.resolve();
+  #journalWrite: Promise<void> | undefined;
   readonly #inflight = new Map<Promise<CallReply>, number>();
   /** id, tool and summary of each call by slot, for reporting calls that never settle. */
   readonly #labels: { id: string; tool: string; summary: string }[] = [];
@@ -188,6 +179,11 @@ export class Dispatcher<P = unknown> {
     return this.#stopReason;
   }
 
+  /** Settles when the active journaled commit ends. */
+  get pendingWrites(): Promise<void> | undefined {
+    return this.#journalWrite;
+  }
+
   /**
    * Handles one binding call from the script. Never rejects. `tool` and
    * `args` are untrusted.
@@ -196,9 +192,9 @@ export class Dispatcher<P = unknown> {
     const id = `c${this.#nextId++}`;
     const slot = this.#calls.length;
     this.#calls.push(undefined);
-    this.#labels.push({ id, tool: typeof tool === 'string' ? clip(tool, 40) : 'unknown', summary: typeof tool === 'string' ? clip(tool, 40) : 'unknown' });
+    const toolLabel = typeof tool === 'string' ? clip(tool, 40) : 'unknown';
+    this.#labels.push({ id, tool: toolLabel, summary: toolLabel });
     const started = this.#now();
-    const toolLabel = clip(typeof tool === 'string' ? tool : String(tool), 40);
 
     let handled: Promise<CallReply>;
     try {
@@ -254,12 +250,17 @@ export class Dispatcher<P = unknown> {
     }
   }
 
+  #hasStopped(): boolean {
+    this.#opts.checkDeadline?.();
+    return this.#stopReason !== undefined;
+  }
+
   #handle(id: string, slot: number, toolLabel: string, tool: unknown, args: unknown, started: number): Promise<CallReply> {
     // Everything up to the mutation queue is synchronous so the queue keeps call order.
-    if (this.#stopReason !== undefined) {
+    if (this.#hasStopped()) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, this.#stoppedFailure()));
     }
-    const parsed = parseToolCall(typeof tool === 'string' ? tool : String(tool), args, id);
+    const parsed = parseToolCall(tool, args, id);
     if (parsed instanceof ToolError) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: parsed }));
     }
@@ -291,24 +292,25 @@ export class Dispatcher<P = unknown> {
     started: number,
   ): Promise<CallReply> {
     const fail = (failure: Failure): CallReply => this.#fail(slot, call.id, call.tool, summary, started, failure);
-    if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
+    if (this.#hasStopped()) return fail(this.#stoppedFailure());
 
     const first = await this.#prepareChecked(call, policy);
     if ('kind' in first) return fail(first);
     let prepared = first.prepared;
-    if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
+    if (this.#hasStopped()) return fail(this.#stoppedFailure());
 
     const staticFailure = this.#checkStatic(prepared, policy);
+    if (this.#hasStopped()) return fail(this.#stoppedFailure());
     if (staticFailure) return fail(staticFailure);
 
     const decision = await this.#authorize(prepared, policy);
-    if (decision === ABORTED || this.#stopReason !== undefined) return fail(this.#stoppedFailure());
+    if (decision === ABORTED || this.#hasStopped()) return fail(this.#stoppedFailure());
     if (decision.kind === 'deny') return fail({ kind: 'deny', source: decision.source, reason: decision.reason });
     if (decision.kind === 'ask') {
       return fail({ kind: 'deny', source: 'ask-unavailable', reason: `host would ask the user and no interactive channel exists: ${decision.reason}` });
     }
 
-    if (decision.updatedArgs !== undefined) {
+    if (Object.hasOwn(decision, 'updatedArgs')) {
       const reparsed = parseToolCall(call.tool, decision.updatedArgs, call.id);
       if (reparsed instanceof ToolError) {
         return fail({ kind: 'deny', source: 'hook', reason: `hook returned invalid updated input: ${reparsed.message}` });
@@ -321,9 +323,11 @@ export class Dispatcher<P = unknown> {
       const recheck = this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);
       prepared = second.prepared;
-      if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
+      summary = summarize(reparsed, this.#opts.ctx.cwd);
+      this.#labels[slot] = { id: call.id, tool: call.tool, summary };
     }
 
+    if (this.#hasStopped()) return fail(this.#stoppedFailure());
     return this.#commit(slot, prepared, summary, policy, started);
   }
 
@@ -355,16 +359,16 @@ export class Dispatcher<P = unknown> {
   }
 
   #checkStatic(prepared: PreparedCall, policy: PolicySnapshot<P>): Failure | undefined {
-    let decision: unknown;
     try {
-      decision = this.#opts.adapter.checkStatic(prepared, this.#opts.ctx, policy);
+      const parsed = DecisionSchema.safeParse(this.#opts.adapter.checkStatic(prepared, this.#opts.ctx, policy));
+      if (!parsed.success) return { kind: 'deny', source: 'rule', reason: 'permission rule check returned an invalid decision' };
+      const decision = parsed.data;
+      if (decision.kind === 'deny') return { kind: 'deny', source: decision.source, reason: decision.reason };
+      if (decision.kind === 'ask') {
+        return { kind: 'deny', source: 'ask-unavailable', reason: `host would ask the user and no interactive channel exists: ${decision.reason}` };
+      }
     } catch (err) {
       return { kind: 'deny', source: 'rule', reason: `permission rule check failed: ${errorMessage(err)}` };
-    }
-    if (!isDecision(decision)) return { kind: 'deny', source: 'rule', reason: 'permission rule check returned an invalid decision' };
-    if (decision.kind === 'deny') return { kind: 'deny', source: decision.source, reason: decision.reason };
-    if (decision.kind === 'ask') {
-      return { kind: 'deny', source: 'ask-unavailable', reason: `host would ask the user and no interactive channel exists: ${decision.reason}` };
     }
     // A static allow never carries updated args; ignore any.
     return undefined;
@@ -381,8 +385,8 @@ export class Dispatcher<P = unknown> {
     try {
       const decision = await raceAbort(pending, signal);
       if (decision === ABORTED) return ABORTED;
-      if (!isDecision(decision)) return { kind: 'deny', source: 'hook-error', reason: 'hook adapter returned an invalid decision' };
-      return decision;
+      const parsed = DecisionSchema.safeParse(decision);
+      return parsed.success ? parsed.data : { kind: 'deny', source: 'hook-error', reason: 'hook adapter returned an invalid decision' };
     } catch (err) {
       if (signal.aborted) return ABORTED;
       return { kind: 'deny', source: 'hook-error', reason: `hook failed: ${errorMessage(err)}` };
@@ -397,9 +401,13 @@ export class Dispatcher<P = unknown> {
     started: number,
   ): Promise<CallReply> {
     const signal = this.#abort.signal;
+    const transaction = this.#opts.transaction;
+    const journaled = transaction !== undefined && (prepared.tool === 'write' || prepared.tool === 'edit');
     let result: ToolResult;
     try {
-      result = await this.#opts.tools.commit(prepared, signal, this.#opts.transaction);
+      const pending = this.#opts.tools.commit(prepared, signal, transaction);
+      if (journaled) this.#journalWrite = pending.then(() => undefined, () => undefined);
+      result = await pending;
     } catch (err) {
       if (signal.aborted) {
         this.#warnings.push(
@@ -408,6 +416,8 @@ export class Dispatcher<P = unknown> {
         if (prepared.tool === 'write' || prepared.tool === 'edit') this.#addChanged(prepared.effect.absPath);
       }
       return this.#fail(slot, prepared.id, prepared.tool, summary, started, this.#toolFailure(err));
+    } finally {
+      if (journaled) this.#journalWrite = undefined;
     }
 
     if (signal.aborted) {
@@ -563,7 +573,7 @@ function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall
 /** Path relative to `cwd` when inside it, else the absolute path. */
 export function displayPath(absPath: string, cwd: string): string {
   const rel = path.relative(cwd, absPath);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
 }
 
 /** Short description of a call for the call log. */

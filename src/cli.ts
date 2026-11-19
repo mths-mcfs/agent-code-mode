@@ -34,12 +34,12 @@ function readVersion(): string {
 const HostSchema = z.enum(['claude', 'codex', 'generic']);
 
 function parseHost(args: readonly string[]): HostKind | undefined | Error {
-  const i = args.findIndex((a) => a === '--host' || a.startsWith('--host='));
-  if (i === -1) return undefined;
-  const arg = args[i] ?? '';
-  const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : args[i + 1];
+  const [arg, valueAfterFlag] = args;
+  if (arg === undefined) return undefined;
+  const value = arg === '--host' && args.length === 2 ? valueAfterFlag :
+    args.length === 1 && arg.startsWith('--host=') ? arg.slice('--host='.length) : undefined;
   const parsed = HostSchema.safeParse(value);
-  return parsed.success ? parsed.data : new Error(`--host must be one of claude, codex, generic`);
+  return parsed.success ? parsed.data : new Error('serve accepts only one --host option: claude, codex or generic');
 }
 
 export async function main(argv: readonly string[]): Promise<number> {

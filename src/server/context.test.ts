@@ -26,6 +26,9 @@ describe('context providers', () => {
     const good = await new ClaudeContextProvider(store(record)).resolve(input);
     expect(good).toMatchObject({ permissionMode: 'acceptEdits', agentId: 'a1', cwd: '/ws/sub', sources: { permissionMode: 'ctx-file' } });
 
+    const nested = await new ClaudeContextProvider(store({ ...record, cwd: '/ws/..samples' })).resolve(input);
+    expect(nested.cwd).toBe('/ws/..samples');
+
     const otherSession = await new ClaudeContextProvider(store({ ...record, sessionId: 's2' })).resolve(input);
     expect(otherSession.permissionMode).toBe('default');
     const otherCall = await new ClaudeContextProvider(store({ ...record, toolUseId: 't2' })).resolve(input);
