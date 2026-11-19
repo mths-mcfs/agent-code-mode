@@ -57,6 +57,14 @@ describe('Dispatcher', () => {
     expect(dispatcher.calls.map((c) => c.decision)).toEqual(['error', 'error', 'error']);
   });
 
+  it('rejects a non-string binding name', async () => {
+    const { dispatcher, tools } = await setup();
+    const namedObject = { toString: () => 'write' };
+    const reply = await dispatcher.dispatch(namedObject, { path: 'notes.txt', content: 'notes' });
+    expect(errorOf(reply)).toMatchObject({ code: 'invalid-args' });
+    expect(tools.read('notes.txt')).toBeUndefined();
+  });
+
   it('keeps mutation order under concurrent Promise.all of 20 reads and 5 writes', async () => {
     const { dispatcher, tools } = await setup({}, { files: { 'r.txt': 'r' }, jitterMs: 5 });
     const calls: Promise<CallReply>[] = [];
@@ -118,11 +126,13 @@ describe('Dispatcher', () => {
 
   it('re-prepares updatedArgs and commits the updated effect', async () => {
     const { dispatcher, tools, adapter } = await setup({
-      hook: (p) => (p.tool === 'write' && p.effect.afterContent === 'secret' ? { kind: 'updatedArgs', args: { path: 'a.txt', content: 'redacted' } } : { kind: 'allow' }),
+      hook: (p) => (p.tool === 'write' && p.effect.afterContent === 'secret' ? { kind: 'updatedArgs', args: { path: 'redacted.txt', content: 'redacted' } } : { kind: 'allow' }),
     });
     const reply = await dispatcher.dispatch('write', { path: 'a.txt', content: 'secret' });
     expect(reply.ok).toBe(true);
-    expect(tools.read('a.txt')).toBe('redacted');
+    expect(tools.read('a.txt')).toBeUndefined();
+    expect(tools.read('redacted.txt')).toBe('redacted');
+    expect(dispatcher.calls[0]).toMatchObject({ decision: 'allowed', summary: 'write redacted.txt' });
     // Hooks ran once; static rules ran on both the original and the updated call.
     expect(adapter.authorized).toHaveLength(1);
     expect(adapter.staticChecked).toHaveLength(2);
@@ -147,6 +157,13 @@ describe('Dispatcher', () => {
     });
     expect(errorOf(await ruled.dispatcher.dispatch('bash', { command: 'echo hi' }))).toMatchObject({ source: 'rule', message: 'no network' });
     expect(ruled.tools.commits).toHaveLength(0);
+  });
+
+  it('refuses a hook rewrite with no replacement arguments', async () => {
+    const { dispatcher, tools } = await setup({ hook: { kind: 'updatedArgs', args: undefined } });
+    const reply = await dispatcher.dispatch('write', { path: 'notes.txt', content: 'notes' });
+    expect(errorOf(reply)).toMatchObject({ name: 'PermissionDenied', source: 'hook' });
+    expect(tools.read('notes.txt')).toBeUndefined();
   });
 
   it('refuses writes to protected paths even through updatedArgs', async () => {
