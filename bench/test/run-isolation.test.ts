@@ -59,7 +59,7 @@ describe('workspace isolation from the checkout', () => {
     try {
       expect((await quiet(() => main(['--dry-run', '--tasks', 'T9,T10', '--runs', '1', '--seed', '2', '--work-dir', work, '--out', out, '--date', '2026-01-06']))).value).toBe(0);
       const wss = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => path.basename(f) === 'ws').map((f) => path.join(work, 'runs', f));
-      expect(wss.length).toBe(2 * 3 + 2 * 3 + 6); // matrix + warmups
+      expect(wss.length).toBe(2 * 4 + 2 * 3 + 7); // matrix (Claude A-D, Codex A-C) + warmups
       for (const ws of wss) {
         expect(insideRepo(ws)).toBe(false);
         for (const dir of ancestors(ws)) expect(existsSync(path.join(dir, 'bench', 'tasks')), dir).toBe(false);

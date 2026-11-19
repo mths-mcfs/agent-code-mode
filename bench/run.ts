@@ -1,13 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
-import { claudeArgs, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
+import { claudeArgs, CLAUDE_INNER_ALLOWED, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
+import { claudeInteractiveArgs, claudeSemver, interactiveEnv, parseClaudeInteractiveTranscript, seededClaudeJson, trimInteractiveTranscript, type InteractiveFacts } from './lib/claude-interactive.ts';
+import { driveInteractive, findSessionTranscript, INTERACTIVE_DRIVER, serverAlive, sweepStaleTmuxServers, tmuxVersion } from './lib/tmux.ts';
 import { catalogForArm, CODEX_FEATURES_OFF, EMPTY_MCP_SERVER, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
@@ -61,6 +63,12 @@ const OptionsSchema = z.object({
   acmRef: z.string().min(1).optional(),
   /** ...or the `dist` directory of a build made elsewhere (must contain cli.js). */
   acmDist: z.string().min(1).optional(),
+  /**
+   * Diagnostic, not a matrix arm: runs Claude arm A in an interactive session (no Code Mode) through the
+   * same tmux driver as arm D, to compare the interactive system prompt with the `-p` one. Its runs carry
+   * `interactivePilot: true` in their config, so they never pool with `-p` arm A runs.
+   */
+  interactivePilot: z.boolean().default(false),
 }).refine((o) => o.acmRef === undefined || o.acmDist === undefined, { message: '--acm-ref and --acm-dist are mutually exclusive' });
 export type Options = z.infer<typeof OptionsSchema>;
 
@@ -127,6 +135,7 @@ export function parseOptions(argv: readonly string[]): Options {
       force: { type: 'boolean' },
       'acm-ref': { type: 'string' },
       'acm-dist': { type: 'string' },
+      'interactive-pilot': { type: 'boolean' },
     },
     strict: true,
   });
@@ -150,6 +159,7 @@ export function parseOptions(argv: readonly string[]): Options {
     force: values.force,
     acmRef: values['acm-ref'],
     acmDist: values['acm-dist'],
+    interactivePilot: values['interactive-pilot'],
   });
 }
 
@@ -423,7 +433,19 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
   const arm = surfaceArm(p.arm);
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   let def: unknown;
-  if (p.host === 'claude') {
+  if (p.host === 'claude' && isInteractive(ctx.opts, p)) {
+    const codeMode = arm === 'D';
+    def = {
+      driver: INTERACTIVE_DRIVER,
+      args: claudeInteractiveArgs({ codeMode, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, settingsFile: '<settings>', mcpConfigFile: '<mcp>', sessionId: '<session>' }),
+      env: interactiveEnv({}, { configDir: '<config>', codeMode }),
+      claudeJson: seededClaudeJson('<workspace>', claudeSemver(ctx.versions['claude'])),
+      maxTurns: ctx.opts.maxTurns,
+      settings: claudeProjectSettings(task, fixture),
+      mcp: claudeMcpConfig(arm, '<server>'),
+      isolation: claudeIsolationMethod(true),
+    };
+  } else if (p.host === 'claude') {
     def = {
       args: claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
       settings: claudeProjectSettings(task, fixture),
@@ -466,7 +488,14 @@ export function runConfig(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'a
     /** Which agent-code-mode build the arm runs: this checkout's dist, a baseline build, or none (other arms). */
     acmBuild: !isAcmArm(p.host, p.arm) ? null : p.arm === 'B0' || p.arm === 'C0' ? (ctx.baseline?.id ?? null) : 'checkout',
     dryRun: ctx.opts.dryRun,
+    // Only on pilot runs (undefined keys are left out of the hash, so other configs keep their hash).
+    interactivePilot: ctx.opts.interactivePilot && p.host === 'claude' && p.arm === 'A' ? true : undefined,
   };
+}
+
+/** Claude runs driven as an interactive session: arm D (Code Mode) always, arm A under `--interactive-pilot`. */
+export function isInteractive(opts: Pick<Options, 'interactivePilot'>, p: Pick<PlannedRun, 'host' | 'arm'>): boolean {
+  return p.host === 'claude' && (p.arm === 'D' || (opts.interactivePilot && p.arm === 'A'));
 }
 
 export function configHash(config: Record<string, unknown>): string {
@@ -484,6 +513,20 @@ interface HostOutput {
   readonly configs: Record<string, string>;
   /** Codex: model-visible tools from `codex debug prompt-input` with the run's config. */
   readonly availableTools?: string[] | null;
+  /** Interactive Claude sessions: what the driver observed on screen. */
+  readonly interactive?: InteractiveObserved;
+}
+
+interface InteractiveObserved {
+  readonly codeMode: boolean;
+  readonly stop: string;
+  readonly problem: string | null;
+  readonly codeModeLine: string | null;
+  readonly permissionPrompts: number;
+  /** Plugin keys of the session's .claude.json (`pluginUsage`), the isolation proof `-p` reads from its init event. */
+  readonly plugins: readonly string[] | null;
+  /** The private tmux server was gone after the run. */
+  readonly serverGone: boolean;
 }
 
 async function cannedTranscript(host: HostId, arm: ArmId): Promise<{ stdout: string; requests: string | null }> {
@@ -493,7 +536,86 @@ async function cannedTranscript(host: HostId, arm: ArmId): Promise<{ stdout: str
   return { stdout, requests };
 }
 
+const ClaudeJsonPlugins = z.object({ pluginUsage: z.record(z.string(), z.unknown()).optional() }).passthrough();
+
+/**
+ * Runs one Claude run as an interactive session (arm D, or arm A under `--interactive-pilot`): a temporary
+ * CLAUDE_CONFIG_DIR with a copy of the credentials file and a seeded .claude.json, the tmux driver, the
+ * session transcript copied (trimmed) before the config dir is synced back and deleted.
+ */
+async function runClaudeInteractive(ctx: Context, p: PlannedRun, runWork: string, ws: string): Promise<HostOutput> {
+  const task = TASKS[p.task];
+  const fixture = generateFixture(ctx.opts.fixtureSeed);
+  const arm = surfaceArm(p.arm);
+  const codeMode = arm === 'D';
+  const settingsFile = path.join(runWork, 'claude-settings.json');
+  const mcpConfigFile = path.join(runWork, 'mcp-config.json');
+  const settings = `${JSON.stringify(claudeProjectSettings(task, fixture), null, 2)}\n`;
+  const mcp = `${JSON.stringify(claudeMcpConfig(arm, ''), null, 2)}\n`;
+  await writeFile(settingsFile, settings);
+  await writeFile(mcpConfigFile, mcp);
+  const sessionId = randomUUID();
+  const args = claudeInteractiveArgs({ codeMode, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, settingsFile, mcpConfigFile, sessionId });
+  const configDir = path.join(runWork, 'claude-config');
+  const env = interactiveEnv(process.env, { configDir, codeMode });
+  const configs: Record<string, string> = {
+    'claude-settings.json': settings,
+    'mcp-config.json': mcp,
+    'command.txt': `env -i ${Object.keys(env).sort().join(' ')} claude ${args.join(' ')}\n# driven in tmux: ${INTERACTIVE_DRIVER}\n`,
+  };
+  if (ctx.opts.dryRun) {
+    const canned = await readFile(path.join(PARSER_FIXTURES, `claude-${arm}.jsonl`), 'utf8');
+    return { stdout: canned, stderr: '', requests: null, exitCode: 0, timedOut: false, wallMs: 0, configs };
+  }
+  if (!(await exists(path.join(sourceClaudeConfig(), '.credentials.json')))) throw new Error('interactive Claude runs need a credentials file to copy into a temporary config dir');
+  const realWs = realpathSync(ws);
+  const claudeJson = `${JSON.stringify(seededClaudeJson(realWs, claudeSemver(ctx.versions['claude'])), null, 2)}\n`;
+  configs['claude-json-seed.json'] = claudeJson;
+  try {
+    createCodexHome(configDir, sourceClaudeConfig(), '.credentials.json');
+    await writeFile(path.join(configDir, '.claude.json'), claudeJson, { mode: 0o600 });
+    const outcome = await driveInteractive({
+      cwd: realWs,
+      command: ['claude', ...args],
+      env,
+      prompt: task.prompt(fixture.facts),
+      transcriptFile: () => findSessionTranscript(configDir, sessionId),
+      codeMode,
+      timeoutMs: ctx.opts.timeoutMin * 60_000,
+      maxTurns: ctx.opts.maxTurns,
+      scratchDir: runWork,
+    });
+    // Copy what the record needs out of the config dir before it is deleted.
+    const file = findSessionTranscript(configDir, sessionId);
+    const stdout = file === null ? '' : trimInteractiveTranscript(await readFile(file, 'utf8'));
+    let plugins: string[] | null = null;
+    try {
+      const parsed = ClaudeJsonPlugins.safeParse(JSON.parse(await readFile(path.join(configDir, '.claude.json'), 'utf8')));
+      if (parsed.success) plugins = Object.keys(parsed.data.pluginUsage ?? {});
+    } catch {
+      plugins = null;
+    }
+    configs['screen.txt'] = outcome.screens;
+    configs['auth.txt'] = `.credentials.json: ${removeCodexHome(configDir)}\n`;
+    configs['isolation.txt'] = `${claudeIsolationMethod(true)}; interactive: env -i allowlist (${Object.keys(env).sort().join(', ')}), seeded .claude.json\n`;
+    const interactive: InteractiveObserved = {
+      codeMode,
+      stop: outcome.stop,
+      problem: outcome.problem,
+      codeModeLine: outcome.codeModeLine,
+      permissionPrompts: outcome.permissionPrompts,
+      plugins,
+      serverGone: !serverAlive(outcome.server),
+    };
+    const stderr = `stop: ${outcome.stop}\nready after: ${outcome.readyMs ?? '-'} ms\npermission prompts denied: ${outcome.permissionPrompts}\n${outcome.problem === null ? '' : `problem: ${outcome.problem}\n`}`;
+    return { stdout, stderr, requests: null, exitCode: outcome.exitCode, timedOut: outcome.timedOut, wallMs: outcome.wallMs, configs, interactive };
+  } finally {
+    removeCodexHome(configDir);
+  }
+}
+
 async function runClaude(ctx: Context, p: PlannedRun, runWork: string, ws: string): Promise<HostOutput> {
+  if (isInteractive(ctx.opts, p)) return runClaudeInteractive(ctx, p, runWork, ws);
   const task = TASKS[p.task];
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   const settingsFile = path.join(runWork, 'claude-settings.json');
@@ -568,6 +690,33 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
   }
 }
 
+/**
+ * Validity of an interactive run from what was observed, not from the configuration: the Code Mode line on
+ * screen (arm D) or its absence (pilot), Code Mode in the transcript, the effort and permission mode of the
+ * requests, the end of the turn, the inner calls staying on the arm A tools, and the tmux server gone.
+ */
+export function interactiveReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, p: Pick<PlannedRun, 'arm'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null): string[] {
+  const reasons: string[] = [];
+  const codeMode = surfaceArm(p.arm) === 'D';
+  if (!opts.dryRun) {
+    if (seen === null) return ['interactive session not observed'];
+    if (seen.problem !== null) reasons.push(seen.problem);
+    if (seen.stop === 'max-turns') reasons.push('host error: error_max_turns');
+    if (codeMode && seen.codeModeLine === null) reasons.push('Code Mode on was not seen on screen');
+    if (!codeMode && seen.codeModeLine !== null) reasons.push(`Code Mode was on in a native interactive run: ${seen.codeModeLine}`);
+    if (!seen.serverGone) reasons.push('the tmux server was still running after the run');
+  }
+  if (facts !== null) {
+    if (codeMode !== facts.replMode) reasons.push(codeMode ? 'the transcript does not record Code Mode (repl-mode)' : 'the transcript records Code Mode (repl-mode) in a native run');
+    if (!opts.dryRun && (facts.efforts.length !== 1 || facts.efforts[0] !== opts.claudeEffort)) reasons.push(`requests ran with effort [${facts.efforts.join(', ')}], expected ${opts.claudeEffort}`);
+    const modes = facts.permissionModes.filter((m) => m !== 'default');
+    if (modes.length > 0) reasons.push(`permission mode ${modes.join(', ')} recorded, expected default`);
+    const outside = Object.keys(facts.innerByTool).filter((t) => !CLAUDE_INNER_ALLOWED.includes(t));
+    if (outside.length > 0) reasons.push(`REPL scripts called tools outside the arm A tools: ${outside.join(', ')}`);
+  }
+  return reasons;
+}
+
 /** Runs (or dry-runs) one planned run and writes its sanitized artifacts and record. */
 export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord> {
   const task = TASKS[p.task];
@@ -584,10 +733,18 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
 
   const output = p.host === 'claude' ? await runClaude(ctx, p, runWork, ws) : await runCodex(ctx, p, runWork, ws);
 
+  const interactive = isInteractive(ctx.opts, p);
   let parsed: ParsedRun | null = null;
+  let facts: InteractiveFacts | null = null;
   let parseError: string | null = null;
   try {
-    parsed = p.host === 'claude' ? parseClaudeTranscript(output.stdout) : parseCodexTranscript(output.stdout, output.requests);
+    if (interactive) {
+      const r = parseClaudeInteractiveTranscript(output.stdout);
+      facts = r.facts;
+      const plugins = output.interactive?.plugins;
+      parsed = plugins != null && r.parsed.hostContext !== null ? { ...r.parsed, hostContext: { ...r.parsed.hostContext, plugins: [...plugins] } } : r.parsed;
+      if (!ctx.opts.dryRun && plugins == null) parsed = { ...parsed, hostContext: null };
+    } else parsed = p.host === 'claude' ? parseClaudeTranscript(output.stdout) : parseCodexTranscript(output.stdout, output.requests);
     if (parsed.availableTools === null && output.availableTools) parsed = { ...parsed, availableTools: output.availableTools };
   } catch (err) {
     parseError = err instanceof Error ? err.message : String(err);
@@ -624,6 +781,19 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     fallback = arm.fallback;
     invalidReasons.push(...arm.reasons);
   }
+  if (interactive) invalidReasons.push(...interactiveReasons(ctx.opts, p, output.interactive ?? null, facts));
+  const notes: string[] = [];
+  const sessionCost = facts?.sessionCost ?? null;
+  if (interactive) {
+    notes.push(
+      'cost computed from the transcript usage (one entry per distinct model response) with pricing.json, cache writes priced by TTL; not the host-reported cost',
+      sessionCost === null
+        ? 'no session cost record (cost-state) in the transcript'
+        : `host session cost (cost-state) $${sessionCost.totalUsd.toFixed(6)}, by model ${Object.entries(sessionCost.byModel).map(([m, u]) => `${m} $${u.costUSD.toFixed(6)}`).join(', ')}: it also counts requests outside the transcript (session title and other side calls), which are not in usage or cost`,
+      'turns counted like -p num_turns: model tool calls plus one',
+    );
+    if (ctx.opts.interactivePilot && p.arm === 'A') notes.push('interactive pilot: arm A in an interactive session without Code Mode (diagnostic, not a matrix arm)');
+  }
 
   const config = runConfig(ctx, p);
   const hash = configHash(config);
@@ -655,7 +825,7 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     config,
     host: p.host,
     arm: p.arm,
-    armLabel: ARM_LABELS[p.host][p.arm] ?? p.arm,
+    armLabel: interactive && p.arm === 'A' ? `${ARM_LABELS.claude['A'] ?? 'A'} (interactive pilot)` : (ARM_LABELS[p.host][p.arm] ?? p.arm),
     warmup: p.warmup === true,
     task: p.task,
     run: p.run,
@@ -677,6 +847,8 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     valid: invalidReasons.length === 0,
     invalidReasons,
     files,
+    hostSessionCostUsd: sessionCost?.totalUsd ?? null,
+    notes,
   });
   // record.json last: its presence marks the run as done (resume skips it).
   await writeSanitized(path.join(outDir, 'record.json'), JSON.stringify(record), sctx);
@@ -773,6 +945,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     process.stderr.write('arms B0/C0 run a baseline build: pass --acm-ref <commit> or --acm-dist <dir>\n');
     return 2;
   }
+  if (opts.interactivePilot && (opts.host !== 'claude' || opts.arms === undefined || opts.arms.some((a) => a !== 'A') || opts.dryRun)) {
+    process.stderr.write('--interactive-pilot runs Claude arm A only, for real: pass --host claude --arms A without --dry-run\n');
+    return 2;
+  }
   const plan = planRuns(hosts, tasks, opts.arms, opts.runs, seed, withBaseline);
   if (plan.length === 0) {
     process.stderr.write('nothing to run: no arm of the chosen hosts matches --arms\n');
@@ -816,6 +992,16 @@ export async function main(argv: readonly string[]): Promise<number> {
       return 2;
     }
   }
+  const needsTmux = plan.some((p) => isInteractive(opts, p));
+  let tmux: string | null = null;
+  if (needsTmux && !opts.dryRun) {
+    tmux = tmuxVersion();
+    if (tmux === null) {
+      process.stderr.write('interactive Claude runs (arm D, --interactive-pilot) need tmux on PATH\n');
+      return 2;
+    }
+    for (const stale of sweepStaleTmuxServers()) process.stderr.write(`killed a tmux server left by an interrupted run: ${stale}\n`);
+  }
   for (const h of hosts) {
     if (!opts.dryRun && versions[h] === null) {
       process.stderr.write(`${h} CLI not found on PATH\n`);
@@ -843,7 +1029,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       hosts.map((h) => [
         h,
         h === 'claude'
-          ? { version: versions['claude'], model: opts.claudeModel, effort: opts.claudeEffort, maxTurns: opts.maxTurns, isolation: claudeIsolationMethod(claudeCredentials) }
+          ? { version: versions['claude'], model: opts.claudeModel, effort: opts.claudeEffort, maxTurns: opts.maxTurns, isolation: claudeIsolationMethod(claudeCredentials), ...(needsTmux ? { interactiveDriver: INTERACTIVE_DRIVER, tmux, interactivePilot: opts.interactivePilot } : {}) }
           : { version: versions['codex'], model: opts.codexModel, effort: opts.codexEffort, maxTurns: null, catalogSha256: rawCatalog === null ? null : sha256(rawCatalog) },
       ]),
     ),

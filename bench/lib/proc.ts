@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 
 export interface ProcessSpec {
@@ -36,10 +36,29 @@ function killGroup(pid: number): void {
   }
 }
 
-/** Kills every host process (and its process group) still running. Used by the signal handlers. */
+/** Private tmux servers of interactive runs (`tmux -L <name>`) still running. */
+const liveTmux = new Set<string>();
+
+export function trackTmuxServer(name: string): void {
+  liveTmux.add(name);
+}
+
+export function untrackTmuxServer(name: string): void {
+  liveTmux.delete(name);
+}
+
+/** Kills every host process (and its process group) and every tmux server still running. Used by the signal handlers. */
 export function killLiveChildren(): void {
   for (const pid of [...liveChildren]) killGroup(pid);
   liveChildren.clear();
+  for (const name of [...liveTmux]) {
+    try {
+      execFileSync('tmux', ['-L', name, 'kill-server'], { stdio: 'ignore', timeout: 5_000 });
+    } catch {
+      // already gone
+    }
+  }
+  liveTmux.clear();
 }
 
 /** Runs a process with a wall timeout; on timeout kills its whole process group. */

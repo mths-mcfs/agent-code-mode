@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { loadPricing } from '../lib/pricing.ts';
+import { costFromUsage, loadPricing } from '../lib/pricing.ts';
 
 const RESULTS = path.join(import.meta.dirname, '..', 'results', '2026-11-16');
 
@@ -25,6 +25,23 @@ function claudeTranscripts(dir: string): string[] {
   }
   return out;
 }
+
+describe('cost from usage', () => {
+  const pricing = loadPricing();
+  const base = { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000, reasoning: null };
+  it('prices cache writes by TTL when the usage splits them', () => {
+    // Opus 5.5: input 4, output 20, cache read 0.2, 5-minute write 5 (1.25x), 1-hour write 8 (2x).
+    expect(costFromUsage(pricing, 'claude-opus-5-5', { ...base, cacheCreation5m: 0, cacheCreation1h: 1_000_000 })).toBeCloseTo(4 + 20 + 0.2 + 8, 9);
+    expect(costFromUsage(pricing, 'claude-opus-5-5', { ...base, cacheCreation5m: 1_000_000, cacheCreation1h: 0 })).toBeCloseTo(4 + 20 + 0.2 + 5, 9);
+    expect(costFromUsage(pricing, 'claude-opus-5-5', { ...base, cacheCreation5m: 250_000, cacheCreation1h: 750_000 })).toBeCloseTo(4 + 20 + 0.2 + 1.25 + 6, 9);
+    // Without the split: all writes at the 5-minute price (Codex has no write price: input).
+    expect(costFromUsage(pricing, 'claude-opus-5-5', base)).toBeCloseTo(4 + 20 + 0.2 + 5, 9);
+  });
+  it('refuses to price 1-hour writes for a model without a 1-hour price', () => {
+    expect(costFromUsage(pricing, 'gpt-6.1-terra', { ...base, cacheCreation5m: 0, cacheCreation1h: 10 })).toBeNull();
+    expect(costFromUsage(pricing, 'no-such-model', base)).toBeNull();
+  });
+});
 
 describe('Claude cost reported by the host', () => {
   it('equals pricing.json with cache writes priced by TTL (Claude Code writes 1-hour cache entries)', () => {

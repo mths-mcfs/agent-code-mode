@@ -22,7 +22,7 @@ describe('baseline build arm', () => {
       const summary = JSON.parse(await readFile(path.join(out, '2026-01-04', 'summary.json'), 'utf8'));
       const builds = new Set(summary.groups.filter((g: { arm: string }) => g.arm !== 'A').map((g: { arm: string; config: { acmBuild: string } }) => `${g.arm}:${g.config.acmBuild}`));
       expect([...builds].sort()).toEqual(expect.arrayContaining(['B:checkout', 'C:checkout', expect.stringMatching(/^B0:dist:[0-9a-f]{12}$/)]));
-      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', 'B-B0', 'B0-A', 'C-A']);
+      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', 'B-B0', 'B0-A', 'C-A', 'D-A']);
       // Canned transcripts: B and B0 are identical, so the cost difference is exactly 0 and the interval says so.
       const bb0 = summary.comparisons.find((c: { arm: string; reference: string }) => c.arm === 'B' && c.reference === 'B0');
       expect(bb0.costUsd).toMatchObject({ estimate: 0, lo: 0, hi: 0, crossesZero: true, tasks: 3 });
