@@ -30,7 +30,7 @@ describe('baseline build arm', () => {
     } finally {
       await rm(work, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 300_000); // End to end through main(): on Windows it competes for the CPU with the other test files.
 
   it('resolves --acm-ref to a commit of this repository', async () => {
     const work = await mkdtemp(path.join(os.tmpdir(), 'acm-ref-'));
@@ -43,5 +43,5 @@ describe('baseline build arm', () => {
     } finally {
       await rm(work, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 300_000); // End to end through main(): on Windows it competes for the CPU with the other test files.
 });
