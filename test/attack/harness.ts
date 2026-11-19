@@ -87,12 +87,17 @@ export function makeLab(files: Record<string, string> = {}): Lab {
   };
 }
 
-/** Every entry under `dir` (links not followed) with its content, to compare before and after an attack. */
+/**
+ * Every entry under `dir` (links not followed) with its content, to compare
+ * before and after an attack. The server's own per-process directories in the
+ * state dir (`scratch`, `undo`) appear with the first run and are left out.
+ */
 export function snapshot(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   const walk = (d: string): void => {
     for (const name of readdirSync(d).sort()) {
       const p = path.join(d, name);
+      if (path.basename(d) === 'state' && (name === 'scratch' || name === 'undo')) continue;
       const st = lstatSync(p);
       if (st.isSymbolicLink()) out[p] = `link:${readlinkSync(p)}`;
       else if (st.isDirectory()) {

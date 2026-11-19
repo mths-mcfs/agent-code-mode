@@ -136,6 +136,9 @@ export function parseToolCall(tool: string, args: unknown, id: string): ToolCall
   }
 }
 
+/** Arguments of the `undo` binding. */
+export const UndoArgsSchema = z.strictObject({ undoId: z.string().min(1).max(128) });
+
 /**
  * Raw `run` tool arguments. Unknown keys (including any model-supplied
  * `_ctx`) are stripped and never trusted.
@@ -160,7 +163,7 @@ export const RUN_INPUT_JSON_SCHEMA: {
     code: {
       type: 'string',
       description:
-        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, readOverflow; the return value is the result.',
+        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, test, undo, readOverflow; the return value is the result.',
     },
     verbose: {
       type: 'boolean',

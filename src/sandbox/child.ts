@@ -55,7 +55,7 @@ const BindingErrorSchema = z.strictObject({
   source: z.string().optional(),
 });
 const ParentMessageSchema = z.discriminatedUnion('type', [
-  z.strictObject({ type: z.literal('start'), code: z.string(), timeoutMs: z.number().positive(), limits: LimitsSchema }),
+  z.strictObject({ type: z.literal('start'), code: z.string(), timeoutMs: z.number().positive(), limits: LimitsSchema, scratchDir: z.string().optional() }),
   z.strictObject({
     type: z.literal('reply'),
     id: int,
@@ -84,7 +84,7 @@ function fatal(message: string): never {
 // `Promise.prototype.then` only breaks its own values.
 // ---------------------------------------------------------------------------
 
-const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, maxLogLineChars) {
+const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, maxLogLineChars, scratchDir) {
   'use strict';
   var G = globalThis;
   var stringify = JSON.stringify, parse = JSON.parse;
@@ -198,6 +198,444 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     if (json === undefined) json = 'null';
     return apply(promiseThen, hostCall(tool, json), [function (text) { return parse(text); }, function (text) { throw bindingError(text); }]);
   }
+  // ---- test(): a bash call plus a parser of what the runner printed --------
+  // The command goes through the bash binding as written, so rules and hooks judge exactly what runs.
+  // The parser reports only what it can back: the last summary block of a known runner, coherent with the exit
+  // code and with the failures it found. Anything else is parsed: false with the end of the output.
+  var MAX_FAILURES = 50, MAX_FAILURE_CHARS = 500, OUTPUT_TAIL_CHARS = 4000, MAX_LINE_CHARS = 2000, MAX_ANALYZED_CHARS = 400000;
+  function clean(text) { return text.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\r\n?/g, '\n'); }
+  function isLowSurrogate(code) { return code >= 0xdc00 && code <= 0xdfff; }
+  function isHighSurrogate(code) { return code >= 0xd800 && code <= 0xdbff; }
+  function lastChars(text, max) {
+    var end = text.slice(-max);
+    return end.length > 0 && isLowSurrogate(end.charCodeAt(0)) ? end.slice(1) : end;
+  }
+  function firstChars(text, max) {
+    if (text.length <= max) return text;
+    return (isHighSurrogate(text.charCodeAt(max - 1)) ? text.slice(0, max - 1) : text.slice(0, max)) + '... [truncated]';
+  }
+  // What was kept of one stream: the start and, when it was cut, the end.
+  function streamText(text, tail, omitted) {
+    if (tail === undefined) return text;
+    if (omitted === 0) return text + tail;
+    // Bytes were lost between the two: the records cut at either side are not whole.
+    return text.slice(0, text.lastIndexOf('\n') + 1) + tail.slice(tail.indexOf('\n') + 1);
+  }
+  function linesOf(text) {
+    var kept = text.length > MAX_ANALYZED_CHARS ? text.slice(text.indexOf('\n', text.length - MAX_ANALYZED_CHARS) + 1) : text;
+    var lines = clean(kept).split('\n');
+    for (var i = 0; i < lines.length; i++) lines[i] = lines[i].slice(0, MAX_LINE_CHARS).trimEnd();
+    return lines;
+  }
+  function failure(name, message, file, line) {
+    var f = { name: firstChars(name, MAX_FAILURE_CHARS), message: firstChars(message === undefined ? '' : message, MAX_FAILURE_CHARS) };
+    if (file !== undefined) f.file = file;
+    if (line !== undefined) f.line = line;
+    return f;
+  }
+  // Failures found: all are counted, only the first ones are read in detail.
+  function collector() {
+    var c = { list: [], count: 0 };
+    c.add = function (build) {
+      c.count++;
+      if (c.list.length < MAX_FAILURES) push(c.list, build());
+    };
+    return c;
+  }
+  function dedent(line, width) {
+    var n = 0;
+    while (n < width && line.charCodeAt(n) === 32) n++;
+    return line.slice(n);
+  }
+  // The lines from "from" up to the first that matches "stop", without the blank ones around them.
+  function textBlock(lines, from, stop, width) {
+    var out = [], size = 0;
+    for (var i = from; i < lines.length && size <= MAX_FAILURE_CHARS && !stop.test(lines[i]); i++) {
+      var line = dedent(lines[i], width);
+      push(out, line);
+      size += line.length + 1;
+    }
+    while (out.length > 0 && out[out.length - 1] === '') out.length--;
+    var start = 0;
+    while (start < out.length && out[start] === '') start++;
+    return join(out.slice(start), '\n');
+  }
+  function counts(text) {
+    var out = {}, re = /(\d+) ([a-z]+)/g, m;
+    while ((m = re.exec(text)) !== null) out[m[2]] = (out[m[2]] || 0) + Number(m[1]);
+    return out;
+  }
+
+  // ---- summaries: each finds the last complete block of its runner in one stream
+  function vitestSummary(lines) {
+    for (var i = lines.length - 1; i > 0; i--) {
+      var tests = /^\s*Tests\s+(\S.*)$/.exec(lines[i]);
+      if (tests === null) continue;
+      var files = /^\s*Test Files\s+(\S.*)$/.exec(lines[i - 1]);
+      if (files === null || i + 1 >= lines.length || !/^\s*Start at\s/.test(lines[i + 1])) continue;
+      var t = counts(tests[1].replace(/\(\d+\)$/, '')), f = counts(files[1].replace(/\(\d+\)$/, ''));
+      return { runner: 'vitest', at: i, testsFailed: t.failed || 0, passed: t.passed || 0, failed: t.failed || f.failed || 0, skipped: (t.skipped || 0) + (t.todo || 0), cancelled: 0 };
+    }
+    return null;
+  }
+  function jestSummary(lines) {
+    for (var i = lines.length - 1; i > 0; i--) {
+      var tests = /^Tests:\s+(.*\btotal)$/.exec(lines[i]);
+      if (tests === null) continue;
+      var suites = /^Test Suites:\s+(.*\btotal)$/.exec(lines[i - 1]);
+      if (suites === null) continue;
+      var t = counts(tests[1]), s = counts(suites[1]);
+      return { runner: 'jest', at: i, testsFailed: t.failed || 0, passed: t.passed || 0, failed: t.failed || s.failed || 0, skipped: (t.skipped || 0) + (t.todo || 0), cancelled: 0 };
+    }
+    return null;
+  }
+  function pytestSummary(lines) {
+    for (var i = lines.length - 1; i >= 0; i--) {
+      var m = /^=*\s*((?:\d+ [a-z]+(?:, )?)+) in \d[\d.]*s(?: \([^)]*\))?\s*=*$/.exec(lines[i]);
+      if (m === null) continue;
+      var c = counts(m[1]);
+      return { runner: 'pytest', at: i, passed: (c.passed || 0) + (c.xpassed || 0), failed: (c.failed || 0) + (c.error || 0) + (c.errors || 0), skipped: (c.skipped || 0) + (c.xfailed || 0), cancelled: 0 };
+    }
+    return null;
+  }
+  var NODE_TOTALS = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo'];
+  function nodeSummary(lines) {
+    for (var i = lines.length - 1; i >= NODE_TOTALS.length; i--) {
+      if (!/^(?:ℹ|#) duration_ms \d/.test(lines[i])) continue;
+      var totals = {}, whole = true;
+      for (var k = 0; k < NODE_TOTALS.length && whole; k++) {
+        var m = /^(?:ℹ|#) ([a-z]+) (\d+)$/.exec(lines[i - NODE_TOTALS.length + k]);
+        if (m === null || m[1] !== NODE_TOTALS[k]) whole = false;
+        else totals[m[1]] = Number(m[2]);
+      }
+      if (!whole) continue;
+      return { runner: 'node', at: i, passed: totals.pass, failed: totals.fail, skipped: totals.skipped + totals.todo, cancelled: totals.cancelled };
+    }
+    return null;
+  }
+  var SUMMARIES = { vitest: vitestSummary, jest: jestSummary, pytest: pytestSummary, node: nodeSummary };
+  // Whether only what the runner prints after its summary follows it.
+  function endsOutput(found, lines) {
+    for (var k = found.at + 1; k < lines.length; k++) {
+      if (lines[k] === '') continue;
+      if (found.runner === 'vitest' && /^\s*(?:Start at|Duration)\s/.test(lines[k])) continue;
+      if (found.runner === 'jest' && /^(?:Snapshots:|Time:|Ran all test suites)/.test(lines[k])) continue;
+      return found.runner === 'node' && /^✖ failing tests:/.test(lines[k]);
+    }
+    return true;
+  }
+  // The summary of the runner that ran; when the command does not say which, only one that ends the output.
+  function lastSummary(lines, runner) {
+    if (runner !== undefined) return SUMMARIES[runner](lines);
+    var names = objectKeys(SUMMARIES), best = null;
+    for (var i = 0; i < names.length; i++) {
+      var found = SUMMARIES[names[i]](lines);
+      if (found !== null && endsOutput(found, lines) && (best === null || found.at > best.at)) best = found;
+    }
+    return best;
+  }
+
+  // ---- failures of each runner
+  // A failure starts only where the report can start one: after a section title, a separator or another failure's title.
+  function vitestFailures(lines, c, summary) {
+    var wanted = false, open = false, title = /^\s*FAIL\s+(\S.*)$/;
+    for (var j = 0; j < lines.length; j++) {
+      var section = /⎯ Failed (Tests|Suites) \d+ ⎯/.exec(lines[j]);
+      if (section !== null) { wanted = section[1] === 'Tests' || summary.testsFailed === 0; open = true; continue; }
+      if (/^\s*⎯/.test(lines[j])) { open = true; continue; }
+      if (lines[j] === '' || !open) continue;
+      var head = title.exec(lines[j]);
+      if (head === null) { open = false; continue; }
+      if (wanted) c.add(vitestFailure(lines, j, head[1], title));
+    }
+  }
+  function vitestFailure(lines, j, name, title) {
+    return function () {
+      var stop = /^\s*⎯/, named = name.replace(/ \[ .* \]$/, '').split(' > ')[0], file, line, from = j + 1;
+      while (from < lines.length && title.test(lines[from])) from++;
+      for (var k = from; k < lines.length && !stop.test(lines[k]); k++) {
+        var at = /^\s*❯\s+(.*):(\d+):\d+\)?$/.exec(lines[k]);
+        if (at === null) continue;
+        var place = at[1].replace(/^.*\(/, '');
+        var own = place === named || place.endsWith('/' + named) || place.endsWith(' ' + named);
+        if (own) { file = named; line = Number(at[2]); break; }
+        if (file === undefined && place.indexOf('node_modules') === -1) { file = place.split(' ').pop(); line = Number(at[2]); }
+      }
+      return failure(name, textBlock(lines, from, /^\s*(?:⎯|❯|\d+\|)/, 0), file === undefined ? named : file, line);
+    };
+  }
+  // Jest indents a failure's title by two spaces and its message by four or more.
+  function jestFailures(lines, c, summary) {
+    var file;
+    for (var j = 0; j < lines.length; j++) {
+      if (/^\s*Summary of all failing tests/.test(lines[j])) return;
+      var suite = /^ ?FAIL\s+(\S.*)$/.exec(lines[j]);
+      if (suite !== null) { file = suite[1].replace(/^\.\//, ''); continue; }
+      if (file === undefined) continue;
+      var head = /^ {2}● (\S.*)$/.exec(lines[j]);
+      if (head === null) continue;
+      if (head[1] === 'Test suite failed to run' && summary.testsFailed > 0) continue;
+      var next = j + 1;
+      while (next < lines.length && lines[next] === '') next++;
+      if (head[1] === 'Console' && next < lines.length && /^\s*console\.[a-z]+/.test(lines[next])) continue;
+      c.add(jestFailure(lines, j, head[1], file));
+    }
+  }
+  function jestFailure(lines, j, name, suite) {
+    return function () {
+      var stop = /^ {2}● |^ ?FAIL\s|^Test Suites:/, file = suite, line;
+      for (var k = j + 1; k < lines.length && !stop.test(lines[k]); k++) {
+        var at = /^\s*at\s+(?:.*\()?([^()]+):(\d+):\d+\)?$/.exec(lines[k]);
+        if (at !== null && at[1].indexOf('node_modules') === -1) { file = at[1]; line = Number(at[2]); break; }
+      }
+      return failure(name, textBlock(lines, j + 1, /^ {2}● |^ ?FAIL\s|^Test Suites:|^\s*>?\s*\d+ \||^\s+at\s/, 4), file, line);
+    };
+  }
+  // A diagnostic belongs to a row by kind (the test's body or an error around it), full name and file.
+  function pytestKey(kind, title) { return kind + '\u0000' + title; }
+  function pytestFailures(lines, c) {
+    var blocks = Object.create(null), block, from = -1, j;
+    for (j = 0; j < lines.length; j++) {
+      if (/^=+ short test summary info =+$/.test(lines[j])) { from = j; block = undefined; continue; }
+      if (lines[j].charCodeAt(0) === 95 && lines[j].charCodeAt(lines[j].length - 1) === 95) {
+        var title = lines[j].replace(/^_+ /, '').replace(/ _+$/, '');
+        var around = /^ERROR (?:at (?:setup|teardown) of|collecting) (.*)$/.exec(title);
+        var key = pytestKey(around === null ? 'body' : 'error', around === null ? title : around[1]);
+        block = { errors: [], places: Object.create(null), last: undefined, used: false };
+        if (blocks[key] === undefined) blocks[key] = [];
+        push(blocks[key], block);
+        continue;
+      }
+      if (block === undefined) continue;
+      var where = /^(.+\.py):(\d+): /.exec(lines[j]);
+      if (where !== null) { block.last = { file: where[1], line: Number(where[2]) }; block.places[where[1]] = block.last; }
+      if (lines[j].charCodeAt(0) === 69 && (lines[j].length === 1 || lines[j].charCodeAt(1) === 32) && block.errors.length < 40) push(block.errors, lines[j].slice(1).trim());
+    }
+    if (from === -1) return;
+    for (j = from + 1; j < lines.length; j++) {
+      var row = /^(FAILED|ERROR) (\S.*)$/.exec(lines[j]);
+      if (row !== null) c.add(pytestFailure(row[1] === 'FAILED' ? 'body' : 'error', row[2], blocks));
+    }
+  }
+  function pytestTitle(id) {
+    var parts = id.split('::');
+    return parts.length > 1 ? join(parts.slice(1), '.') : id;
+  }
+  // The row is "<id> - <first line of the error>", and a parametrized id may hold " - " too.
+  function pytestId(kind, rest, blocks) {
+    var cut = rest.length;
+    for (var tries = 0; tries < 8 && cut !== -1; tries++) {
+      var id = rest.slice(0, cut);
+      if (blocks[pytestKey(kind, pytestTitle(id))] !== undefined) return id;
+      cut = cut === 0 ? -1 : rest.lastIndexOf(' - ', cut - 1);
+    }
+    var bracket = rest.lastIndexOf('] - ');
+    if (bracket !== -1) return rest.slice(0, bracket + 1);
+    var plain = rest.indexOf(' - ');
+    return plain === -1 ? rest : rest.slice(0, plain);
+  }
+  function pytestBlock(kind, id, blocks) {
+    var candidates = blocks[pytestKey(kind, pytestTitle(id))], file = id.split('::')[0];
+    if (candidates === undefined) return undefined;
+    for (var i = 0; i < candidates.length; i++) {
+      var block = candidates[i];
+      if (block.used) continue;
+      var names = objectKeys(block.places), onlyConftest = names.length > 0;
+      for (var n = 0; n < names.length; n++) if (names[n].split('/').pop() !== 'conftest.py') onlyConftest = false;
+      if (block.places[file] !== undefined || onlyConftest) { block.used = true; return block; }
+    }
+    return undefined;
+  }
+  function pytestFailure(kind, rest, blocks) {
+    return function () {
+      var id = pytestId(kind, rest, blocks), file = id.split('::')[0], block = pytestBlock(kind, id, blocks);
+      if (block === undefined) return failure(id, '', file);
+      var place = block.places[file] !== undefined ? block.places[file] : block.last;
+      return failure(id, join(block.errors, '\n'), place === undefined ? file : place.file, place === undefined ? undefined : place.line);
+    };
+  }
+  function nodeLocation(text) {
+    var m = /^(.*):(\d+):\d+$/.exec(text);
+    return m === null ? undefined : { file: m[1], line: Number(m[2]) };
+  }
+  var NODE_NOT_FAILED = /test did not finish before its parent|test timed out after|^'?\d+ subtests? failed/;
+  function nodeSpecFailures(lines, from, c) {
+    var start = -1, j, suites = Object.create(null);
+    for (j = from + 1; j < lines.length && start === -1; j++) if (/^✖ failing tests:/.test(lines[j])) start = j;
+    if (start === -1) return;
+    // A suite's own hook failure is listed too, but the runner does not count it as a failed test.
+    for (j = 0; j < from; j++) {
+      var suite = /^\s*▶ (.+)$/.exec(lines[j]);
+      if (suite !== null) suites[suite[1]] = true;
+    }
+    for (j = start + 1; j < lines.length - 1; j++) {
+      var at = /^test at (.+)$/.exec(lines[j]);
+      if (at === null) continue;
+      var named = /^([✖⚠]) (.+)$/.exec(lines[j + 1]);
+      if (named === null || named[1] === '⚠' || suites[named[2].replace(/ \([\d.]+m?s\)$/, '')] === true) continue;
+      var text = textBlock(lines, j + 2, /^test at |^\s+at\s|^\s*\{$/, 2);
+      if (NODE_NOT_FAILED.test(text)) continue;
+      c.add(nodeSpecFailure(named[2], text, at[1]));
+    }
+  }
+  function nodeSpecFailure(name, text, at) {
+    return function () {
+      var place = nodeLocation(at);
+      return failure(name.replace(/ \([\d.]+m?s\)$/, ''), text, place === undefined ? undefined : place.file, place === undefined ? undefined : place.line);
+    };
+  }
+  function tapName(text) { return text.replace(/\\(.)/g, '$1'); }
+  function nodeTapFailures(lines, until, c) {
+    for (var j = 0; j < until; j++) {
+      var bad = /^\s*not ok \d+ - (.*)$/.exec(lines[j]);
+      if (bad === null) continue;
+      var directive = bad[1].indexOf(' # ');
+      if (directive !== -1 && /^(?:TODO|SKIP)\b/.test(bad[1].slice(directive + 3))) continue;
+      var kind = '', message, location, k;
+      for (k = j + 1; k < until && !/^\s*\.\.\.$/.test(lines[k]) && !/^\s*(?:not )?ok \d+ - /.test(lines[k]); k++) {
+        var field = /^(\s*)(location|error|failureType): (.*)$/.exec(lines[k]);
+        if (field === null) continue;
+        var value = field[3].replace(/^'(.*)'$/, '$1');
+        if (field[2] === 'location') location = value;
+        else if (field[2] === 'failureType') kind = value;
+        else if (value.charCodeAt(0) !== 124) message = value;
+        else message = tapBlock(lines, k + 1, field[1].length);
+      }
+      if (kind === 'subtestsFailed' || kind === 'hookFailed' || kind === 'cancelledByParent' || kind === 'testTimeoutFailure') continue;
+      c.add(nodeTapFailure(bad[1], message, location));
+    }
+  }
+  function tapBlock(lines, from, indent) {
+    var out = [], size = 0;
+    for (var i = from; i < lines.length && size <= MAX_FAILURE_CHARS; i++) {
+      if (lines[i] !== '' && dedent(lines[i], indent + 1).length === lines[i].length - indent) break;
+      var line = dedent(lines[i], indent + 2);
+      push(out, line);
+      size += line.length + 1;
+    }
+    while (out.length > 0 && out[out.length - 1] === '') out.length--;
+    return join(out, '\n');
+  }
+  function nodeTapFailure(name, message, location) {
+    return function () {
+      var place = location === undefined ? undefined : nodeLocation(location);
+      return failure(tapName(name), message, place === undefined ? undefined : place.file, place === undefined ? undefined : place.line);
+    };
+  }
+  function failuresOf(summary, streams) {
+    var c = collector();
+    for (var i = 0; i < streams.length; i++) {
+      var lines = streams[i];
+      if (summary.runner === 'vitest') vitestFailures(lines, c, summary);
+      else if (summary.runner === 'jest') jestFailures(lines, c, summary);
+      else if (summary.runner === 'pytest') pytestFailures(lines, c);
+      else if (i === summary.stream) {
+        nodeSpecFailures(lines, summary.at, c);
+        nodeTapFailures(lines, summary.at, c);
+      }
+    }
+    return c;
+  }
+  // The runner's summary, or null when the streams disagree about which one it is.
+  function runnerSummary(streams, runner) {
+    var chosen = null;
+    for (var i = 0; i < streams.length; i++) {
+      var found = lastSummary(streams[i], runner);
+      if (found === null) continue;
+      found.stream = i;
+      if (chosen !== null) return null;
+      chosen = found;
+    }
+    return chosen;
+  }
+  function allDifferent(list) {
+    var seen = Object.create(null);
+    for (var i = 0; i < list.length; i++) {
+      var key = stringify([list[i].name, list[i].message, list[i].file, list[i].line]);
+      if (seen[key] === true) return false;
+      seen[key] = true;
+    }
+    return true;
+  }
+  function testReport(r, runner) {
+    var stdout = streamText(r.stdout, r.stdoutTail, r.stdoutOmitted), stderr = streamText(r.stderr, r.stderrTail, r.stderrOmitted);
+    var ok = r.exitCode === 0 && r.timedOut !== true;
+    var streams = [linesOf(stdout), linesOf(stderr)], summary = runnerSummary(streams, runner), found = null;
+    if (summary !== null && !ok && summary.failed > 0) found = failuresOf(summary, streams);
+    var parsed = summary !== null && r.timedOut !== true && (r.exitCode === 0 ? summary.failed === 0 : found !== null && found.count === summary.failed && allDifferent(found.list));
+    var out = {
+      ok: ok, exitCode: r.exitCode, timedOut: r.timedOut === true, parsed: parsed,
+      passed: parsed ? summary.passed : 0, failed: parsed ? summary.failed : 0, skipped: parsed ? summary.skipped : 0,
+      failures: parsed && found !== null ? found.list : [], truncated: r.truncated === true || (parsed && found !== null && found.count > found.list.length),
+    };
+    if (parsed && summary.cancelled > 0) out.cancelled = summary.cancelled;
+    if (!ok && !parsed) {
+      var last = r.outputTail !== undefined ? r.outputTail : stderr === '' ? stdout : stdout === '' ? stderr : stdout + '\n' + stderr;
+      out.output = lastChars(clean(lastChars(last, OUTPUT_TAIL_CHARS * 2)), OUTPUT_TAIL_CHARS);
+    }
+    return out;
+  }
+  function toolError(code, message) {
+    var err = new ErrorCtor(message);
+    defineProperty(err, 'name', { value: 'ToolError', writable: true, enumerable: false, configurable: true });
+    defineProperty(err, 'code', { value: code, writable: true, enumerable: true, configurable: true });
+    return err;
+  }
+  // Which runner a command starts, when it names exactly one.
+  function runnerOf(command) {
+    var text = command.slice(0, 4000), found = [];
+    if (/(?:^|[\s\/])vitest(?:\s|$)/.test(text)) push(found, 'vitest');
+    if (/(?:^|[\s\/])jest(?:\s|$)/.test(text)) push(found, 'jest');
+    if (/(?:^|[\s\/])pytest(?:\s|$)/.test(text)) push(found, 'pytest');
+    if (/(?:^|[\s\/;&|])node\s(?:[^;&|]*\s)?--test(?:\s|$)/.test(text)) push(found, 'node');
+    return found.length === 1 ? found[0] : undefined;
+  }
+  function packageFile(cwd) { return cwd === undefined ? 'package.json' : cwd + '/package.json'; }
+  function testScript(content) {
+    var pkg = parse(content);
+    var scripts = pkg !== null && typeof pkg === 'object' ? pkg.scripts : undefined;
+    return scripts !== null && typeof scripts === 'object' && typeof scripts.test === 'string' ? scripts.test : undefined;
+  }
+  function discoverTestCommand(cwd) {
+    var file = packageFile(cwd);
+    return apply(promiseThen, invoke('read', { path: file, limit: 1000000 }), [function (r) {
+      if (r.truncated === true) throw toolError('invalid-args', 'test: ' + file + ' is too large to read whole; pass a command');
+      var script;
+      try { script = testScript(r.content); } catch (e) { throw toolError('invalid-args', 'test: ' + file + ' is not valid JSON; pass a command'); }
+      return script === undefined ? { command: 'node --test', starts: 'node --test' } : { command: 'npm test --silent', starts: script };
+    }, function (e) {
+      if (e !== null && typeof e === 'object' && e.code === 'not-found') return { command: 'node --test', starts: 'node --test' };
+      throw e;
+    }]);
+  }
+  // What a given command starts: for "npm test", the script in package.json, if it can be read.
+  function startedBy(command, cwd) {
+    if (typeof command !== 'string') return apply(promiseResolve, PromiseCtor, [{ command: command, starts: '' }]);
+    if (!/^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|t)(?:\s|$)/.test(command)) return apply(promiseResolve, PromiseCtor, [{ command: command, starts: command }]);
+    var unknown = { command: command, starts: '' };
+    return apply(promiseThen, invoke('read', { path: packageFile(cwd), limit: 1000000 }), [function (r) {
+      try {
+        var script = r.truncated === true ? undefined : testScript(r.content);
+        return script === undefined ? unknown : { command: command, starts: script };
+      } catch (e) { return unknown; }
+    }, function () { return unknown; }]);
+  }
+  function runTests(arg) {
+    var a = typeof arg === 'string' ? { command: arg } : arg === undefined || arg === null ? {} : arg;
+    if (typeof a !== 'object') return apply(promiseReject, PromiseCtor, [toolError('invalid-args', 'test: the argument must be an object')]);
+    var keys = objectKeys(a);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i] !== 'command' && keys[i] !== 'cwd' && keys[i] !== 'timeoutMs') return apply(promiseReject, PromiseCtor, [toolError('invalid-args', 'test: unknown option ' + keys[i])]);
+    }
+    function run(chosen) {
+      var call = { command: chosen.command }, runner = runnerOf(chosen.starts);
+      if (a.cwd !== undefined) call.cwd = a.cwd;
+      if (a.timeoutMs !== undefined) call.timeoutMs = a.timeoutMs;
+      return apply(promiseThen, invoke('bash', call), [function (r) { return testReport(r, runner); }]);
+    }
+    return apply(promiseThen, a.command === undefined ? discoverTestCommand(a.cwd) : startedBy(a.command, a.cwd), [run]);
+  }
+
   var bindings = {
     bash: function bash(arg) { return invoke('bash', typeof arg === 'string' ? { command: arg } : arg); },
     read: function read(arg) { return invoke('read', arg); },
@@ -205,6 +643,8 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     edit: function edit(arg) { return invoke('edit', arg); },
     grep: function grep(arg) { return invoke('grep', arg); },
     glob: function glob(arg) { return invoke('glob', arg); },
+    test: function test(arg) { return runTests(arg); },
+    undo: function undo(undoId) { return invoke('undo', { undoId: undoId }); },
     readOverflow: function readOverflow(id, offset, limit) {
       return invoke('readOverflow', id !== null && typeof id === 'object' ? id : { id: id, offset: offset, limit: limit });
     },
@@ -218,6 +658,7 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
   };
   var names = objectKeys(bindings);
   for (var b = 0; b < names.length; b++) define(names[b], bindings[names[b]]);
+  define('scratchDir', scratchDir);
 
   // ---- return value: JSON, with non-JSON values described -----------------
   var tooLarge = {};
@@ -380,6 +821,7 @@ class VmRun {
   readonly #rt: QuickJSRuntime;
   readonly #ctx: QuickJSContext;
   readonly #limits: SandboxLimits;
+  readonly #scratchDir: string | undefined;
   readonly #deadline: number;
   readonly #pending = new Map<number, QuickJSDeferredPromise>();
   readonly #timer: NodeJS.Timeout;
@@ -394,6 +836,7 @@ class VmRun {
     this.#memory = memory;
     this.#memoryMaxBytes = Math.min(MAX_PAGES, INITIAL_PAGES + Math.ceil(start.limits.memoryBytes / WASM_PAGE_BYTES)) * WASM_PAGE_BYTES;
     this.#limits = start.limits;
+    this.#scratchDir = start.scratchDir;
     this.#deadline = Date.now() + start.timeoutMs;
     this.#rt = qjs.newRuntime();
     this.#rt.setMemoryLimit(start.limits.memoryBytes);
@@ -415,7 +858,8 @@ class VmRun {
     const ctx = this.#ctx;
     const shim = ctx.evalCode(SHIM, SHIM_FILE, { type: 'global' });
     if (shim.error) return this.#fail(shim.error);
-    const natives = [this.#callNative(), this.#logNative(), this.#doneNative(), ctx.newNumber(this.#limits.maxResultChars), ctx.newNumber(this.#limits.maxLogLineChars)];
+    const scratch = this.#scratchDir === undefined ? ctx.undefined : ctx.newString(this.#scratchDir);
+    const natives = [this.#callNative(), this.#logNative(), this.#doneNative(), ctx.newNumber(this.#limits.maxResultChars), ctx.newNumber(this.#limits.maxLogLineChars), scratch];
     const runner = ctx.callFunction(shim.value, ctx.undefined, natives);
     shim.value.dispose();
     for (const handle of natives) handle.dispose();

@@ -29,16 +29,19 @@ export const SERVER_NAME = 'agent-code-mode';
  * shape into unrelated tasks.
  */
 export const RUN_DESCRIPTION = `Run a JavaScript script (the body of an async function; return a value to get it back) that batches calls to these globals. Each call is checked against the host's permission rules and hooks; a denied call rejects with an Error named PermissionDenied, other failures with ToolError. Paths in results are relative to the working directory.
-declare function bash(a: {command: string; cwd?: string; timeoutMs?: number}): Promise<{exitCode: number | null; signal: string | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean}>;
+declare function bash(a: {command: string; cwd?: string; timeoutMs?: number}): Promise<{exitCode: number | null; signal: string | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; stdoutTail?: string; stderrTail?: string /* end of a cut stream */; outputTail?: string /* end of both streams, in order */}>;
 declare function read(a: {path: string; offset?: number; limit?: number}): Promise<{path: string; content: string /* exact text */; startLine: number; totalLines: number; truncated: boolean}>;
 declare function write(a: {path: string; content: string}): Promise<{path: string; created: boolean; diff: string}>;
 declare function edit(a: {path: string; oldString: string; newString: string; replaceAll?: boolean}): Promise<{path: string; replacements: number; matchStrategy: string; diff: string}>;
 declare function grep(a: {pattern: string; path?: string; glob?: string; ignoreCase?: boolean; maxResults?: number}): Promise<{columns: ['file', 'line', 'text']; rows: [string, number, string][]; count: number; truncated: boolean; filtered: number}>;
 declare function glob(a: {pattern: string; path?: string; maxResults?: number}): Promise<{files: string[]; truncated: boolean; filtered: number}>;
+declare function test(a?: {command?: string; cwd?: string; timeoutMs?: number}): Promise<{ok: boolean /* exit code 0, no timeout */; exitCode: number | null; timedOut: boolean; parsed: boolean /* false: the counts are 0, read output */; passed: number; failed: number; skipped: number; cancelled?: number; failures: {name: string; message: string; file?: string; line?: number}[]; truncated: boolean; output?: string}>; // runs the command through bash (default: npm test --silent if package.json has a test script, else node --test)
+declare function undo(undoId: string): Promise<{restored: string[]; removed: string[]; removedDirs: string[]; skipped: {path: string; reason: string}[]; bashCalls: number; mcpCalls: number}>; // puts back the writes and edits of an earlier run (its response's undoId), once; bash and mcpCall effects are not undone
+declare const scratchDir: string | undefined; // private directory for throwaway files, deleted when the server stops; not reported in changedFiles or diff
 declare function readOverflow(id: string, offset?: number, limit?: number): Promise<{text: string; offset: number; totalChars: number; truncated: boolean}>; // the whole result JSON a response cut
 type Failed = {id: string; tool: string; summary: string; reason?: string} | {tool: string; reason?: string; count: number; first: string} | string; // one entry per call; above the response cap, one per (tool, reason) with its count and the first call's summary, then a "…[N more reasons (M calls)]" marker if even those do not fit; a verbose log over the cap is cut by entry and these compact calls come as callSummary
-type Response = {ok: boolean; result?: unknown; error?: {name: string; message: string}; logs?: string[]; calls: {total: number; byTool: Record<string, number>; denied?: Failed[]; errors?: Failed[]}; changedFiles?: string[]; diff?: string; diffStat?: {files: Record<string, string>; moreFiles?: number; total: string}; warnings?: string[]; callSummary?: Response['calls']; truncated?: true; overflow?: {id: string; chars: number}}; // a multi-line string result over ${TEXT_BLOCK_MIN_CHARS} chars comes as plain text in a second block; a diff over ${DIFF_INLINE_CHARS} chars comes as diffStat
-QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits`;
+type Response = {ok: boolean; result?: unknown; error?: {name: string; message: string}; logs?: string[]; calls: {total: number; byTool: Record<string, number>; denied?: Failed[]; errors?: Failed[]}; changedFiles?: string[]; changedCount?: number /* instead of changedFiles above 10 files; the list is in the overflow */; diff?: string; diffStat?: {files?: Record<string, string>; moreFiles?: number; total: string}; undoId?: string; warnings?: string[]; callSummary?: Response['calls']; truncated?: true; overflow?: {id: string; chars: number}}; // a multi-line string result over ${TEXT_BLOCK_MIN_CHARS} chars comes as plain text in a second block; a diff over ${DIFF_INLINE_CHARS} chars comes as diffStat
+QuickJS ES2023; no require/process/fs; inspect one sample file before batching edits; return counts and small samples, not whole file lists`;
 
 /**
  * The one line `serve --hybrid` appends to the description, for hosts that keep their native file and
@@ -159,7 +162,10 @@ export function createMcpServer(opts: McpServerOptions): Server {
   };
 
   const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} } });
-  server.onclose = () => overflow.clear();
+  server.onclose = () => {
+    overflow.clear();
+    for (const runtime of runtimes.values()) runtime.tools.closeSession?.();
+  };
 
   const listRoots = async (): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];

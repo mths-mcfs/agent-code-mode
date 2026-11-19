@@ -7,7 +7,7 @@ import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter, type StaticHostAdapterOptions } from '../testing/static-host-adapter.js';
 import { NodeToolRuntime } from '../tools/runtime.js';
 import { Dispatcher, displayPath } from './dispatcher.js';
-import type { CallReply, PolicyLoadError, PolicySnapshot, Transaction } from './types.js';
+import type { BashContainment, CallReply, PolicyLoadError, PolicySnapshot, Transaction, UndoSession, UndoStep } from './types.js';
 
 async function setup(
   adapterOpts: StaticHostAdapterOptions = {},
@@ -35,6 +35,63 @@ function errorOf(reply: CallReply) {
   if (reply.ok) throw new Error(`expected failure, got ${JSON.stringify(reply.value)}`);
   return reply.error;
 }
+
+describe('Dispatcher: undo removals run here, not in the command sandbox', () => {
+  const removal: UndoStep = { kind: 'remove', path: '/ws/new.txt', call: { tool: 'bash', args: { command: "rm -- '/ws/new.txt'" } } };
+
+  async function undoWith(bashContainment: BashContainment, protectedPaths: readonly string[] = []) {
+    const applied: UndoStep[] = [];
+    const closed: boolean[] = [];
+    const session: UndoSession = {
+      steps: [removal],
+      skipped: [],
+      bashCalls: 0,
+      mcpCalls: 0,
+      apply: async (step) => void applied.push(step),
+      close: async (used) => void closed.push(used),
+    };
+    const ctx = makeContext('/ws');
+    const adapter = new StaticHostAdapter({ bashContainment, protectedPaths });
+    const tools = Object.assign(new MemoryToolRuntime({ root: '/ws' }), { openUndo: async () => session });
+    const dispatcher = new Dispatcher<null>({ adapter, tools, ctx, policy: await adapter.loadPolicy(ctx) });
+    return { reply: await dispatcher.dispatch('undo', { undoId: 'undo_x' }), applied, closed };
+  }
+
+  it('opening a scratch directory leaves every other protected path protected', async () => {
+    const ctx = makeContext('/ws');
+    const adapter = new StaticHostAdapter({ protectedPaths: ['/ws/secret.txt'] });
+    const loaded = await adapter.loadPolicy(ctx);
+    if ('error' in loaded) throw new Error(loaded.error);
+    const dispatcher = new Dispatcher<null>({ adapter, tools: new MemoryToolRuntime({ root: '/ws' }), ctx, policy: { ...loaded, scratchRoot: '/scratch' } });
+    expect(errorOf(await dispatcher.dispatch('write', { path: 'secret.txt', content: 'x' }))).toMatchObject({ code: 'protected-path' });
+  });
+
+  it('a read-only containment refuses the removal and nothing is applied', async () => {
+    const { reply, applied, closed } = await undoWith({ mode: 'sandbox', readOnly: true, writableRoots: [], network: false });
+    expect(errorOf(reply)).toMatchObject({ name: 'PermissionDenied', source: 'containment-unavailable' });
+    expect(applied).toEqual([]);
+    expect(closed).toEqual([false]);
+  });
+
+  it('a path outside the writable roots is refused', async () => {
+    const { reply, applied } = await undoWith({ mode: 'sandbox', readOnly: false, writableRoots: ['/elsewhere'], network: false });
+    expect(errorOf(reply)).toMatchObject({ source: 'containment-unavailable' });
+    expect(applied).toEqual([]);
+  });
+
+  it('a protected path is refused', async () => {
+    const { reply, applied } = await undoWith({ mode: 'none' }, ['/ws/new.txt']);
+    expect(errorOf(reply)).toMatchObject({ code: 'protected-path' });
+    expect(applied).toEqual([]);
+  });
+
+  it('inside a writable root the removal goes on and the id is used up', async () => {
+    const { reply, applied, closed } = await undoWith({ mode: 'sandbox', readOnly: false, writableRoots: ['/ws'], network: false });
+    expect(reply).toMatchObject({ ok: true, value: { removed: ['new.txt'] } });
+    expect(applied).toEqual([removal]);
+    expect(closed).toEqual([true]);
+  });
+});
 
 describe('Dispatcher', () => {
   it('applies checkResolved before the static rules, so an ask rule cannot hide its deny', async () => {

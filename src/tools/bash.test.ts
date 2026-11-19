@@ -7,7 +7,7 @@ import { ToolError } from '../core/errors.js';
 import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from '../core/types.js';
 import { planGlobExpansion } from '../hosts/claude/expand.js';
 import { makeContext } from '../testing/context.js';
-import { type BashVersion, bashVersion, expandBashGlobs, findBash, globEnvironment } from './bash.js';
+import { type BashVersion, OUTPUT_TAIL_BYTES, bashVersion, expandBashGlobs, findBash, globEnvironment } from './bash.js';
 import { Jail } from './jail.js';
 import { NodeToolRuntime } from './runtime.js';
 import { containmentUnavailableReason } from './sandbox.js';
@@ -70,7 +70,7 @@ afterEach(() => {
 describe.skipIf(IS_WINDOWS)('bash', () => {
   it('returns exit code and output; a non-zero exit is a result', async () => {
     const r = await bash('echo out; echo err >&2; exit 3');
-    expect(r).toEqual({ exitCode: 3, signal: null, stdout: 'out\n', stderr: 'err\n', truncated: false, timedOut: false });
+    expect(r).toMatchObject({ exitCode: 3, signal: null, stdout: 'out\n', stderr: 'err\n', truncated: false, timedOut: false });
   });
 
   it('kills the whole process group on timeout, grandchildren included', async () => {
@@ -111,6 +111,49 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     expect(r.stdout).toBe('a'.repeat(1000));
     expect(r.stderr).toBe('b'.repeat(1000));
     expect(r.truncated).toBe(true);
+  });
+
+  it('keeps the end of a stream that was cut, and only of that stream', async () => {
+    const r = await bash("head -c 5000 /dev/zero | tr '\\0' a; printf THE-END; printf short >&2", { capBytes: 100 });
+    expect(r.truncated).toBe(true);
+    expect(r.stdout).toHaveLength(100);
+    expect(r.stdoutTail?.endsWith('THE-END')).toBe(true);
+    expect(r.stderr).toBe('short');
+    expect(r).not.toHaveProperty('stderrTail');
+  });
+
+  it('neither cut splits a character, and start and end join exactly when nothing was lost between them', async () => {
+    const r = await bash("printf 'xxx😀yyy'", { capBytes: 5 });
+    expect(r.stdout).toBe('xxx');
+    expect(r.stdoutTail).toBe('😀yyy');
+    expect(r.stdoutOmitted).toBe(0);
+  });
+
+  it('says how many bytes were lost between the start and the end', async () => {
+    const r = await bash(`head -c ${OUTPUT_TAIL_BYTES + 1000} /dev/zero | tr '\\0' a`, { capBytes: 100 });
+    expect(r.stdoutTail).toHaveLength(OUTPUT_TAIL_BYTES);
+    expect(r.stdoutOmitted).toBe(900);
+  });
+
+  it('keeps the order of both streams together', async () => {
+    const r = await bash('printf OLD >&2; sleep 0.2; printf FINAL');
+    expect(r.outputTail).toBe('OLDFINAL');
+  });
+
+  it('adds no combined tail when only one stream has output', async () => {
+    expect(await bash('printf only')).not.toHaveProperty('outputTail');
+  });
+
+  it('adds no tail when nothing was cut', async () => {
+    const r = await bash('echo fine');
+    expect(r).not.toHaveProperty('stdoutTail');
+    expect(r).not.toHaveProperty('stderrTail');
+  });
+
+  it('the tail is bounded and starts at a character boundary', async () => {
+    const r = await bash(`for i in 1 2 3 4 5 6 7 8; do head -c 20000 /dev/zero | sed 's/\\x00/é/g'; done; yes é | head -c ${OUTPUT_TAIL_BYTES * 2} | tr -d '\\n'`, { capBytes: 10 });
+    expect(Buffer.byteLength(r.stdoutTail ?? '')).toBeLessThanOrEqual(OUTPUT_TAIL_BYTES);
+    expect(r.stdoutTail).not.toContain('�');
   });
 
   it('refuses a containment with a relative writable root', async () => {

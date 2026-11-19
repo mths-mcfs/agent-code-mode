@@ -3,7 +3,7 @@ import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
 import { frozenCopy } from './freeze.js';
 import { findMatchingPattern, workspaceDisplayPath } from './paths.js';
-import { isMutating, parseToolCall } from './schemas.js';
+import { UndoArgsSchema, formatIssues, isMutating, parseToolCall } from './schemas.js';
 import type {
   BashContainment,
   BindingCall,
@@ -26,6 +26,11 @@ import type {
   ToolResult,
   ToolRuntime,
   Transaction,
+  RunUndo,
+  UndoResult,
+  UndoSession,
+  UndoSkip,
+  UndoStep,
 } from './types.js';
 
 /** Why the dispatcher stopped accepting calls. */
@@ -40,6 +45,8 @@ export interface DispatcherOptions<P> {
   readonly mcp?: McpRuntime;
   /** Journal of a transactional run; passed to every commit. */
   readonly transaction?: Transaction;
+  /** Records what this run's writes and edits replace, for a later `undo`. */
+  readonly undo?: RunUndo;
   /** Called once, on the first denied call. A transactional run aborts there. */
   readonly onDeny?: (entry: CallLogEntry) => void;
   /** Clock, for tests. */
@@ -57,6 +64,9 @@ const MAX_SUMMARY_CHARS = 160;
 /** Binding name of `mcpCall` on the wire from the sandbox. */
 export const MCP_BINDING = 'mcp';
 
+/** Binding name of `undo(undoId)`. */
+export const UNDO_BINDING = 'undo';
+
 /** How long `stop` waits for in-flight calls before giving up on them. */
 export const DEFAULT_SETTLE_GRACE_MS = 2_000;
 
@@ -70,6 +80,13 @@ function clip(s: string, max: number): string {
 
 function oneLine(s: string): string {
   return s.replace(/\s*\n\s*/g, ' ⏎ ');
+}
+
+/** Whether the real path `target` is `base` or below it. */
+function isInside(base: string, target: string): boolean {
+  const fold = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const rel = path.relative(fold(base), fold(target));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 function containmentEquals(a: BashContainment, b: BashContainment): boolean {
@@ -152,9 +169,9 @@ export class Dispatcher<P = unknown> {
   readonly #diffs: string[] = [];
   readonly #warnings: string[] = [];
   /** Handed to every commit: what the tool runtime reports besides results (protected-path changes) lands in `warnings`. */
-  readonly #observer: CommitObserver = { warn: (message) => this.#warnings.push(message) };
+  readonly #observer: CommitObserver;
   #deniedCount = 0;
-  #bashCommits = 0;
+  #bashStarted = 0;
   #mcpSent = 0;
   /** The session cwd and roots as real paths, the form prepared paths take. */
   readonly #canonicalCwd: string;
@@ -162,6 +179,7 @@ export class Dispatcher<P = unknown> {
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
+    this.#observer = { warn: (message) => this.#warnings.push(message), bashStarted: () => void this.#bashStarted++, ...(opts.undo ? { undo: opts.undo } : {}) };
     this.#now = opts.now ?? (() => performance.now());
     this.#canonicalCwd = canonicalPath(opts.ctx.cwd);
     this.#canonicalRoots = [...new Set([...opts.ctx.roots, ...(isPolicyError(opts.policy) ? [] : (opts.policy.additionalRoots ?? []))])].map(canonicalPath);
@@ -209,9 +227,9 @@ export class Dispatcher<P = unknown> {
     return this.#deniedCount;
   }
 
-  /** Number of `bash` calls that committed (their effects are never rolled back). */
-  get bashCommits(): number {
-    return this.#bashCommits;
+  /** Number of `bash` calls that started, finished or not (their effects are never rolled back). */
+  get bashCallsStarted(): number {
+    return this.#bashStarted;
   }
 
   /** Number of `mcpCall`s sent upstream, whatever their outcome (their effects are never rolled back). */
@@ -294,6 +312,7 @@ export class Dispatcher<P = unknown> {
     if (this.#stopReason !== undefined) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, this.#stoppedFailure()));
     }
+    if (tool === UNDO_BINDING) return this.#handleUndo(id, slot, args, started);
     const parsed = this.#parse(typeof tool === 'string' ? tool : String(tool), args, id);
     if (parsed instanceof ToolError) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: parsed }));
@@ -318,6 +337,146 @@ export class Dispatcher<P = unknown> {
     const queued = this.#mutationTail.then(run);
     this.#mutationTail = queued.catch(() => undefined);
     return queued;
+  }
+
+  /** Queues an `undo`: it changes files, so it runs in call order with the other mutations. */
+  #handleUndo(id: string, slot: number, args: unknown, started: number): Promise<CallReply> {
+    const parsed = UndoArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      return Promise.resolve(this.#fail(slot, id, UNDO_BINDING, UNDO_BINDING, started, { kind: 'error', error: new ToolError('invalid-args', `undo: ${formatIssues(parsed.error)}`) }));
+    }
+    const { undoId } = parsed.data;
+    const summary = clip(`undo ${undoId}`, MAX_SUMMARY_CHARS);
+    this.#labels[slot] = { id, tool: UNDO_BINDING, summary };
+    const policy = this.#opts.policy;
+    if (isPolicyError(policy)) {
+      return Promise.resolve(this.#fail(slot, id, UNDO_BINDING, summary, started, { kind: 'deny', source: 'unsupported-config', reason: `host configuration could not be loaded: ${policy.error}` }));
+    }
+    const queued = this.#mutationTail.then(() => this.#undo(slot, id, undoId, summary, policy, started));
+    this.#mutationTail = queued.catch(() => undefined);
+    return queued;
+  }
+
+  /**
+   * Undoes a finished run: every step is authorized as the `write` or `bash`
+   * call that makes it before any file is touched, and one refusal ends the
+   * undo with nothing changed. The files stay reserved until the end.
+   */
+  async #undo(slot: number, id: string, undoId: string, summary: string, policy: PolicySnapshot<P>, started: number): Promise<CallReply> {
+    const fail = (failure: Failure): CallReply => this.#fail(slot, id, UNDO_BINDING, summary, started, failure);
+    if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
+    if (this.#opts.transaction !== undefined) {
+      return fail({ kind: 'error', error: new ToolError('invalid-args', 'undo is not available in a run with transaction: true') });
+    }
+    const tools = this.#opts.tools;
+    if (tools.openUndo === undefined) return fail({ kind: 'error', error: new ToolError('not-found', 'undo: this server keeps no undo records') });
+    let session: UndoSession;
+    try {
+      session = await tools.openUndo(undoId, this.#opts.ctx, policy);
+    } catch (err) {
+      return fail(this.#toolFailure(err));
+    }
+    let used = false;
+    try {
+      const diffs = new Map<UndoStep, string>();
+      for (const [i, step] of session.steps.entries()) {
+        const outcome = await this.#authorizeUndoStep(step, `${id}.${i + 1}`, policy);
+        if (typeof outcome !== 'string') return fail(undoRefusal(step, outcome));
+        diffs.set(step, outcome);
+      }
+      if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
+      used = true;
+      const value = await this.#applyUndo(session, diffs);
+      this.#calls[slot] = { id, tool: UNDO_BINDING, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+      return { ok: true, value };
+    } finally {
+      await session.close(used);
+    }
+  }
+
+  /** Makes the authorized steps. A file that changed since the plan is reported and left alone; the rest still go on. */
+  async #applyUndo(session: UndoSession, diffs: ReadonlyMap<UndoStep, string>): Promise<UndoResult> {
+    const restored: string[] = [];
+    const removed: string[] = [];
+    const removedDirs: string[] = [];
+    const skipped: UndoSkip[] = [...session.skipped];
+    for (const step of session.steps) {
+      if (this.#abort.signal.aborted) {
+        skipped.push({ path: step.path, reason: 'the run stopped before this step' });
+        continue;
+      }
+      try {
+        await session.apply(step, this.#abort.signal);
+      } catch (err) {
+        skipped.push({ path: step.path, reason: errorMessage(err) });
+        continue;
+      }
+      if (step.kind === 'rmdir') removedDirs.push(step.path);
+      else this.#addChanged(step.path);
+      if (step.kind === 'remove') removed.push(step.path);
+      if (step.kind === 'restore') {
+        restored.push(step.path);
+        const diff = diffs.get(step) ?? '';
+        this.#diffs.push(diff.endsWith('\n') || diff === '' ? diff : `${diff}\n`);
+      }
+    }
+    const shown = (p: string): string => displayPath(p, this.#canonicalCwd);
+    return {
+      restored: restored.map(shown),
+      removed: removed.map(shown),
+      removedDirs: removedDirs.map(shown),
+      skipped: skipped.map((s) => ({ path: shown(s.path), reason: s.reason })),
+      bashCalls: session.bashCalls,
+      mcpCalls: session.mcpCalls,
+    };
+  }
+
+  /**
+   * Puts one undo step through the same checks as a call of the script. Resolves
+   * to the diff of the step, or to why it may not be made. A hook may rewrite a
+   * step only into the very same effect.
+   */
+  async #authorizeUndoStep(step: UndoStep, callId: string, policy: PolicySnapshot<P>): Promise<string | Failure> {
+    const call = parseToolCall(step.call.tool, step.call.args, callId);
+    if (call instanceof ToolError) return { kind: 'error', error: call };
+    const first = await this.#prepareChecked(call, policy);
+    if ('kind' in first) return first;
+    const prepared = first.prepared;
+    if (step.kind !== 'restore') {
+      // The step runs here, not in the command's sandbox: what the sandbox would refuse is refused now.
+      const refused = this.#removalRefused(step.path, policy);
+      if (refused) return refused;
+    }
+    const denied = (await this.#checkResolved(prepared, policy)) ?? this.#checkStatic(prepared, policy);
+    if (denied) return denied;
+    const decision = await this.#authorize(prepared, policy);
+    if (decision === ABORTED || this.#stopReason !== undefined) return this.#stoppedFailure();
+    if (decision.kind === 'deny') return { kind: 'deny', source: decision.source, reason: decision.reason };
+    if (decision.kind === 'ask') return { kind: 'deny', source: 'ask-unavailable', reason: `host would ask the user and no interactive channel exists: ${decision.reason}` };
+    if (decision.updatedArgs !== undefined) {
+      const incompatible: Failure = { kind: 'deny', source: 'hook', reason: 'a hook rewrote this step into a different change' };
+      const reparsed = parseToolCall(call.tool, decision.updatedArgs, callId);
+      if (reparsed instanceof ToolError) return incompatible;
+      const second = await this.#prepareChecked(reparsed, policy);
+      if ('kind' in second || !sameEffect(prepared, second.prepared)) return incompatible;
+    }
+    return prepared.tool === 'write' ? prepared.effect.diff : '';
+  }
+
+  /** Why a file or directory may not be removed: a protected path, or outside what the bash containment can write. */
+  #removalRefused(target: string, policy: PolicySnapshot<P>): Failure | undefined {
+    if (findMatchingPattern(target, this.#protectedPatterns(policy)) !== undefined) {
+      return { kind: 'error', error: new ToolError('protected-path', `${target} is a protected host policy path`) };
+    }
+    const containment = policy.bashContainment;
+    if (containment.mode === 'none') return undefined;
+    if (!containment.readOnly && containment.writableRoots.some((root) => isInside(canonicalPath(root), target))) return undefined;
+    return { kind: 'deny', source: 'containment-unavailable', reason: `${target} is outside what the bash containment may write` };
+  }
+
+  /** Whether the real path `abs` is inside the scratch directory this policy opened. */
+  #inScratch(abs: string, policy: PolicySnapshot<P>): boolean {
+    return policy.scratchRoot !== undefined && isInside(policy.scratchRoot, abs);
   }
 
   /** Validates an untrusted call: a built-in binding, or `mcpCall` against the MCP catalog. */
@@ -496,6 +655,7 @@ export class Dispatcher<P = unknown> {
     const signal = this.#abort.signal;
     const label = callLabel(prepared);
     let result: HostResult;
+    const startedBefore = this.#bashStarted;
     try {
       if (prepared.tool === 'mcp') {
         const mcp = this.#opts.mcp;
@@ -513,7 +673,7 @@ export class Dispatcher<P = unknown> {
         this.#warnings.push(
           `${prepared.id} (${summary}) was committing when the run stopped (${this.#stopReason ?? 'stopped'}) and then failed: ${errorMessage(err)}. Its effect may be partial.`,
         );
-        if (prepared.tool === 'write' || prepared.tool === 'edit') this.#addChanged(prepared.effect.absPath);
+        if ((prepared.tool === 'write' || prepared.tool === 'edit') && !this.#inScratch(prepared.effect.absPath, policy)) this.#addChanged(prepared.effect.absPath);
       }
       return this.#fail(slot, prepared.id, label, summary, started, this.#toolFailure(err));
     }
@@ -523,12 +683,15 @@ export class Dispatcher<P = unknown> {
         `${prepared.id} (${summary}) was committing when the run stopped (${this.#stopReason ?? 'stopped'}); its effect was applied.`,
       );
     }
-    if (prepared.tool === 'write' || prepared.tool === 'edit') {
+    if ((prepared.tool === 'write' || prepared.tool === 'edit') && this.#inScratch(prepared.effect.absPath, policy)) {
+      // A scratch file is throwaway: not a change of the workspace.
+    } else if (prepared.tool === 'write' || prepared.tool === 'edit') {
       this.#addChanged(prepared.effect.absPath);
       const diff = 'diff' in result && typeof result.diff === 'string' ? result.diff : prepared.effect.diff;
       this.#diffs.push(diff.endsWith('\n') || diff === '' ? diff : `${diff}\n`);
-    } else if (prepared.tool === 'bash') {
-      this.#bashCommits++;
+    } else if (prepared.tool === 'bash' && this.#bashStarted === startedBefore) {
+      // A tool runtime that does not report the start: the call ran, since it returned a result.
+      this.#bashStarted++;
     }
 
     const post = this.#opts.adapter.postToolUse;
@@ -630,6 +793,20 @@ export class Dispatcher<P = unknown> {
   #elapsed(started: number): number {
     return Math.max(0, Math.round(this.#now() - started));
   }
+}
+
+/** Whether a hook's rewrite of an undo step still makes the same change. */
+function sameEffect(a: HostCall, b: HostCall): boolean {
+  if (a.tool === 'write' && b.tool === 'write') return a.effect.absPath === b.effect.absPath && a.effect.afterContent === b.effect.afterContent;
+  if (a.tool === 'bash' && b.tool === 'bash') return a.effect.command === b.effect.command;
+  return false;
+}
+
+/** The failure of an undo whose step was refused: nothing was changed. */
+function undoRefusal(step: UndoStep, failure: Failure): Failure {
+  const what = `undo aborted, nothing was changed: ${step.kind} ${step.path}`;
+  if (failure.kind === 'deny') return { ...failure, reason: `${what}: ${failure.reason}` };
+  return { kind: 'error', error: new ToolError(failure.error.code, `${what}: ${failure.error.message}`) };
 }
 
 /** Real path of `p`, or `p` resolved lexically when it does not exist. */

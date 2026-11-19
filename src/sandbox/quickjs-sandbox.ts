@@ -267,7 +267,7 @@ export class QuickJsSandbox implements Sandbox {
       timeoutMs,
     );
 
-    if (!active.finished) write({ type: 'start', code, timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)), limits });
+    if (!active.finished) write({ type: 'start', code, timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)), limits, ...(opts.scratchDir === undefined ? {} : { scratchDir: opts.scratchDir }) });
 
     return active.outcome.finally(() => {
       clearTimeout(timer);

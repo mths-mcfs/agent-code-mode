@@ -13,6 +13,7 @@ import type {
   RunError,
   RunRequest,
   RunResult,
+  RunUndo,
   Sandbox,
   SandboxOutcome,
   SessionContext,
@@ -193,6 +194,34 @@ function readOverflow(store: RunDeps['overflow'], args: unknown): CallReply {
   return store.read(args);
 }
 
+/** The run's scratch directory when its adapter applies one; a failure to create it only leaves the run without one. */
+async function scratchFor<P>(deps: RunDeps<P>, warnings: string[]): Promise<string | undefined> {
+  if (deps.adapter.usesScratch !== true || deps.tools.scratchDir === undefined) return undefined;
+  try {
+    return await deps.tools.scratchDir();
+  } catch (err) {
+    warnings.push(`the scratch directory could not be created: ${errorMessage(err)}`);
+    return undefined;
+  }
+}
+
+/** Files the run's undo record, or drops it when the run was rolled back. Never throws. */
+async function settleUndo(undo: RunUndo | undefined, rolledBack: boolean, stats: { bashCalls: number; mcpCalls: number }, warnings: string[]): Promise<{ undoId?: string }> {
+  if (undo === undefined) return {};
+  try {
+    if (rolledBack) {
+      await undo.discard();
+      return {};
+    }
+    const outcome = await undo.finish(stats);
+    if (outcome.warning !== undefined) warnings.push(outcome.warning);
+    return outcome.undoId === undefined ? {} : { undoId: outcome.undoId };
+  } catch (err) {
+    warnings.push(`this run cannot be undone: ${errorMessage(err)}`);
+    return {};
+  }
+}
+
 /**
  * Runs one script end to end: loads the policy, starts the transaction,
  * runs the sandbox with the dispatcher behind its bindings, enforces the
@@ -208,6 +237,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
   let dispatcher: Dispatcher<P> | undefined;
   let denied: CallLogEntry | undefined;
   let tx: Transaction | undefined;
+  let undo: RunUndo | undefined;
+  const setupWarnings: string[] = [];
 
   const stop = (reason: StopReason): void => {
     if (stopReason !== undefined) return;
@@ -224,20 +255,24 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
   // enforces `timeoutMs` itself; this fires only if something does not return.
   let timer: NodeJS.Timeout | undefined = setTimeout(() => stop('timeout'), timeoutMs + graceMs);
   try {
+    const scratchDir = await scratchFor(deps, setupWarnings);
+    const ctx: SessionContext = scratchDir === undefined ? deps.ctx : { ...deps.ctx, scratchDir };
     let policy: PolicySnapshot<P> | PolicyLoadError;
     try {
-      const loaded = await bounded(() => deps.adapter.loadPolicy(deps.ctx), { signal: controller.signal });
+      const loaded = await bounded(() => deps.adapter.loadPolicy(ctx), { signal: controller.signal });
       policy = loaded.done ? loaded.value : { error: 'the run stopped while the host policy was loading' };
     } catch (err) {
       policy = { error: errorMessage(err) };
     }
 
     if (req.transaction) tx = deps.tools.beginTransaction();
+    undo = deps.tools.beginUndo?.();
     dispatcher = new Dispatcher<P>({
       adapter: deps.adapter,
       tools: deps.tools,
-      ctx: deps.ctx,
+      ctx,
       policy,
+      ...(undo ? { undo } : {}),
       ...(deps.mcp ? { mcp: deps.mcp } : {}),
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
@@ -254,6 +289,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
           timeoutMs,
           memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
           signal: controller.signal,
+          ...(scratchDir === undefined ? {} : { scratchDir }),
           onCall: (tool, args) => (tool === READ_OVERFLOW_BINDING ? Promise.resolve(readOverflow(deps.overflow, args)) : active.dispatch(tool, args)),
           onLog: (level, text) => logs.add(level, text),
         });
@@ -273,8 +309,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     const rollbackWarnings: string[] = [];
     if (tx && error) {
       rolledBack = await rollbackBounded(tx, rollbackMs, rollbackWarnings);
-      if (active.bashCommits > 0) {
-        rollbackWarnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
+      if (active.bashCallsStarted > 0) {
+        rollbackWarnings.push(`${active.bashCallsStarted} bash call(s) ran in this transaction; bash effects are never rolled back.`);
       }
       if (active.mcpCallsSent > 0) {
         rollbackWarnings.push(`${active.mcpCallsSent} mcpCall(s) were sent to upstream MCP servers in this transaction; their effects were not undone (MCP calls are never rolled back).`);
@@ -282,9 +318,12 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     }
     // Last look at the protected paths (after the last bash call and any rollback), before the response is built.
     await active.finishRun();
-    const warnings = [...active.warnings, ...rollbackWarnings];
+    const undoWarnings: string[] = [];
+    const undone = await settleUndo(undo, tx !== undefined && error !== undefined, { bashCalls: active.bashCallsStarted, mcpCalls: active.mcpCallsSent }, undoWarnings);
+    const warnings = [...setupWarnings, ...active.warnings, ...rollbackWarnings, ...undoWarnings];
 
     const base = {
+      ...undone,
       logs: logs.finish(),
       calls: active.calls,
       changedFiles: active.changedFiles,
@@ -302,8 +341,10 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       rollbackWarnings.push(`${dispatcher.mcpCallsSent} mcpCall(s) were sent to upstream MCP servers in this transaction; their effects were not undone (MCP calls are never rolled back).`);
     }
     if (dispatcher) await dispatcher.finishRun();
-    const warnings = [...(dispatcher ? dispatcher.warnings : []), ...rollbackWarnings];
+    const undone = await settleUndo(undo, tx !== undefined, { bashCalls: dispatcher?.bashCallsStarted ?? 0, mcpCalls: dispatcher?.mcpCallsSent ?? 0 }, rollbackWarnings);
+    const warnings = [...setupWarnings, ...(dispatcher ? dispatcher.warnings : []), ...rollbackWarnings];
     return {
+      ...undone,
       ok: false,
       error: { kind: 'internal', name: 'InternalError', message: errorMessage(err) },
       logs: logs.finish(),

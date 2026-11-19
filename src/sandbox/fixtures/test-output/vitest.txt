@@ -1,0 +1,46 @@
+
+ RUN  v5.1.0 /work/project
+
+ ❯ math.test.ts (4 tests | 2 failed | 1 skipped) 10ms
+   × subtracts 6ms
+   ❯ group (1)
+     × nested fails 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  math.test.ts > subtracts
+AssertionError: expected 2 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 2
+
+ ❯ math.test.ts:3:39
+      1| import { describe, expect, it } from 'vitest';
+      2| it('adds', () => { expect(1 + 1).toBe(2); });
+      3| it('subtracts', () => { expect(3 - 1).toBe(1); });
+       |                                       ^
+      4| it.skip('later', () => {});
+      5| describe('group', () => { it('nested fails', () => { throw new Error('…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  math.test.ts > group > nested fails
+Error: boom nested
+ ❯ math.test.ts:5:60
+      3| it('subtracts', () => { expect(3 - 1).toBe(1); });
+      4| it.skip('later', () => {});
+      5| describe('group', () => { it('nested fails', () => { throw new Error('…
+       |                                                            ^
+      6|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 1 passed | 1 skipped (4)
+   Start at  12:33:04
+   Duration  191ms (transform 42%, import 27%, tests 20%, worker 11%)
+
