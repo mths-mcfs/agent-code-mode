@@ -4,8 +4,8 @@
  * Patterns use `/` as separator. `**` matches any number of characters
  * including `/`; a trailing `/**` also matches the directory itself. `*`
  * matches inside one segment, `?` one character inside a segment. Everything
- * else is literal. Backslashes in both the path and the pattern are treated as
- * separators so Windows paths match too.
+ * else is literal. On Windows, backslashes in both the path and the pattern are
+ * treated as separators; on POSIX they are part of a name.
  */
 
 import path from 'node:path';
@@ -47,9 +47,9 @@ function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
   return re;
 }
 
-/** Replaces `\` with `/`. */
-export function normalizeSeparators(p: string): string {
-  return p.replace(/\\/g, '/');
+/** Replaces `\` with `/` on Windows; on POSIX a backslash is an ordinary file-name character. */
+export function normalizeSeparators(p: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? p.replace(/\\/g, '/') : p;
 }
 
 /** Whether file names on this platform are usually case-insensitive. */

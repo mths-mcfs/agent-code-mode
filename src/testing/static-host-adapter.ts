@@ -35,6 +35,8 @@ export interface StaticHostAdapterOptions {
   readonly policyError?: string;
   readonly bashContainment?: BashContainment;
   readonly protectedPaths?: readonly string[];
+  /** When set, `checkResolved` returns its result. */
+  readonly resolved?: (prepared: PreparedCall) => Decision | undefined;
 }
 
 /**
@@ -71,6 +73,12 @@ export class StaticHostAdapter implements HostAdapter<null> {
     const ask = verdicts.find((v) => v?.kind === 'ask');
     if (ask) return { kind: 'ask', reason: ask.reason };
     return { kind: 'allow' };
+  }
+
+  async checkResolved(prepared: PreparedCall): Promise<Decision | undefined> {
+    const resolved = this.#opts.resolved;
+    if (resolved === undefined) return undefined;
+    return resolved(prepared);
   }
 
   authorize(prepared: PreparedCall, _ctx: SessionContext, _policy: PolicySnapshot<null>, signal: AbortSignal): Promise<Decision> {

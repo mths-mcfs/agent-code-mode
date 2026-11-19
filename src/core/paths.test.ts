@@ -1,6 +1,16 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { matchesPathPattern, workspaceDisplayPath } from './paths.js';
+import { matchesPathPattern, normalizeSeparators, workspaceDisplayPath } from './paths.js';
+
+describe('separators', () => {
+  it.runIf(process.platform !== 'win32')('a backslash is a file name character on POSIX, in paths and patterns', () => {
+    expect(matchesPathPattern('/ws/.claude/settings\\extra.json', '/ws/.claude/settings*.json', false)).toBe(true);
+    expect(matchesPathPattern('/ws/a\\b.ts', '/ws/*.ts', false)).toBe(true);
+    expect(matchesPathPattern('/ws/a/b.ts', '/ws/a\\*.ts', false)).toBe(false);
+    expect(normalizeSeparators('a\\b', 'linux')).toBe('a\\b');
+    expect(normalizeSeparators('a\\b', 'win32')).toBe('a/b');
+  });
+});
 
 describe('matchesPathPattern', () => {
   it.each([
@@ -12,7 +22,7 @@ describe('matchesPathPattern', () => {
     ['/ws/.claude/hooksx', '/ws/.claude/hooks/**', false],
     ['/ws/src/a/b/c.ts', '/ws/src/**/*.ts', true],
     ['/ws/src/c.ts', '/ws/src/**/*.ts', true],
-    ['C:\\ws\\.codex\\config.toml', 'C:/ws/.codex/**', true],
+    ['C:\\ws\\.codex\\config.toml', 'C:/ws/.codex/**', process.platform === 'win32'],
     ['/ws/a+b.txt', '/ws/a+b.txt', true],
     ['/ws/aab.txt', '/ws/a+b.txt', false],
   ])('%s vs %s → %s', (p, pattern, expected) => {

@@ -299,6 +299,8 @@ export class Dispatcher<P = unknown> {
     let prepared = first.prepared;
     if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
 
+    const resolvedFailure = await this.#checkResolved(prepared, policy);
+    if (resolvedFailure) return fail(resolvedFailure);
     const staticFailure = this.#checkStatic(prepared, policy);
     if (staticFailure) return fail(staticFailure);
 
@@ -319,7 +321,7 @@ export class Dispatcher<P = unknown> {
         const reason = second.kind === 'deny' ? second.reason : second.error.message;
         return fail({ kind: 'deny', source: second.kind === 'deny' ? second.source : 'hook', reason: `hook updated input was refused: ${reason}` });
       }
-      const recheck = this.#checkStatic(second.prepared, policy);
+      const recheck = (await this.#checkResolved(second.prepared, policy)) ?? this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);
       prepared = second.prepared;
       if (this.#stopReason !== undefined) return fail(this.#stoppedFailure());
@@ -353,6 +355,22 @@ export class Dispatcher<P = unknown> {
       return { kind: 'deny', source: 'containment-unavailable', reason: 'bash containment does not match the host policy' };
     }
     return { prepared };
+  }
+
+  /** The adapter's refusals that need I/O, before the static rules. */
+  async #checkResolved(prepared: PreparedCall, policy: PolicySnapshot<P>): Promise<Failure | undefined> {
+    const adapter = this.#opts.adapter;
+    if (adapter.checkResolved === undefined) return undefined;
+    let decision: unknown;
+    try {
+      decision = await raceAbort(Promise.resolve(adapter.checkResolved(prepared, this.#opts.ctx, policy)), this.#abort.signal);
+    } catch (err) {
+      return { kind: 'deny', source: 'rule', reason: `permission check failed: ${errorMessage(err)}` };
+    }
+    if (decision === ABORTED) return this.#stoppedFailure();
+    if (decision === undefined) return undefined;
+    if (!isDecision(decision) || decision.kind !== 'deny') return { kind: 'deny', source: 'rule', reason: 'permission check returned an invalid decision' };
+    return { kind: 'deny', source: decision.source, reason: decision.reason };
   }
 
   #checkStatic(prepared: PreparedCall, policy: PolicySnapshot<P>): Failure | undefined {

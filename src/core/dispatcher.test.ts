@@ -37,6 +37,24 @@ function errorOf(reply: CallReply) {
 }
 
 describe('Dispatcher', () => {
+  it('applies checkResolved before the static rules, so an ask rule cannot hide its deny', async () => {
+    const { dispatcher, adapter } = await setup({
+      rules: [() => ({ kind: 'ask', reason: 'ask rule' })],
+      resolved: () => ({ kind: 'deny', source: 'rule', reason: 'protected through a symlink' }),
+    });
+    const error = errorOf(await dispatcher.dispatch('bash', { command: 'echo x > alias/f' }));
+    expect(error).toMatchObject({ name: 'PermissionDenied', source: 'rule' });
+    expect(error.message).toContain('protected through a symlink');
+    expect(adapter.staticChecked).toHaveLength(0);
+  });
+
+  it('treats anything but a deny from checkResolved as a deny', async () => {
+    // A buggy adapter resolving a non-deny decision (JSON.parse: untyped on purpose).
+    const { dispatcher, adapter } = await setup({ resolved: () => JSON.parse('{"kind":"allow"}') });
+    expect(errorOf(await dispatcher.dispatch('bash', { command: 'true' }))).toMatchObject({ name: 'PermissionDenied' });
+    expect(adapter.authorized).toHaveLength(0);
+  });
+
   it('assigns ids in call order and logs each call', async () => {
     const { dispatcher } = await setup({}, { files: { 'a.txt': 'hello' } });
     await Promise.all([
