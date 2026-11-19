@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { ERROR_CAP_CHARS, SUCCESS_CAP_CHARS, formatRunResult, truncateStructurally } from './output.js';
 import { stateDirPath } from './state-dir.js';
 import type { RunResult } from './types.js';
@@ -32,15 +33,29 @@ describe('formatRunResult', () => {
     const out = await formatRunResult(big, { stateDir });
     const text = out.content[0]?.text ?? '';
     expect(text.length).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
-    const preview = JSON.parse(text) as { overflowPath: string; truncated: boolean; ok: boolean };
+    const preview = z.object({ overflowPath: z.string().optional(), note: z.string(), truncated: z.boolean(), ok: z.boolean() }).parse(JSON.parse(text));
     expect(preview.truncated).toBe(true);
     expect(preview.ok).toBe(true);
+    if (process.platform === 'win32') {
+      expect(preview.overflowPath).toBeUndefined();
+      expect(preview.note).toContain('private overflow storage is unavailable');
+      return;
+    }
+    if (preview.overflowPath === undefined) throw new Error('expected an overflow file');
     const full: unknown = JSON.parse(await readFile(preview.overflowPath, 'utf8'));
     expect(full).toEqual(JSON.parse(JSON.stringify(big)));
-    if (process.platform !== 'win32') {
-      expect((await stat(preview.overflowPath)).mode & 0o777).toBe(0o600);
-      expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
-    }
+    expect((await stat(preview.overflowPath)).mode & 0o777).toBe(0o600);
+    expect((await stat(stateDir)).mode & 0o777).toBe(0o700);
+  });
+
+  it.skipIf(process.platform === 'win32')('keeps oversized results out of a shared directory', async () => {
+    const stateDir = await tmp();
+    await mkdir(stateDir);
+    await chmod(stateDir, 0o755);
+    const out = await formatRunResult({ ...base, result: 'x'.repeat(60_000) }, { stateDir });
+    expect(JSON.parse(out.content[0]?.text ?? '')).toMatchObject({ truncated: true, note: expect.stringContaining('private directory') });
+    expect(JSON.parse(out.content[0]?.text ?? '')).not.toHaveProperty('overflowPath');
+    expect((await stat(stateDir)).mode & 0o777).toBe(0o755);
   });
 
   it('caps error results lower', async () => {

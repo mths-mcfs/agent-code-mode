@@ -10,6 +10,7 @@ describe('matchesPathPattern', () => {
     ['/ws/.claude/hooks/a/b.sh', '/ws/.claude/hooks/**', true],
     ['/ws/.claude/hooksx', '/ws/.claude/hooks/**', false],
     ['/ws/src/a/b/c.ts', '/ws/src/**/*.ts', true],
+    ['/ws/src/week\n1/example.ts', '/ws/src/**/*.ts', true],
     ['/ws/src/c.ts', '/ws/src/**/*.ts', true],
     ['C:\\ws\\.codex\\config.toml', 'C:/ws/.codex/**', true],
     ['/ws/a+b.txt', '/ws/a+b.txt', true],

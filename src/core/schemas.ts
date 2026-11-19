@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ToolError } from './errors.js';
-import type { ToolArgsMap, ToolCall, ToolName } from './types.js';
+import type { Decision, ToolArgsMap, ToolCall, ToolName } from './types.js';
 
 /**
  * Boundary schemas. Everything that crosses into the server (MCP request
@@ -28,8 +28,18 @@ export function isMutating(tool: ToolName): boolean {
 
 /** Narrows an untrusted string to a `ToolName`. */
 export function isToolName(tool: string): tool is ToolName {
-  return (TOOL_NAMES as readonly string[]).includes(tool);
+  return TOOL_NAMES.some((name) => name === tool);
 }
+
+export const DecisionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('allow'), reason: z.string().optional(), updatedArgs: z.unknown().optional() }),
+  z.object({ kind: z.literal('ask'), reason: z.string() }),
+  z.object({
+    kind: z.literal('deny'),
+    reason: z.string(),
+    source: z.enum(['rule', 'hook', 'hook-error', 'hook-timeout', 'unsupported-config', 'ask-unavailable', 'containment-unavailable']),
+  }),
+]) satisfies z.ZodType<Decision>;
 
 const pathString = z
   .string()
@@ -104,9 +114,10 @@ function formatIssues(error: z.ZodError): string {
  * Validates an untrusted binding call. Returns a typed `ToolCall` with the
  * given id, or a `ToolError` (`invalid-args`) describing what is wrong.
  */
-export function parseToolCall(tool: string, args: unknown, id: string): ToolCall | ToolError {
-  if (typeof tool !== 'string' || !isToolName(tool)) {
-    return new ToolError('invalid-args', `unknown tool ${JSON.stringify(String(tool)).slice(0, 80)}; expected one of ${TOOL_NAMES.join(', ')}`);
+export function parseToolCall(tool: unknown, args: unknown, id: string): ToolCall | ToolError {
+  if (typeof tool !== 'string') return new ToolError('invalid-args', 'tool name must be a string');
+  if (!isToolName(tool)) {
+    return new ToolError('invalid-args', `unknown tool ${JSON.stringify(tool.slice(0, 80))}; expected one of ${TOOL_NAMES.join(', ')}`);
   }
   switch (tool) {
     case 'bash': {

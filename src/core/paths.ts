@@ -10,7 +10,8 @@
 
 const cache = new Map<string, RegExp>();
 
-function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
+/** The compiled form of a path pattern, e.g. to evaluate it off the main thread. */
+export function pathPatternRegExp(pattern: string, caseInsensitive = DEFAULT_CASE_INSENSITIVE): RegExp {
   const key = `${caseInsensitive ? 'i' : 's'}:${pattern}`;
   const hit = cache.get(key);
   if (hit) return hit;
@@ -40,7 +41,7 @@ function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
       src += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
     }
   }
-  const re = new RegExp(`^${src}$`, caseInsensitive ? 'i' : '');
+  const re = new RegExp(`^${src}$`, caseInsensitive ? 'is' : 's');
   cache.set(key, re);
   return re;
 }
@@ -55,7 +56,7 @@ export const DEFAULT_CASE_INSENSITIVE = process.platform === 'darwin' || process
 
 /** Whether `path` matches `pattern`. Case-insensitive by default on macOS and Windows. */
 export function matchesPathPattern(path: string, pattern: string, caseInsensitive = DEFAULT_CASE_INSENSITIVE): boolean {
-  return toRegExp(pattern, caseInsensitive).test(normalizeSeparators(path));
+  return pathPatternRegExp(pattern, caseInsensitive).test(normalizeSeparators(path));
 }
 
 /** The first pattern `path` matches, or undefined. */
