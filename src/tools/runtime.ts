@@ -3,6 +3,7 @@ import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type {
   BashContainment,
+  CommitObserver,
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
@@ -12,6 +13,7 @@ import type {
   ToolResult,
   ToolRuntime,
   Transaction,
+  WatchedChange,
 } from '../core/types.js';
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, expandBashGlobs, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
@@ -21,6 +23,7 @@ import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { containmentUnavailableReason } from './sandbox.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
+import { type WatchSnapshot, changedWatched, describeChanges, incompleteReason, snapshotWatched, uncheckedWatched } from './watch.js';
 
 /** Default number of lines `read` returns. */
 export const DEFAULT_READ_LIMIT = 2000;
@@ -54,10 +57,22 @@ interface CallMeta {
   readonly display: string;
   /** Paths a sandboxed bash may never write. */
   readonly denyWrite: readonly string[];
+  /** For bash: the patterns fingerprinted around the call (`policy.watchedPaths`, else `protectedPaths`). */
+  readonly watched?: readonly string[];
+  /** For bash: the host's filter of routine changes there. */
+  readonly routine?: (change: WatchedChange) => Promise<boolean>;
   /** For write and edit: identity of the file and its directories at prepare. */
   readonly identity?: PathIdentity;
   /** For grep and glob: the policy's Read filter. */
   readonly readFilter?: (realAbsPath: string) => boolean;
+}
+
+/** What the last bash call of a run left in the watched paths, and how to compare them. */
+interface WatchState {
+  readonly patterns: readonly string[];
+  readonly routine: ((change: WatchedChange) => Promise<boolean>) | undefined;
+  readonly snapshot: WatchSnapshot;
+  readonly callId: string;
 }
 
 /** Most prepared calls whose metadata is kept while they wait for commit. */
@@ -130,6 +145,8 @@ export class NodeToolRuntime implements ToolRuntime {
    * (denied ones) do not accumulate.
    */
   readonly #meta = new MetaStore();
+  /** Per run (its observer): what the last bash call left in the watched paths, for the end-of-run comparison. */
+  readonly #watch = new WeakMap<CommitObserver, WatchState>();
 
   constructor(opts: NodeToolRuntimeOptions) {
     this.#opts = opts;
@@ -203,7 +220,7 @@ export class NodeToolRuntime implements ToolRuntime {
             ...(expanded === undefined ? {} : { expansion: { original: inCwd(call.args.command), entries: expanded.entries } }),
           },
         };
-        this.#meta.put(prepared, meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)));
+        this.#meta.put(prepared, { ...meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)), watched: policy.watchedPaths ?? policy.protectedPaths, ...(policy.isRoutineWatchedChange ? { routine: policy.isRoutineWatchedChange } : {}) });
         return prepared;
       }
       case 'read': {
@@ -334,23 +351,43 @@ export class NodeToolRuntime implements ToolRuntime {
     return m;
   }
 
-  async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
+  async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction, observer?: CommitObserver): Promise<ToolResult> {
     try {
-      return await this.#commit(prepared, signal, tx);
+      return await this.#commit(prepared, signal, tx, observer);
     } catch (err) {
       throw asToolError(err);
     }
   }
 
-  async #commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
+  async #commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction, observer?: CommitObserver): Promise<ToolResult> {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before commit');
     switch (prepared.tool) {
       case 'bash': {
         const m = this.#metaOf(prepared, prepared.effect.cwd);
-        return runBash(prepared.effect, signal, {
-          ...(this.#opts.bashOutputCapBytes !== undefined ? { outputCapBytes: this.#opts.bashOutputCapBytes } : {}),
-          denyWrite: m.denyWrite,
-        });
+        const patterns = m.watched ?? [];
+        const routine = m.routine;
+        // The windows chain: what changed since the previous bash call of this run is compared too.
+        const last = observer === undefined ? undefined : this.#watch.get(observer);
+        let before: WatchSnapshot;
+        try {
+          // A baseline: links that appeared since (a previous call made them) are resolved now, then watched.
+          before = await snapshotWatched(patterns, last?.snapshot, { baseline: true });
+        } catch (err) {
+          // Fail closed: a change there could not be reported afterwards, so the command does not run.
+          throw new ToolError('containment-unavailable', `the protected paths could not be fingerprinted before bash, so it did not run: ${incompleteReason(err)}`);
+        }
+        if (observer !== undefined && last !== undefined) {
+          await this.#report(observer, `during the run, after bash call ${last.callId}`, last.snapshot, before, routine);
+        }
+        try {
+          return await runBash(prepared.effect, signal, {
+            ...(this.#opts.bashOutputCapBytes !== undefined ? { outputCapBytes: this.#opts.bashOutputCapBytes } : {}),
+            denyWrite: m.denyWrite,
+          });
+        } finally {
+          // Normal end, error, cancel or timeout: compare, and report without changing the call's result.
+          await this.#compareAfterBash(prepared.id, patterns, routine, before, observer);
+        }
       }
       case 'read':
         return this.#commitRead(prepared);
@@ -426,6 +463,54 @@ export class NodeToolRuntime implements ToolRuntime {
       matchStrategy: prepared.effect.matchStrategy,
       diff: prepared.effect.diff,
     };
+  }
+
+  async #compareAfterBash(
+    callId: string,
+    patterns: readonly string[],
+    routine: WatchState['routine'],
+    before: WatchSnapshot,
+    observer: CommitObserver | undefined,
+  ): Promise<void> {
+    let after: WatchSnapshot;
+    try {
+      after = await snapshotWatched(patterns, before);
+    } catch (err) {
+      observer?.warn(`protected path check incomplete after bash call ${callId}: ${incompleteReason(err)}`);
+      if (observer) this.#watch.set(observer, { patterns, routine, snapshot: before, callId });
+      return;
+    }
+    if (observer === undefined) return;
+    this.#watch.set(observer, { patterns, routine, snapshot: after, callId });
+    await this.#report(observer, `during bash call ${callId}`, before, after, routine);
+  }
+
+  /** Warns about the unexplained differences between two snapshots; a failed comparison is reported too. */
+  async #report(observer: CommitObserver, when: string, before: WatchSnapshot, after: WatchSnapshot, routine: WatchState['routine']): Promise<void> {
+    try {
+      const changed = await changedWatched(before, after, routine);
+      if (changed.length > 0) observer.warn(`protected path changed ${when}: ${describeChanges(changed)}`);
+      const unchecked = uncheckedWatched(before, after).filter((p) => !changed.includes(p));
+      if (unchecked.length > 0) {
+        observer.warn(`protected path check incomplete ${when}: compared by size, time, inode and mode only (hash budget spent): ${describeChanges(unchecked)}`);
+      }
+    } catch (err) {
+      observer.warn(`protected path check incomplete ${when}: ${incompleteReason(err)}`);
+    }
+  }
+
+  async finishRun(observer: CommitObserver): Promise<void> {
+    const last = this.#watch.get(observer);
+    if (last === undefined) return;
+    this.#watch.delete(observer);
+    let now: WatchSnapshot;
+    try {
+      now = await snapshotWatched(last.patterns, last.snapshot);
+    } catch (err) {
+      observer.warn(`protected path check incomplete at the end of the run: ${incompleteReason(err)}`);
+      return;
+    }
+    await this.#report(observer, `during the run, after bash call ${last.callId}`, last.snapshot, now, last.routine);
   }
 
   beginTransaction(): Transaction {

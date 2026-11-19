@@ -1,9 +1,10 @@
 import { constants } from 'node:fs';
-import { open, rm } from 'node:fs/promises';
+import { open, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { recordOwnWrite } from '../../core/own-writes.js';
 import { stateDirPath } from '../../core/state-dir.js';
-import type { ContextInput, ContextProvider, ContextSource, HookContextRecord, HookContextStore, HostKind, SessionContext } from '../../core/types.js';
+import type { ContextInput, ContextProvider, ContextSource, HookContextRecord, HookContextStore, HostKind, SessionContext, WatchedChange } from '../../core/types.js';
 
 /**
  * Companion-hook context files. The companion PreToolUse hook (see
@@ -38,6 +39,39 @@ export type ContextFile = z.infer<typeof ContextFileSchema>;
 /** Directory of the context files. */
 export function contextDir(stateDir: string): string {
   return path.join(stateDir, 'ctx');
+}
+
+/**
+ * What the protected-path watch treats as routine in the context directory:
+ * the companion hook creating it (mode 0700 outside Windows), its temporary files, a new
+ * record that is well formed (`<tool_use_id>.json`, mode 0600 outside Windows, valid content
+ * naming the same id), and records going away (consumed or pruned; a missing
+ * record only makes the server fall back to conservative defaults). A record
+ * that already existed and changed, or a malformed new file, is reported: a
+ * new record forged by bash would need the id of a tool call the host has not
+ * issued yet, which it cannot know.
+ */
+export function contextRecordFilter(ctxDir: string, platform: NodeJS.Platform = process.platform): (change: WatchedChange) => Promise<boolean> {
+  // Windows has no POSIX modes (stat reports 0666 or, read-only, 0444): the hook's 0700/0600 can be checked only elsewhere.
+  const modeIs = (mode: number, expected: number): boolean => platform === 'win32' || (mode & 0o777) === expected;
+  return async ({ path: p, before, after }) => {
+    if (p === ctxDir) return before === undefined && after?.type === 'dir' && modeIs(after.mode, 0o700);
+    if (path.dirname(p) !== ctxDir) return false;
+    const name = path.basename(p);
+    if (after === undefined) return before?.type === 'file';
+    if (before !== undefined || after.type !== 'file' || !modeIs(after.mode, 0o600)) return false;
+    if (/^\.[^/]+\.tmp$/.test(name)) return true;
+    const id = /^(.+)\.json$/.exec(name)?.[1];
+    if (id === undefined || id.startsWith('.')) return false;
+    try {
+      const text = await readFile(p, 'utf8');
+      if (Buffer.byteLength(text) > MAX_CONTEXT_FILE_BYTES) return false;
+      const parsed = ContextFileSchema.safeParse(JSON.parse(text));
+      return parsed.success && parsed.data.tool_use_id === id;
+    } catch {
+      return false;
+    }
+  };
 }
 
 /** Reads and consumes companion-hook records. */
@@ -78,6 +112,9 @@ export class FileHookContextStore implements HookContextStore {
       await rm(file, { force: true }).catch(() => undefined);
       await claimHandle.close().catch(() => undefined);
       await rm(claim, { force: true }).catch(() => undefined);
+      // The server consumed the hook's record: the protected-path watch treats these removals as its own.
+      recordOwnWrite(file, { kind: 'absent' });
+      recordOwnWrite(claim, { kind: 'absent' });
     }
     if (text === undefined) return undefined;
     let json: unknown;

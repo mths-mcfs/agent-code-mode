@@ -9,6 +9,7 @@ import type {
   BindingError,
   CallLogEntry,
   CallReply,
+  CommitObserver,
   Decision,
   DenySource,
   HostAdapter,
@@ -139,6 +140,8 @@ export class Dispatcher<P = unknown> {
   readonly #changed: string[] = [];
   readonly #diffs: string[] = [];
   readonly #warnings: string[] = [];
+  /** Handed to every commit: what the tool runtime reports besides results (protected-path changes) lands in `warnings`. */
+  readonly #observer: CommitObserver = { warn: (message) => this.#warnings.push(message) };
   #deniedCount = 0;
   #bashCommits = 0;
   /** The session cwd and roots as real paths, the form prepared paths take. */
@@ -174,6 +177,20 @@ export class Dispatcher<P = unknown> {
 
   get warnings(): readonly string[] {
     return [...this.#warnings];
+  }
+
+  /**
+   * The tool runtime's end-of-run check of the protected paths (after the
+   * last bash call), reported in `warnings`. Call once, after `stop`.
+   */
+  async finishRun(): Promise<void> {
+    const finish = this.#opts.tools.finishRun;
+    if (finish === undefined) return;
+    try {
+      await finish.call(this.#opts.tools, this.#observer);
+    } catch (err) {
+      this.#warnings.push(`protected path check incomplete at the end of the run: ${errorMessage(err)}`);
+    }
   }
 
   get deniedCount(): number {
@@ -418,7 +435,7 @@ export class Dispatcher<P = unknown> {
     const signal = this.#abort.signal;
     let result: ToolResult;
     try {
-      result = await this.#opts.tools.commit(prepared, signal, this.#opts.transaction);
+      result = await this.#opts.tools.commit(prepared, signal, this.#opts.transaction, this.#observer);
     } catch (err) {
       if (signal.aborted) {
         this.#warnings.push(

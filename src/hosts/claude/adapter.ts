@@ -15,6 +15,7 @@ import type {
   ToolResult,
 } from '../../core/types.js';
 import { BashAnalyzer, type BashAnalysis } from './bash.js';
+import { contextDir, contextRecordFilter } from './context.js';
 import { planGlobExpansion } from './expand.js';
 import {
   NATIVE_TOOL,
@@ -679,6 +680,24 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       ]),
     ];
 
+    // What the bash watch fingerprints: the policy files read above and the state dir, not the rest of
+    // ~/.claude (transcripts, sessions, backups, plugins) nor ~/.claude.json, which Claude Code rewrites all the time.
+    const userDirs = [...new Set([configDir, path.join(home, '.claude')])];
+    const watchedPaths = [
+      ...new Set([
+        path.join(stateDir, '**'),
+        ...[projectRoot, ctx.cwd].flatMap((root) => [
+          path.join(root, '.claude', 'settings*.json'),
+          path.join(root, '.claude', 'hooks', '**'),
+          path.join(root, '.claude', 'agents', '**'),
+          path.join(root, '.mcp.json'),
+        ]),
+        ...userDirs.flatMap((dir) => [path.join(dir, 'settings*.json'), path.join(dir, 'hooks', '**'), path.join(dir, 'agents', '**')]),
+        ...(managedDir === undefined ? [] : [path.join(managedDir, '**')]),
+        ...docs.flatMap((d) => (d.source === 'flag-settings' && d.file !== undefined ? [d.file] : [])),
+      ]),
+    ];
+
     // Read rules that refuse a path: deny, and ask (an ask is a deny here).
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
     const isReadDenied = (absPath: string): boolean =>
@@ -688,6 +707,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       host: 'claude',
       bashContainment,
       protectedPaths,
+      watchedPaths,
+      isRoutineWatchedChange: contextRecordFilter(contextDir(stateDir)),
       additionalRoots: [...additionalRoots],
       readFilter: (realAbsPath: string): boolean => !isReadDenied(realAbsPath),
       planBashExpansion: planGlobExpansion,
