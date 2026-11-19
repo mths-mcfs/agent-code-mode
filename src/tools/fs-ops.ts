@@ -348,16 +348,36 @@ export async function removeEmptyDirInside(dir: string, roots: readonly string[]
 
 /** fsyncs a directory where the platform allows it. */
 export async function syncDir(dir: string): Promise<void> {
-  if (IS_WINDOWS) return;
   try {
-    const handle = await fs.open(dir, FS.O_RDONLY);
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+    await syncDirStrict(dir);
   } catch {
     // Not every file system lets a directory be flushed.
+  }
+}
+
+/** Opens a directory and fsyncs it. */
+async function flushDir(dir: string): Promise<void> {
+  const handle = await fs.open(dir, FS.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Errors that mean the file system cannot fsync a directory at all (FUSE, 9p, some NFS). */
+const UNSUPPORTED_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
+
+/** fsyncs a directory and rethrows any failure, except where directory fsync is not supported. */
+export async function syncDirStrict(dir: string, flush: (dir: string) => Promise<void> = flushDir): Promise<void> {
+  // Windows, and file systems that answer EINVAL/ENOTSUP/EOPNOTSUPP, cannot fsync a directory: a rename there stays atomic but is not guaranteed to survive a power loss.
+  if (IS_WINDOWS) return;
+  try {
+    await flush(dir);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code !== undefined && UNSUPPORTED_SYNC.has(code)) return;
+    throw err;
   }
 }
 

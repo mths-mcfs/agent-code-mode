@@ -2,11 +2,12 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ToolError } from '../core/errors.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ToolError, TransactionFinalizeError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
-import { FileTransaction, journalRoot, recoverStaleJournals } from './journal.js';
+import { COMMITTED, FileTransaction, type JournalIo, journalRoot, recoverStaleJournals } from './journal.js';
+import { syncDirStrict } from './fs-ops.js';
 import { NodeToolRuntime } from './runtime.js';
 
 let base: string;
@@ -84,7 +85,7 @@ describe('transactions', () => {
     await tx.dispose();
     await tx.dispose();
     expect(read('a.txt')).toBe('a1\n');
-    expect(readdirSync(journalRoot(stateDir))).toEqual([]);
+    await vi.waitFor(() => expect(readdirSync(journalRoot(stateDir))).toEqual([]));
     await expect(write('b.txt', 'b1\n', tx)).rejects.toBeInstanceOf(ToolError);
     expect(read('b.txt')).toBe('b0\n');
   });
@@ -181,5 +182,66 @@ describe('crash recovery', () => {
     mkdirSync(path.join(journalRoot(stateDir), 'zz-1-abcd'), { recursive: true });
     writeFileSync(path.join(journalRoot(stateDir), 'zz-1-abcd', 'manifest.json'), '{"version":1,"entries":"nope"}');
     expect(await recoverStaleJournals(stateDir, [ws])).toEqual([]);
+  });
+});
+
+describe('finalization', () => {
+  /** Keeps the delete of a finalized journal pending, as if the process died right after the commit. */
+  const held = (): Promise<void> => new Promise(() => undefined);
+
+  it('commits by renaming the journal, so recovery never undoes a finalized run', async () => {
+    const tx = new FileTransaction(stateDir, { syncDir: syncDirStrict, removeDir: held });
+    await write('a.txt', 'a1\n', tx);
+    await write('new.txt', 'n1\n', tx);
+    await tx.dispose();
+    // The delete never ran: the record is still complete, under the committed name.
+    expect(existsSync(tx.dir)).toBe(false);
+    expect(existsSync(path.join(`${tx.dir}${COMMITTED}`, 'manifest.json'))).toBe(true);
+
+    expect(await recoverStaleJournals(stateDir, [ws])).toEqual([]);
+    expect(read('a.txt')).toBe('a1\n');
+    expect(read('new.txt')).toBe('n1\n');
+    // Recovery deletes what a finalized run left behind.
+    expect(readdirSync(journalRoot(stateDir))).toEqual([]);
+  });
+
+  it('reports a committed but not flushed journal and never rolls it back', async () => {
+    const io: JournalIo = {
+      syncDir: async () => {
+        throw new Error('EIO: flush failed');
+      },
+      removeDir: held,
+    };
+    const tx = new FileTransaction(stateDir, io);
+    await write('a.txt', 'a1\n', tx);
+    const err = await tx.dispose().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(TransactionFinalizeError);
+    expect(err).toMatchObject({ committed: true });
+    expect(String(err)).toMatch(/durability is not guaranteed/);
+    expect(existsSync(path.join(`${tx.dir}${COMMITTED}`, 'manifest.json'))).toBe(true);
+    expect(await tx.rollback()).toEqual({ restored: [], skipped: [] });
+    expect(await recoverStaleJournals(stateDir, [ws])).toEqual([]);
+    expect(read('a.txt')).toBe('a1\n');
+  });
+
+  it('keeps the journal open for a rollback when the commit rename fails', async () => {
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    await write('a.txt', 'a1\n', tx);
+    // A non-empty directory in the way makes the rename fail.
+    mkdirSync(path.join(`${tx.dir}${COMMITTED}`, 'blocker'), { recursive: true });
+    const err = await tx.dispose().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(TransactionFinalizeError);
+    expect(err).toMatchObject({ committed: false });
+    expect(existsSync(path.join(tx.dir, 'manifest.json'))).toBe(true);
+    const report = await tx.rollback();
+    expect(report.restored).toEqual([path.join(ws, 'a.txt')]);
+    expect(read('a.txt')).toBe('a0\n');
   });
 });
