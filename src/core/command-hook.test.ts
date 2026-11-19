@@ -92,6 +92,11 @@ describe.skipIf(!posix)('runCommandHook (POSIX)', () => {
 });
 
 describe('runCommandHook', () => {
+  it('reports an already-cancelled hook without attempting to start it', async () => {
+    const r = await runCommandHook({ ...base, cwd: '/definitely/missing/dir', command: 'echo hi', stdin: '', signal: AbortSignal.abort() });
+    expect(r).toMatchObject({ aborted: true, exitCode: null, spawnError: null });
+  });
+
   it('reports a spawn error for a missing cwd and never throws', async () => {
     const r = await runCommandHook({ ...base, cwd: '/definitely/missing/dir', command: 'echo hi', stdin: '' });
     expect(r.exitCode).toBeNull();

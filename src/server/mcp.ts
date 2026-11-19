@@ -33,6 +33,27 @@ export const RUN_TOOL: Tool = {
   _meta: { 'anthropic/alwaysLoad': true },
 };
 
+/** A runnable `code` for the placeholder runtime that `createRuntime` builds today. */
+export const PLACEHOLDER_EXAMPLE = JSON.stringify([
+  { tool: 'write', args: { path: 'example.txt', content: 'hello\n' } },
+  { tool: 'read', args: { path: 'example.txt' } },
+]);
+
+/** Instructions served with the default runtime, whose components are placeholders. */
+export const PLACEHOLDER_INSTRUCTIONS = `This build serves placeholder components: run does not execute JavaScript yet.
+Its code is a JSON array of steps run in order, and the result is the array of step results. Steps: {"tool": name, "args": {...}}, {"parallel": [steps]}, {"log": text}, {"sleep": ms}, {"throw": message}, {"throwOnError": true}.
+read, write, edit, grep and glob act on an in-memory file system that starts empty; bash only echoes the command. A fixed placeholder policy stands in for the host's rules and hooks.
+Example code: ${PLACEHOLDER_EXAMPLE}`;
+
+const PLACEHOLDER_RUN_TOOL: Tool = {
+  ...RUN_TOOL,
+  description: 'Run a JSON array of placeholder steps (see the server instructions) against an in-memory file system.',
+  inputSchema: {
+    ...RUN_INPUT_JSON_SCHEMA,
+    properties: { ...RUN_INPUT_JSON_SCHEMA.properties, code: { type: 'string', description: `JSON array of placeholder steps, e.g. ${PLACEHOLDER_EXAMPLE}` } },
+  },
+};
+
 export interface McpServerOptions {
   readonly version: string;
   /** `--host` flag; skips detection. */
@@ -69,6 +90,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
   const serverCwd = opts.serverCwd ?? process.cwd();
   const stateDir = opts.stateDir ?? stateDirPath(env);
   const factory = opts.createRuntime ?? createRuntime;
+  const placeholder = opts.createRuntime === undefined;
+  const runTool = placeholder ? PLACEHOLDER_RUN_TOOL : RUN_TOOL;
   const runtimes = new Map<HostKind, Runtime>();
   const runtimeFor = (host: HostKind): Runtime => {
     let runtime = runtimes.get(host);
@@ -79,19 +102,22 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return runtime;
   };
 
-  const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
+  const server = new Server({ name: SERVER_NAME, version: opts.version }, {
+    capabilities: { tools: {} },
+    instructions: placeholder ? PLACEHOLDER_INSTRUCTIONS : SERVER_INSTRUCTIONS,
+  });
 
-  const listRoots = async (): Promise<string[]> => {
+  const listRoots = async (signal: AbortSignal): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
     try {
-      const result = await server.listRoots(undefined, { timeout: opts.rootsTimeoutMs ?? 5_000 });
+      const result = await server.listRoots(undefined, { timeout: opts.rootsTimeoutMs ?? 5_000, signal });
       return rootPaths(result.roots);
     } catch {
       return [];
     }
   };
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [RUN_TOOL] }));
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [runTool] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
     const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir });
@@ -102,7 +128,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
       const meta: unknown = request.params._meta;
       const host = detectHost({ flag: opts.host, env, meta });
       const runtime = runtimeFor(host);
-      const roots = await listRoots();
+      const roots = await listRoots(extra.signal);
+      if (extra.signal.aborted) return respond(errorResult('the run was cancelled before context resolution'));
       const ctx = await runtime.contextProvider.resolve({ env, meta, roots, serverCwd });
       const result = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
         sandbox: runtime.sandbox,
