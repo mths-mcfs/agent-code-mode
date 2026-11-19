@@ -49,15 +49,37 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   return args;
 }
 
+/** A task's MCP server as a stdio entry of an MCP config. */
+export interface StdioServer {
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+}
+
+/** Where a task's MCP server goes in an arm. */
+export interface ArmMcp {
+  readonly server: StdioServer;
+  /** File with the server alone (`{"mcpServers": {<name>: ...}}`), handed to agent-code-mode's `serve --mcp-config`. */
+  readonly upstreamConfigFile: string;
+}
+
+/** The `{"mcpServers": ...}` file holding only a task's server (agent-code-mode's upstream config). */
+export function upstreamMcpConfig(server: StdioServer): unknown {
+  return { mcpServers: { [server.name]: { command: server.command, args: [...server.args] } } };
+}
+
 /**
  * The `--mcp-config` content for an arm: no servers for A and D, the agent-code-mode server for B and, started
- * with `--hybrid` (the `run` description then says when to batch and when to use a native tool), for C.
+ * with `--hybrid` (the `run` description then says when to batch and when to use a native tool), for C. With
+ * a task MCP server: A, C and D also get it directly; B and C start agent-code-mode with it as an upstream
+ * (`--mcp-config`), so in B the host never sees it and its tools are reached only through `mcpCall`.
  */
-export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
-  // A and D (Claude Code Mode) run no MCP server.
-  if (arm === 'A' || arm === 'D') return { mcpServers: {} };
-  const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : [])];
-  return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
+export function claudeMcpConfig(arm: ArmId, serverEntry: string, mcp?: ArmMcp): unknown {
+  const direct = mcp === undefined || arm === 'B' ? {} : { [mcp.server.name]: { type: 'stdio', command: mcp.server.command, args: [...mcp.server.args] } };
+  // A and D (Claude Code Mode) run no agent-code-mode server.
+  if (arm === 'A' || arm === 'D') return { mcpServers: direct };
+  const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : []), ...(mcp === undefined ? [] : ['--mcp-config', mcp.upstreamConfigFile])];
+  return { mcpServers: { ...direct, 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
 }
 
 const UsageEvent = z.object({
@@ -106,7 +128,22 @@ const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.str
 export const DENIAL_TEXT = /denied|blocked|hook|protected|not allowed|permission/i;
 const MessageEvent = z.object({ type: z.enum(['assistant', 'user']), message: z.object({ content: z.union([z.string(), z.array(ContentBlock)]) }).passthrough() }).passthrough();
 /** An assistant event with the request's usage. Claude streams one event per content block, all with the same message id. */
-const AssistantUsage = z.object({ type: z.literal('assistant'), message: z.object({ id: z.string().min(1), usage: z.object({ output_tokens: z.number() }).passthrough() }).passthrough() }).passthrough();
+const AssistantUsage = z.object({
+  type: z.literal('assistant'),
+  message: z.object({
+    id: z.string().min(1),
+    usage: z.object({ output_tokens: z.number(), input_tokens: z.number().optional(), cache_read_input_tokens: z.number().optional(), cache_creation_input_tokens: z.number().optional() }).passthrough(),
+  }).passthrough(),
+}).passthrough();
+
+/**
+ * Context size of each request, in order: its uncached input plus cache reads plus cache writes, the
+ * whole prompt the model read. `peak` is the largest, `last` the final request's. Null without requests.
+ */
+export function contextOf(prompts: readonly number[]): { peak: number; last: number } | null {
+  const last = prompts.at(-1);
+  return last === undefined ? null : { peak: Math.max(...prompts), last };
+}
 const InitEvent = z.object({
   type: z.literal('system'),
   subtype: z.literal('init'),
@@ -172,6 +209,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   let result: z.infer<typeof ResultEvent> | undefined;
   const evidence: Record<string, number[]> = { result: [], toolUse: [], innerCalls: [], requests: [] };
   const requestIds = new Set<string>();
+  const prompts: number[] = [];
 
   lines.forEach((line, i) => {
     if (line.trim() === '') return;
@@ -197,6 +235,8 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     const req = AssistantUsage.safeParse(event);
     if (req.success && !requestIds.has(req.data.message.id)) {
       requestIds.add(req.data.message.id);
+      const u = req.data.message.usage;
+      if (u.input_tokens !== undefined) prompts.push(u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0));
       evidence['requests']?.push(i + 1);
     }
     const msg = MessageEvent.safeParse(event);
@@ -249,5 +289,8 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     denials,
     hostError: r.is_error ? `${r.subtype}` : null,
     evidence,
+    context: prompts.length === requestIds.size ? contextOf(prompts) : null,
+    // Set by the runner, which knows the task's MCP server.
+    mcpCalls: null,
   };
 }

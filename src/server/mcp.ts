@@ -9,7 +9,10 @@ import { OverflowStore, removeLegacyOverflowFiles } from '../core/overflow.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
-import type { HostKind, RunResult, SessionContext } from '../core/types.js';
+import type { HostKind, McpRuntime, RunResult, SessionContext } from '../core/types.js';
+import { McpBindingRuntime } from '../mcp/binding.js';
+import { MCP_HYBRID_GUIDANCE, describeCatalog } from '../mcp/describe.js';
+import type { McpUpstream } from '../mcp/upstream.js';
 import { recoverStaleJournals } from '../tools/journal.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
@@ -69,6 +72,20 @@ export interface McpServerOptions {
   readonly recoverJournals?: boolean;
   /** Keeps what responses cut, for `readOverflow`. Default: a new store for this server. */
   readonly overflow?: OverflowStore;
+  /**
+   * Upstream MCP servers connected at start (`serve --mcp-config`): their
+   * tools are listed in the `run` description and served by `mcpCall`, only
+   * for the Claude Code host.
+   */
+  readonly mcp?: McpUpstream;
+}
+
+/** The `run` description: the base text, the upstream catalog when there is one, and the `--hybrid` lines. */
+export function runDescription(opts: { readonly hybrid?: boolean; readonly mcp?: McpUpstream }): string {
+  const parts = [RUN_DESCRIPTION];
+  if (opts.mcp !== undefined) parts.push(describeCatalog(opts.mcp.catalog));
+  if (opts.hybrid === true) parts.push(HYBRID_GUIDANCE, ...(opts.mcp !== undefined ? [MCP_HYBRID_GUIDANCE] : []));
+  return parts.join('\n');
 }
 
 /** A failed `RunResult` for protocol and validation errors, so they go through the same capped formatter. */
@@ -154,7 +171,9 @@ export function createMcpServer(opts: McpServerOptions): Server {
     }
   };
 
-  const listed: Tool = opts.hybrid === true ? { ...RUN_TOOL, description: `${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}` } : RUN_TOOL;
+  const description = runDescription(opts);
+  const listed: Tool = description === RUN_DESCRIPTION ? RUN_TOOL : { ...RUN_TOOL, description };
+  const mcp: McpRuntime | undefined = opts.mcp === undefined ? undefined : new McpBindingRuntime({ upstream: opts.mcp, overflow });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [listed] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
@@ -179,6 +198,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
         overflow,
+        // mcpCall is authorized with Claude Code's rules only; under any other host it stays unconfigured.
+        ...(mcp !== undefined && runtime.host === 'claude' ? { mcp } : {}),
       });
       const result = recoveryWarnings.length === 0 ? ran : { ...ran, warnings: [...recoveryWarnings, ...ran.warnings] };
       await appendRunLog(env[RUN_LOG_ENV], ctx, result);

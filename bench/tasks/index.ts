@@ -18,6 +18,8 @@ import { addLogs, T12_DAY } from './T12/logs.ts';
 import { T13_FILES, verify as verifyT13 } from './T13/verify.ts';
 import { T14_FILES, verify as verifyT14 } from './T14/verify.ts';
 import { T15_FILES, verify as verifyT15 } from './T15/verify.ts';
+import { verify as verifyT16 } from './T16/verify.ts';
+import { T16_QUARTER } from './T16/data.ts';
 import { applySolution as solveT1 } from './T1/solution/apply.ts';
 import { applySolution as solveT2 } from './T2/solution/apply.ts';
 import { applySolution as solveT3 } from './T3/solution/apply.ts';
@@ -33,6 +35,7 @@ import { applySolution as solveT12 } from './T12/solution/apply.ts';
 import { applySolution as solveT13 } from './T13/solution/apply.ts';
 import { applySolution as solveT14 } from './T14/solution/apply.ts';
 import { applySolution as solveT15 } from './T15/solution/apply.ts';
+import { applySolution as solveT16 } from './T16/solution/apply.ts';
 
 const same = (tree: Tree): Tree => tree;
 
@@ -241,6 +244,37 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
     protectedHook: false,
     verify: verifyT15,
     solution: solveT15,
+  },
+  // T16 is the MCP task: the data lives only in the memory of the `orders` MCP server, behind paginated
+  // tools with large answers; the answer needs about 30 calls and a join of what they return.
+  T16: {
+    id: 'T16',
+    title: 'top refunds of a quarter across ~30 paginated MCP calls',
+    size: 'mcp',
+    prompt: () =>
+      [
+        `The orders MCP server (tools list_customers, list_orders and get_order) holds the shop's customers and orders; its data is not in this repository. Which 3 customers had the highest total refunded in ${T16_QUARTER.label} (${T16_QUARTER.from} to ${T16_QUARTER.to}, UTC), highest first, and what were those totals?`,
+        'A refund counts by its own date, not the order date, and only when its status is "succeeded". Amounts are in US cents in the data; report dollars with two decimals.',
+        'Do not change any file. End your reply with a line `ANSWER: <customer id> <total>, <customer id> <total>, <customer id> <total>`, for example `ANSWER: C-0001 12.34, C-0002 5.00, C-0003 1.10`.',
+      ].join('\n'),
+    setup: same,
+    protectedHook: false,
+    mcpServer: {
+      name: 'orders',
+      entry: path.join(import.meta.dirname, 'T16', 'server.ts'),
+      args: (facts) => ['--seed', String(facts.seed)],
+      tools: ['list_customers', 'list_orders', 'get_order'],
+      offLimits: [
+        // The bench's files in the run directory, one level above the workspace.
+        'mcp-config.json', 'upstream-mcp.json', 'claude-settings.json',
+        // The server and its generator.
+        'server.ts', 'data.ts', 't16Data', 'topRefunded', 'refundedInQuarter', 'generateFixture',
+        // The process table: the server's command line names its file and seed.
+        '/proc/', 'pgrep', 'ps aux', 'ps -e', 'ps ax', 'ps -o', 'ps -p',
+      ],
+    },
+    verify: verifyT16,
+    solution: solveT16,
   },
 };
 

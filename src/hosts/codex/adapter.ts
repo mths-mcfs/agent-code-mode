@@ -24,7 +24,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { stateDirPath } from '../../core/state-dir.js';
-import type { BashContainment, Decision, HostAdapter, PolicyLoadError, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
+import type { BashContainment, Decision, HostAdapter, HostCall, PolicyLoadError, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
 import { ConfigError, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
 import { isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
 import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
@@ -98,6 +98,9 @@ export function containmentFor(mode: SandboxMode, writableRoots: readonly string
       return { mode: 'none' };
   }
 }
+
+/** Why `mcpCall` is refused under Codex: its MCP approval rules are not reproduced yet. */
+export const CODEX_MCP_UNSUPPORTED = 'upstream MCP calls (mcpCall) are only supported under Claude Code; Codex MCP approvals are not reproduced';
 
 export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
   readonly host = 'codex' as const;
@@ -201,7 +204,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     };
   }
 
-  checkStatic(prepared: PreparedCall, _ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>): Decision {
+  checkStatic(prepared: HostCall, _ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>): Decision {
+    if (prepared.tool === 'mcp') return { kind: 'deny', source: 'unsupported-config', reason: CODEX_MCP_UNSUPPORTED };
     const p = policy.payload;
     if (prepared.tool === 'write' || prepared.tool === 'edit') return checkFileWrite(prepared.effect.absPath, p);
     const command = shellCommandFor(prepared);
@@ -209,7 +213,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     return checkShellCommand(command, p);
   }
 
-  async authorize(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>, signal: AbortSignal): Promise<Decision> {
+  async authorize(prepared: HostCall, ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>, signal: AbortSignal): Promise<Decision> {
+    if (prepared.tool === 'mcp') return { kind: 'deny', source: 'unsupported-config', reason: CODEX_MCP_UNSUPPORTED };
     const p = policy.payload;
     if (!p.hooksEnabled || p.hooks.length === 0) return { kind: 'allow' };
     let native: NativeCall;

@@ -23,7 +23,9 @@ export function hookCommand(protectedFile: string): string {
 
 /** The project settings written into a Claude workspace. */
 export function claudeProjectSettings(task: TaskDef, fixture: Fixture): unknown {
-  const settings: Record<string, unknown> = { permissions: { allow: CLAUDE_ALLOWED_TOOLS }, autoMemoryEnabled: false };
+  // A task's MCP server is allowed by its server rule in every arm (in arm B the calls reach it through `run`).
+  const allow = task.mcpServer === undefined ? CLAUDE_ALLOWED_TOOLS : [...CLAUDE_ALLOWED_TOOLS, `mcp__${task.mcpServer.name}`];
+  const settings: Record<string, unknown> = { permissions: { allow }, autoMemoryEnabled: false };
   if (task.protectedHook) {
     settings['hooks'] = {
       PreToolUse: [{ matcher: CLAUDE_HOOK_MATCHER, hooks: [{ type: 'command', command: hookCommand(fixture.facts.protectedFile), timeout: 30 }] }],
@@ -76,7 +78,8 @@ export async function createWorkspace(dir: string, task: TaskDef, host: HostId, 
   await writeTree(dir, initial);
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['add', '-A']);
-  git(dir, ['commit', '-q', '--no-verify', '-m', `fixture ${fixtureSeed} for ${task.id}`]);
+  // The message names no seed: from inside the workspace it would say which data a task's generator makes (T16).
+  git(dir, ['commit', '-q', '--no-verify', '-m', `fixture for ${task.id}`]);
   return { dir, initial, fixture, baseCommit: git(dir, ['rev-parse', 'HEAD']).trim() };
 }
 

@@ -1,7 +1,31 @@
 import type { FixtureFacts, Tree } from '../fixture/generate.ts';
 
-export type TaskId = 'T1' | 'T2' | 'T3' | 'T4' | 'T5' | 'T6' | 'T7' | 'T8' | 'T9' | 'T10' | 'T11' | 'T12' | 'T13' | 'T14' | 'T15';
-export const TASK_IDS: readonly TaskId[] = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15'];
+export type TaskId = 'T1' | 'T2' | 'T3' | 'T4' | 'T5' | 'T6' | 'T7' | 'T8' | 'T9' | 'T10' | 'T11' | 'T12' | 'T13' | 'T14' | 'T15' | 'T16';
+/** Every task `--tasks` accepts. */
+export const TASK_IDS: readonly TaskId[] = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16'];
+/**
+ * The tasks a run without `--tasks` makes: the file and shell tasks. T16 (upstream MCP tools) is left out:
+ * it measures another surface, so it runs only when asked for.
+ */
+export const DEFAULT_TASK_IDS: readonly TaskId[] = TASK_IDS.filter((t) => t !== 'T16');
+
+/** An MCP server a task's data lives in (stdio, started by the host or by agent-code-mode as an upstream). */
+export interface TaskMcpServer {
+  /** Server name: its tools are `mcp__<name>__<tool>`. */
+  readonly name: string;
+  /** Absolute path of the server entry, run with this Node. */
+  readonly entry: string;
+  /** Arguments after the entry. */
+  args(facts: FixtureFacts): string[];
+  /** Tool names the server lists. */
+  readonly tools: readonly string[];
+  /**
+   * Text that, in the input of any tool call of a run, shows the agent going around the server: reading its
+   * source or the bench's config files next to the workspace, calling the data generator, or reading the
+   * process table (where the server's command line, seed included, is visible). Such a run is invalid.
+   */
+  readonly offLimits: readonly string[];
+}
 
 export interface VerifyContext {
   /** Absolute path of the final workspace. */
@@ -32,7 +56,9 @@ export type Solution = (workspace: string, facts: FixtureFacts) => Promise<strin
 export interface TaskDef {
   readonly id: TaskId;
   readonly title: string;
-  readonly size: 'short' | 'long-read' | 'long-edit' | 'debug' | 'policy' | 'refactor' | 'feature';
+  readonly size: 'short' | 'long-read' | 'long-edit' | 'debug' | 'policy' | 'refactor' | 'feature' | 'mcp';
+  /** The MCP server holding the task's data; every Claude arm reaches it (see `claudeMcpConfig`). */
+  readonly mcpServer?: TaskMcpServer;
   /** True when the verifier runs tests that are not in the agent's workspace. */
   readonly hiddenTests?: boolean;
   /** Prompt given to the agent. */

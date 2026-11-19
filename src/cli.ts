@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { stateDirPath } from './core/state-dir.js';
 import type { HostKind } from './core/types.js';
 import { runContextHook } from './hosts/claude/context-hook.js';
+import { managedSettingsDir } from './hosts/claude/settings.js';
 import { applyPlan, parseInstallArgs, planDiff, planInstall } from './install.js';
+import { parseMcpConfigFlag, processExitHooks, startMcpUpstreams, upstreamLifecycle } from './mcp/start.js';
+import type { McpUpstream } from './mcp/upstream.js';
+import { detectHost } from './server/context.js';
 import { createMcpServer } from './server/mcp.js';
+import { REGISTERED_SERVER_NAME } from './server/runtime.js';
 import { recoverStaleJournals } from './tools/journal.js';
 
 const USAGE = `Usage: agent-code-mode <command>
 
 Commands:
-  serve [--host claude|codex|generic] [--hybrid]
+  serve [--host claude|codex|generic] [--hybrid] [--mcp-config <file>]
                                         Run the MCP stdio server; --hybrid adds one line to the run description
-                                        for hosts that keep their native file and shell tools next to run
+                                        for hosts that keep their native file and shell tools next to run;
+                                        --mcp-config starts the stdio MCP servers of a .mcp.json-style file and
+                                        exposes their tools to scripts as mcpCall (Claude Code host only)
   hook                                  Claude Code companion PreToolUse hook (reads the hook JSON on stdin)
   install --host claude|codex [--scope user|project] [--write] [--local]
                                         Print the host configuration; --write applies it after showing the diff;
@@ -82,6 +90,36 @@ export async function main(argv: readonly string[]): Promise<number> {
         process.stderr.write(`${hybrid.message}\n`);
         return 2;
       }
+      const mcpConfig = parseMcpConfigFlag(rest);
+      if (mcpConfig instanceof Error) {
+        process.stderr.write(`${mcpConfig.message}\n`);
+        return 2;
+      }
+      let upstream: McpUpstream | undefined;
+      let lifecycle: ReturnType<typeof upstreamLifecycle> | undefined;
+      if (mcpConfig !== undefined) {
+        // Installed before any upstream starts: a signal or EOF during the start must not leave one running.
+        lifecycle = upstreamLifecycle(processExitHooks(process));
+        const started = await startMcpUpstreams({
+          signal: lifecycle.signal,
+          configFile: path.resolve(mcpConfig),
+          host: host ?? detectHost({ env: process.env, meta: undefined }),
+          managedDir: managedSettingsDir(),
+          reservedServerNames: [REGISTERED_SERVER_NAME],
+          cwd: process.cwd(),
+          clientVersion: readVersion(),
+        });
+        if (!started.ok) {
+          lifecycle.release();
+          process.stderr.write(`agent-code-mode: ${started.message}\n`);
+          return 2;
+        }
+        upstream = started.upstream;
+        if (!lifecycle.attach(upstream)) return -1; // the session ended while the upstreams started: they are being closed
+        const { catalog } = upstream;
+        for (const problem of catalog.problems) process.stderr.write(`agent-code-mode: ${problem}\n`);
+        process.stderr.write(`agent-code-mode: ${catalog.servers.length} upstream MCP server(s) connected, ${catalog.tools.length} tool(s) available to mcpCall\n`);
+      }
       // Undo what runs of a crashed server left in this workspace before serving.
       const recovered = await recoverStaleJournals(stateDirPath(), [process.cwd()]);
       for (const { id, report, kept } of recovered) {
@@ -90,8 +128,18 @@ export async function main(argv: readonly string[]): Promise<number> {
         );
         for (const s of report.skipped) process.stderr.write(`agent-code-mode:   not restored: ${s.path} (${s.reason}${s.detail ? `: ${s.detail}` : ''})\n`);
       }
-      const server = createMcpServer({ version: readVersion(), hybrid, ...(host ? { host } : {}) });
-      await server.connect(new StdioServerTransport());
+      // With upstream servers the host is Claude Code, checked above; pin it so no request can switch it.
+      const servedHost = upstream !== undefined ? 'claude' : host;
+      const server = createMcpServer({ version: readVersion(), hybrid, ...(servedHost ? { host: servedHost } : {}), ...(upstream ? { mcp: upstream } : {}) });
+      try {
+        await server.connect(new StdioServerTransport());
+        // stdin was paused when the upstreams were handed over; the transport now listens.
+        lifecycle?.resumeInput();
+      } catch (err) {
+        // A start that fails after the upstream servers started must not leave them running.
+        await upstream?.close();
+        throw err;
+      }
       return -1; // keep running until stdin closes
     }
     case 'hook': {

@@ -17,6 +17,10 @@
  *                   re-prepared and re-checked statically (hooks are not re-run).
  *     4. commit   : `ToolRuntime.commit` executes exactly the prepared effect,
  *                   re-checking content hashes first.
+ *
+ * `mcpCall` (binding `mcp`) takes the same path with `McpRuntime` in place of
+ * the tool runtime: parsed against the catalog of upstream tools, prepared
+ * into a `PreparedMcpCall`, authorized by the same adapter, then sent.
  */
 
 /** Names of the bindings a script can call. */
@@ -246,7 +250,107 @@ export interface OverflowSlice {
 }
 
 /** A binding's resolved value as the script receives it. */
-export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice;
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice | McpResult;
+
+// ---------------------------------------------------------------------------
+// Upstream MCP tools: `mcpCall(server, tool, args)`.
+// ---------------------------------------------------------------------------
+
+declare const mcpNameBrand: unique symbol;
+
+/**
+ * A configured upstream server name that passed the name rules (see
+ * src/mcp/names.ts). Only the catalog of servers discovered at start mints
+ * one, so a value of this type always names a server in that catalog.
+ */
+export type McpServerName = string & { readonly [mcpNameBrand]: 'server' };
+
+/** A tool name of an upstream server that passed the name rules and is in the catalog under its server. */
+export type McpToolName = string & { readonly [mcpNameBrand]: 'tool' };
+
+/** Validated `mcpCall` arguments: server and tool are in the catalog, `input` is a JSON object. */
+export interface McpArgs {
+  readonly server: McpServerName;
+  readonly tool: McpToolName;
+  /** The tool arguments, sent to the upstream server as given. */
+  readonly input: Readonly<Record<string, unknown>>;
+  /** Per-call timeout in milliseconds. The MCP runtime applies its default when absent. */
+  readonly timeoutMs?: number;
+}
+
+/** A validated `mcpCall` (binding name `mcp`). */
+export interface McpCall {
+  readonly id: string;
+  readonly tool: 'mcp';
+  readonly args: McpArgs;
+}
+
+/** Effect of an `mcpCall`: exactly what is sent upstream. An external effect: never rolled back. */
+export interface McpEffect {
+  readonly server: McpServerName;
+  readonly tool: McpToolName;
+  /** The host's name of the tool, `mcp__<server>__<tool>`. */
+  readonly qualifiedName: string;
+  readonly input: Readonly<Record<string, unknown>>;
+  /** Effective timeout in milliseconds. */
+  readonly timeoutMs: number;
+}
+
+/** An `mcpCall` after `McpRuntime.prepare`. */
+export interface PreparedMcpCall {
+  readonly id: string;
+  readonly tool: 'mcp';
+  readonly args: McpArgs;
+  readonly effect: McpEffect;
+}
+
+/**
+ * Result of `mcpCall`, as the script receives it: the upstream
+ * `structuredContent` when there is one, else the text of its content blocks
+ * joined, plus `isError`. A result over the size cap is cut: `truncated` is
+ * set, `text` holds the start of the whole result's text (the content text or
+ * the `structuredContent` JSON), and `overflow` names where `readOverflow`
+ * reads all of it, or `warning` says it could not be kept.
+ */
+export interface McpResult {
+  readonly isError: boolean;
+  readonly structuredContent?: unknown;
+  readonly text?: string;
+  readonly truncated?: true;
+  readonly overflow?: { readonly id: string; readonly chars: number };
+  readonly warning?: string;
+}
+
+/**
+ * Serves `mcpCall` for one server process: the catalog of upstream tools
+ * found at start and the connections to their servers.
+ */
+export interface McpRuntime {
+  /**
+   * Validates untrusted `mcpCall` arguments against the catalog. `server` and
+   * `tool` must name a cataloged tool; `args` must be a JSON object.
+   */
+  parse(args: unknown, id: string): { readonly ok: true; readonly call: McpCall } | { readonly ok: false; readonly message: string };
+  /** Computes the effect, with no side effect. */
+  prepare(call: McpCall): PreparedMcpCall;
+  /**
+   * Sends the call upstream and shapes the result. Throws `ToolError` when
+   * the call fails, times out (effect unknown: never retried) or is cancelled
+   * through `signal`. `onSent` is called once, when the request is written
+   * to the server (a call refused before that, e.g. on a closed connection,
+   * never calls it).
+   */
+  commit(prepared: PreparedMcpCall, signal: AbortSignal, onSent?: () => void): Promise<McpResult>;
+}
+
+/** Any validated binding call that goes through the dispatcher. */
+export type BindingCall = ToolCall | McpCall;
+
+/** What a host adapter authorizes: a prepared built-in call or a prepared `mcpCall`. */
+export type HostCall = PreparedCall | PreparedMcpCall;
+
+/** A committed call's result, as a host adapter's PostToolUse sees it. */
+export type HostResult = ToolResult | McpResult;
 
 // ---------------------------------------------------------------------------
 // Prepared calls: the exact effect that is authorized and then committed.
@@ -585,7 +689,8 @@ export interface HookContextStore {
 
 /**
  * Host adapter: reproduces how the host authorizes a native tool call.
- * Implementations must be fail-closed: an error in a hook is a deny.
+ * Implementations must be fail-closed: an error in a hook is a deny. An
+ * adapter that cannot authorize `mcpCall` (a `PreparedMcpCall`) must deny it.
  */
 export interface HostAdapter<P = unknown> {
   readonly host: HostKind;
@@ -595,19 +700,19 @@ export interface HostAdapter<P = unknown> {
    * The host's static permission rules (deny → ask → allow) applied to the
    * prepared call. `allow` means "no rule denies or asks". Must not do I/O.
    */
-  checkStatic(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<P>): Decision;
+  checkStatic(prepared: HostCall, ctx: SessionContext, policy: PolicySnapshot<P>): Decision;
   /**
    * Optional refusals that need I/O (symlinks resolved): runs before
    * `checkStatic`, so an ask rule cannot turn them into a question. Resolves
    * to a `deny` or to undefined; anything else is treated as a deny.
    */
-  checkResolved?(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<P>): Promise<Decision | undefined>;
+  checkResolved?(prepared: HostCall, ctx: SessionContext, policy: PolicySnapshot<P>): Promise<Decision | undefined>;
   /**
    * Runs the host's PreToolUse hooks on the prepared call. Must honor
    * `signal` (kill running hooks). Only called after `checkStatic` allowed.
    */
   authorize(
-    prepared: PreparedCall,
+    prepared: HostCall,
     ctx: SessionContext,
     policy: PolicySnapshot<P>,
     signal: AbortSignal,
@@ -618,8 +723,8 @@ export interface HostAdapter<P = unknown> {
    * waiting when it aborts.
    */
   postToolUse?(
-    prepared: PreparedCall,
-    result: ToolResult,
+    prepared: HostCall,
+    result: HostResult,
     ctx: SessionContext,
     policy: PolicySnapshot<P>,
     signal: AbortSignal,

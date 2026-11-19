@@ -189,6 +189,11 @@ async function readManaged(dir: string, projectRoot: string): Promise<SettingsDo
   return [...drops.reverse(), ...docs];
 }
 
+/** The managed settings documents in `dir` (`managed-settings.json` and `managed-settings.d/*.json`), highest precedence first. */
+export function readManagedSettings(dir: string): Promise<SettingsDoc[]> {
+  return readManaged(dir, dir);
+}
+
 /** Settings documents from command-line flags. */
 async function readFlagSettings(flags: ClaudeCliFlags, parentCwd: string | undefined, projectRoot: string): Promise<SettingsDoc[]> {
   const docs: SettingsDoc[] = [];

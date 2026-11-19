@@ -23,6 +23,7 @@ Every binding call is prepared, authorized against the host's permission rules a
 - `src/sandbox`: QuickJS-ng WASM sandbox in a child process.
 - `src/hosts/claude`: Claude Code host adapter (settings, permission rules, hooks).
 - `src/hosts/codex`: Codex CLI host adapter (config, exec policy, hooks).
+- `src/mcp`: upstream MCP servers of `serve --mcp-config` (config, name rules, connections and catalog, the `mcpCall` binding).
 - `src/tools`: tool runtime (`bash`, `read`, `write`, `edit`, `grep`, `glob`), journal and rollback.
 - `src/testing`: fakes for tests (sandbox, host adapter, in-memory tool runtime).
 - `test/attack`: attack suite through `run` with the real sandbox, tools and adapters (part of `npm test`).

@@ -7,20 +7,21 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
-import { claudeArgs, CLAUDE_INNER_ALLOWED, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
+import { claudeArgs, CLAUDE_INNER_ALLOWED, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript, upstreamMcpConfig, type ArmMcp } from './lib/claude.ts';
 import { claudeInteractiveArgs, claudeSemver, interactiveEnv, parseClaudeInteractiveTranscript, seededClaudeJson, trimInteractiveTranscript, type InteractiveFacts } from './lib/claude-interactive.ts';
 import { driveInteractive, findSessionTranscript, INTERACTIVE_DRIVER, serverAlive, sweepStaleTmuxServers, tmuxVersion } from './lib/tmux.ts';
 import { catalogForArm, CODEX_FEATURES_OFF, EMPTY_MCP_SERVER, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
-import { ARM_LABELS, BASELINE_ARMS, BENCH_ARMS, checkArm, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, hostArms, isAcmArm, RunRecordSchema, surfaceArm, type ArmId, type BenchArm, type ParsedRun, type RunRecord } from './lib/record.ts';
+import { ARM_LABELS, BASELINE_ARMS, BENCH_ARMS, checkArm, checkMcpCalls, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, hostArms, isAcmArm, mcpCallCounts, RunRecordSchema, surfaceArm, type ArmId, type BenchArm, type ParsedRun, type RunRecord } from './lib/record.ts';
 import { Rng } from './lib/rng.ts';
 import { defaultSanitizeContext, sanitize, sanitizeTree, writeSanitized, type SanitizeContext } from './lib/sanitize.ts';
 import { claudeProjectSettings, CODEX_HOOK_MATCHER, createWorkspace, hookCommand, initialTree, workspaceDiff, type HostId } from './lib/workspace.ts';
 import { writeReport } from './report.ts';
 import { TASKS } from './tasks/index.ts';
-import { TASK_IDS, type TaskId } from './tasks/types.ts';
+import { DEFAULT_TASK_IDS, TASK_IDS, type TaskDef, type TaskId } from './tasks/types.ts';
+import type { FixtureFacts } from './fixture/generate.ts';
 
 /**
  * Benchmark runner: `npm run bench -- --host claude --arms A,B,C --tasks T1,T5 --runs 3`.
@@ -335,6 +336,71 @@ function serverEntryFor(ctx: Context, arm: BenchArm): string {
   return ctx.serverEntry;
 }
 
+/**
+ * A task's MCP server in an arm: the stdio entry (this Node and the server file) and the file that hands it
+ * to agent-code-mode as an upstream. Undefined for tasks without one. `upstreamConfigFile` is `<upstream-mcp>`
+ * in the arm definition, so the config hash does not depend on the run directory.
+ */
+function armMcp(task: TaskDef, facts: FixtureFacts, upstreamConfigFile: string): ArmMcp | undefined {
+  const m = task.mcpServer;
+  if (m === undefined) return undefined;
+  return { server: { name: m.name, command: process.execPath, args: [m.entry, ...m.args(facts)] }, upstreamConfigFile };
+}
+
+/**
+ * Direct tool names of a task's MCP server that an arm's host lists. None in B (the server is agent-code-mode's
+ * upstream) and none in D: an interactive Code Mode session defers MCP tools behind `DeferredToolPlaceholder`
+ * and a REPL script finds them with `searchTools` (seen in the T16 pilot, Claude Code 2.1.327).
+ */
+export function taskDirectTools(task: Pick<TaskDef, 'mcpServer'>, arm: ArmId): string[] {
+  const m = task.mcpServer;
+  return m === undefined || arm === 'B' || arm === 'D' ? [] : m.tools.map((t) => `mcp__${m.name}__${t}`);
+}
+
+/** REPL helpers a Code Mode script uses to find deferred tools: allowed inside scripts on MCP tasks, where they reach the task's tools. */
+export const REPL_DISCOVERY_TOOLS = ['searchTools', 'describeTool'];
+
+/** Tools a REPL script may call on a task besides the arm A tools: the task's MCP tools and the discovery helpers. */
+export function taskScriptTools(task: Pick<TaskDef, 'mcpServer'>): string[] {
+  const m = task.mcpServer;
+  return m === undefined ? [] : [...m.tools.map((t) => `mcp__${m.name}__${t}`), ...REPL_DISCOVERY_TOOLS];
+}
+
+/**
+ * The inputs of every tool call in a transcript (the model's calls, and in an interactive transcript the
+ * calls REPL scripts made), as JSON text: what the agent asked to read, run or search.
+ */
+export function toolInputsText(transcript: string): string {
+  const out: string[] = [];
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('"tool_use"')) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = ToolUseEvent.safeParse(event);
+    if (!parsed.success) continue;
+    for (const block of parsed.data.message.content) {
+      const use = ToolUseInput.safeParse(block);
+      if (use.success) out.push(JSON.stringify(use.data.input ?? null));
+    }
+  }
+  return out.join('\n');
+}
+
+const ToolUseEvent = z.object({ message: z.object({ content: z.array(z.unknown()) }).passthrough() }).passthrough();
+const ToolUseInput = z.object({ type: z.literal('tool_use'), input: z.unknown() }).passthrough();
+
+/** The off-limits markers of a task's MCP server that a run's tool calls contain. */
+export function offLimitsHits(task: Pick<TaskDef, 'mcpServer'>, transcript: string): string[] {
+  const markers = task.mcpServer?.offLimits ?? [];
+  if (markers.length === 0) return [];
+  const inputs = toolInputsText(transcript);
+  return markers.filter((m) => inputs.includes(m));
+}
+
 /** Content hash of a build directory (sorted relative paths and bytes), for `--acm-dist`. */
 async function dirHash(dir: string): Promise<string> {
   const hash = createHash('sha256');
@@ -435,6 +501,7 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
   let def: unknown;
   if (p.host === 'claude' && isInteractive(ctx.opts, p)) {
     const codeMode = arm === 'D';
+    const mcp = armMcp(task, fixture.facts, '<upstream-mcp>');
     def = {
       driver: INTERACTIVE_DRIVER,
       args: claudeInteractiveArgs({ codeMode, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, settingsFile: '<settings>', mcpConfigFile: '<mcp>', sessionId: '<session>' }),
@@ -442,14 +509,17 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
       claudeJson: seededClaudeJson('<workspace>', claudeSemver(ctx.versions['claude'])),
       maxTurns: ctx.opts.maxTurns,
       settings: claudeProjectSettings(task, fixture),
-      mcp: claudeMcpConfig(arm, '<server>'),
+      mcp: claudeMcpConfig(arm, '<server>', mcp),
+      ...(mcp === undefined ? {} : { upstream: upstreamMcpConfig(mcp.server) }),
       isolation: claudeIsolationMethod(true),
     };
   } else if (p.host === 'claude') {
+    const mcp = armMcp(task, fixture.facts, '<upstream-mcp>');
     def = {
       args: claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
       settings: claudeProjectSettings(task, fixture),
-      mcp: claudeMcpConfig(arm, '<server>'),
+      mcp: claudeMcpConfig(arm, '<server>', mcp),
+      ...(mcp === undefined ? {} : { upstream: upstreamMcpConfig(mcp.server) }),
       isolation: claudeIsolationMethod(existsSync(path.join(sourceClaudeConfig(), '.credentials.json'))),
     };
   } else {
@@ -551,7 +621,7 @@ async function runClaudeInteractive(ctx: Context, p: PlannedRun, runWork: string
   const settingsFile = path.join(runWork, 'claude-settings.json');
   const mcpConfigFile = path.join(runWork, 'mcp-config.json');
   const settings = `${JSON.stringify(claudeProjectSettings(task, fixture), null, 2)}\n`;
-  const mcp = `${JSON.stringify(claudeMcpConfig(arm, ''), null, 2)}\n`;
+  const mcp = `${JSON.stringify(claudeMcpConfig(arm, '', armMcp(task, fixture.facts, '')), null, 2)}\n`;
   await writeFile(settingsFile, settings);
   await writeFile(mcpConfigFile, mcp);
   const sessionId = randomUUID();
@@ -622,11 +692,14 @@ async function runClaude(ctx: Context, p: PlannedRun, runWork: string, ws: strin
   const mcpConfigFile = path.join(runWork, 'mcp-config.json');
   const settings = `${JSON.stringify(claudeProjectSettings(task, fixture), null, 2)}\n`;
   const arm = surfaceArm(p.arm);
-  const mcp = `${JSON.stringify(claudeMcpConfig(arm, serverEntryFor(ctx, p.arm)), null, 2)}\n`;
+  const taskMcp = armMcp(task, fixture.facts, path.join(runWork, 'upstream-mcp.json'));
+  const mcp = `${JSON.stringify(claudeMcpConfig(arm, serverEntryFor(ctx, p.arm), taskMcp), null, 2)}\n`;
   await writeFile(settingsFile, settings);
   await writeFile(mcpConfigFile, mcp);
+  const upstream = taskMcp === undefined ? undefined : `${JSON.stringify(upstreamMcpConfig(taskMcp.server), null, 2)}\n`;
+  if (taskMcp !== undefined && upstream !== undefined) await writeFile(taskMcp.upstreamConfigFile, upstream);
   const args = claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile, mcpConfigFile });
-  const configs: Record<string, string> = { 'claude-settings.json': settings, 'mcp-config.json': mcp, 'command.txt': `claude ${args.map((a) => (a === '' ? '""' : a)).join(' ')}\n` };
+  const configs: Record<string, string> = { 'claude-settings.json': settings, 'mcp-config.json': mcp, 'command.txt': `claude ${args.map((a) => (a === '' ? '""' : a)).join(' ')}\n`, ...(upstream === undefined ? {} : { 'upstream-mcp.json': upstream }) };
   if (ctx.opts.dryRun) return { ...(await cannedTranscript('claude', arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
   const stdoutFile = path.join(runWork, 'stdout.jsonl');
   const stderrFile = path.join(runWork, 'stderr.txt');
@@ -695,7 +768,7 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
  * screen (arm D) or its absence (pilot), Code Mode in the transcript, the effort and permission mode of the
  * requests, the end of the turn, the inner calls staying on the arm A tools, and the tmux server gone.
  */
-export function interactiveReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, p: Pick<PlannedRun, 'arm'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null): string[] {
+export function interactiveReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, p: Pick<PlannedRun, 'arm'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null, taskTools: readonly string[] = []): string[] {
   const reasons: string[] = [];
   const codeMode = surfaceArm(p.arm) === 'D';
   if (!opts.dryRun) {
@@ -711,8 +784,9 @@ export function interactiveReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'
     if (!opts.dryRun && (facts.efforts.length !== 1 || facts.efforts[0] !== opts.claudeEffort)) reasons.push(`requests ran with effort [${facts.efforts.join(', ')}], expected ${opts.claudeEffort}`);
     const modes = facts.permissionModes.filter((m) => m !== 'default');
     if (modes.length > 0) reasons.push(`permission mode ${modes.join(', ')} recorded, expected default`);
-    const outside = Object.keys(facts.innerByTool).filter((t) => !CLAUDE_INNER_ALLOWED.includes(t));
-    if (outside.length > 0) reasons.push(`REPL scripts called tools outside the arm A tools: ${outside.join(', ')}`);
+    // A task's MCP tools are part of the task: scripts may call them (and in arm D must, see checkMcpCalls).
+    const outside = Object.keys(facts.innerByTool).filter((t) => !CLAUDE_INNER_ALLOWED.includes(t) && !taskTools.includes(t));
+    if (outside.length > 0) reasons.push(`REPL scripts called tools outside the arm A tools${taskTools.length > 0 ? ' and the task MCP tools' : ''}: ${outside.join(', ')}`);
   }
   return reasons;
 }
@@ -749,6 +823,9 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
   } catch (err) {
     parseError = err instanceof Error ? err.message : String(err);
   }
+  const taskTools = taskDirectTools(task, surfaceArm(p.arm));
+  const mcpServer = task.mcpServer;
+  if (parsed !== null && mcpServer !== undefined) parsed = { ...parsed, mcpCalls: mcpCallCounts(parsed, mcpServer.name) };
   const answer = solutionAnswer ?? parsed?.finalAnswer ?? '';
   const verify = await task.verify({ workspace: ws, answer, facts: workspace.fixture.facts, initial: workspace.initial, denials: ctx.opts.dryRun ? null : (parsed?.denials ?? null) });
 
@@ -771,17 +848,22 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
   if (parsed !== null) {
     if (parsed.hostError !== null) invalidReasons.push(`host error: ${parsed.hostError}`);
     if (!ctx.opts.dryRun && parsed.model !== null && parsed.model !== model) invalidReasons.push(`model mismatch: ran ${parsed.model}, expected ${model}`);
-    if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, surfaceArm(p.arm), parsed.availableTools));
+    if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, surfaceArm(p.arm), parsed.availableTools, taskTools));
     else if (!ctx.opts.dryRun) invalidReasons.push('tool surface not observed');
     if (p.host === 'claude' && !ctx.opts.dryRun) {
       if (parsed.hostContext === null) invalidReasons.push('Claude init event missing: isolation not observed');
       else invalidReasons.push(...claudeIsolationIssues(parsed.hostContext));
     }
-    const arm = checkArm(p.host, surfaceArm(p.arm), parsed.toolCalls);
+    const arm = checkArm(p.host, surfaceArm(p.arm), parsed.toolCalls, taskTools);
     fallback = arm.fallback;
     invalidReasons.push(...arm.reasons);
+    if (!ctx.opts.dryRun && parsed.mcpCalls !== null) invalidReasons.push(...checkMcpCalls(surfaceArm(p.arm), parsed.mcpCalls));
   }
-  if (interactive) invalidReasons.push(...interactiveReasons(ctx.opts, p, output.interactive ?? null, facts));
+  if (interactive) invalidReasons.push(...interactiveReasons(ctx.opts, p, output.interactive ?? null, facts, taskScriptTools(task)));
+  // The agent must not reach the checkout's bench/tasks (hidden tests, solutions, the T16 server's generator).
+  if (!ctx.opts.dryRun && output.stdout.includes(path.join(REPO_ROOT, 'bench', 'tasks'))) invalidReasons.push('the transcript names a path under bench/tasks: the agent reached the task sources');
+  const offLimits = ctx.opts.dryRun ? [] : offLimitsHits(task, output.stdout);
+  if (offLimits.length > 0) invalidReasons.push(`tool calls went around the task's MCP server (${offLimits.join(', ')}): its source, the bench's config files or the process table`);
   const notes: string[] = [];
   const sessionCost = facts?.sessionCost ?? null;
   if (interactive) {
@@ -916,6 +998,8 @@ function line(r: RunRecord): string {
     r.costUsd === null ? 'no cost' : `$${r.costUsd.toFixed(4)}`,
     `${(r.wallMs / 1000).toFixed(1)}s`,
     `calls native ${r.parsed?.toolCalls.native ?? 0} run ${r.parsed?.toolCalls.run ?? 0} exec ${r.parsed?.toolCalls.codeMode ?? 0}`,
+    ...(r.parsed?.mcpCalls ? [`mcp direct ${r.parsed.mcpCalls.direct} script ${r.parsed.mcpCalls.script}`] : []),
+    ...(r.parsed?.context ? [`context peak ${r.parsed.context.peak} last ${r.parsed.context.last}`] : []),
   ];
   if (r.fallback) parts.push('FALLBACK');
   return `${r.warmup ? 'warmup ' : ''}${r.host} ${r.task} ${r.arm} r${r.run}: ${parts.join(', ')}`;
@@ -938,7 +1022,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   // Without --seed, a resume reuses the seed of the last invocation for this date (it is part of the config hash).
   const seed = opts.seed ?? (await lastSeed(resultsDir)) ?? Math.floor(Math.random() * 2 ** 31);
   const hosts: HostId[] = opts.host === 'all' ? ['claude', 'codex'] : [opts.host];
-  const tasks: TaskId[] = opts.tasks ?? [...TASK_IDS];
+  const tasks: TaskId[] = opts.tasks ?? [...DEFAULT_TASK_IDS];
   const withBaseline = opts.acmRef !== undefined || opts.acmDist !== undefined;
   const baselineArms: BenchArm[] = [BASELINE_ARMS.claude, BASELINE_ARMS.codex];
   if (!withBaseline && opts.arms?.some((a) => baselineArms.includes(a))) {
@@ -949,7 +1033,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     process.stderr.write('--interactive-pilot runs Claude arm A only, for real: pass --host claude --arms A without --dry-run\n');
     return 2;
   }
-  const plan = planRuns(hosts, tasks, opts.arms, opts.runs, seed, withBaseline);
+  // A task's MCP server is wired for Claude only (agent-code-mode's mcpCall needs the Claude host).
+  const plan = planRuns(hosts, tasks, opts.arms, opts.runs, seed, withBaseline).filter((p) => p.host === 'claude' || TASKS[p.task].mcpServer === undefined);
+  const skippedMcp = tasks.filter((t) => TASKS[t].mcpServer !== undefined);
+  if (hosts.includes('codex') && skippedMcp.length > 0) process.stderr.write(`${skippedMcp.join(', ')}: Claude host only (MCP task); no Codex runs for it\n`);
   if (plan.length === 0) {
     process.stderr.write('nothing to run: no arm of the chosen hosts matches --arms\n');
     return 2;
