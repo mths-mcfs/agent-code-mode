@@ -32,5 +32,5 @@ describe('dry run', () => {
     const left = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => f.endsWith('auth.json'));
     expect(left).toEqual([]);
     await rm(work, { recursive: true, force: true });
-  }, 120_000);
+  }, 300_000); // End to end through main(): on Windows it competes for the CPU with the other test files.
 });
