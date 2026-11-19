@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { makeContext } from '../testing/context.js';
 import { FakeSandbox, type FakeStep } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
@@ -210,6 +210,133 @@ describe('runScript', () => {
     expect(result.error?.kind).toBe('denied');
     expect(result.rolledBack).toBeUndefined();
     expect(result.warnings.join('\n')).toContain('rollback did not finish within 30 ms');
+  });
+
+  it('rolls back a commit still running after the grace once it has landed', async () => {
+    const tools = new MemoryToolRuntime({ root: '/ws', commitDelayMs: 60, honorAbortInCommit: false });
+    const sandbox: Sandbox = {
+      run: async (_code, opts) => {
+        void opts.onCall('write', { path: 'late.txt', content: 'late' });
+        await new Promise((r) => setTimeout(r, 5));
+        return { ok: false, kind: 'error', error: { name: 'Error', message: 'boom' } };
+      },
+    };
+    const result = await runScript({ code: 'x', transaction: true, timeoutMs: 5_000 }, { ...deps(), tools, sandbox, stopGraceMs: 10 });
+    expect(result.error?.kind).toBe('error');
+    expect(result.rolledBack).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('the rollback is pending');
+    await vi.waitFor(() => expect(tools.commits).toHaveLength(1));
+    await vi.waitFor(() => expect(tools.read('late.txt')).toBeUndefined());
+  });
+
+  it.each(['read', 'bash'] as const)('rolls back a finished write without waiting for %s that ignores abort', async (stalled) => {
+    const d = deps({}, { 'a.txt': 'a' });
+    const commit = d.tools.commit.bind(d.tools);
+    let started = (): void => undefined;
+    const reached = new Promise<void>((resolve) => { started = resolve; });
+    d.tools.commit = (p, signal, tx) => {
+      if (p.tool !== stalled) return commit(p, signal, tx);
+      started();
+      return new Promise(() => undefined);
+    };
+    const sandbox: Sandbox = {
+      run: async (_code, opts) => {
+        await opts.onCall('write', { path: 'b.txt', content: 'b' });
+        void opts.onCall(stalled, stalled === 'read' ? { path: 'a.txt' } : { command: 'echo hello' });
+        await reached;
+        void opts.onCall('write', { path: 'c.txt', content: 'c' });
+        return { ok: false, kind: 'error', error: { name: 'Error', message: 'boom' } };
+      },
+    };
+    const result = await runScript({ code: 'x', transaction: true, timeoutMs: 5_000 }, { ...d, sandbox, stopGraceMs: 10 });
+    expect(result.rolledBack).toBeDefined();
+    expect(result.warnings.join('\n')).not.toContain('the rollback is pending');
+    expect(d.tools.read('b.txt')).toBeUndefined();
+    expect(d.tools.read('c.txt')).toBeUndefined();
+  });
+
+  it('releases the journal only after a rollback that outlived its bound has ended', async () => {
+    const d = deps(denyForbidden);
+    const events: string[] = [];
+    let finishRollback = (): void => undefined;
+    const gate = new Promise<void>((r) => (finishRollback = r));
+    d.tools.beginTransaction = () => ({
+      rollback: async () => {
+        await gate;
+        events.push('rollback');
+        return { restored: [], skipped: [] };
+      },
+      dispose: async () => {
+        events.push('dispose');
+      },
+    });
+    const result = await runScript(
+      { code: script([{ tool: 'write', args: { path: 'forbidden.txt', content: 'x' } }]), transaction: true, timeoutMs: 5_000 },
+      { ...d, rollbackTimeoutMs: 10 },
+    );
+    expect(result.warnings.join('\n')).toContain('rollback did not finish within 10 ms');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toEqual([]);
+    finishRollback();
+    await vi.waitFor(() => expect(events).toEqual(['rollback', 'dispose']));
+  });
+
+  it('counts policy loading against the deadline and gives the sandbox only the time left', async () => {
+    let clock = 0;
+    const budgets: number[] = [];
+    const sandbox: Sandbox = {
+      run: async (_code, opts) => {
+        budgets.push(opts.timeoutMs);
+        return { ok: true, value: 1 };
+      },
+    };
+    const d = deps({}, {}, sandbox);
+    const load = d.adapter.loadPolicy.bind(d.adapter);
+    let loadMs = 300.5;
+    d.adapter.loadPolicy = (ctx) => {
+      clock += loadMs;
+      return load(ctx);
+    };
+    expect(await runScript({ code: 'x', transaction: false, timeoutMs: 1_000 }, { ...d, now: () => clock })).toMatchObject({ ok: true });
+    expect(budgets).toEqual([700]);
+
+    clock = 0;
+    loadMs = 1_000;
+    const late = await runScript({ code: 'x', transaction: false, timeoutMs: 1_000 }, { ...d, now: () => clock });
+    expect(late.error?.kind).toBe('timeout');
+    expect(budgets).toEqual([700]);
+  });
+
+  it('refuses a commit when authorization completes after the deadline', async () => {
+    let clock = 0;
+    const sandbox: Sandbox = {
+      run: async (_code, opts) => {
+        await opts.onCall('write', { path: 'notes.txt', content: 'notes' });
+        return { ok: true, value: null };
+      },
+    };
+    const d = deps({}, {}, sandbox);
+    d.adapter.authorize = async () => {
+      clock = 1_001;
+      return { kind: 'allow' };
+    };
+    const result = await runScript({ code: 'x', transaction: false, timeoutMs: 1_000 }, { ...d, now: () => clock });
+    expect(result.error?.kind).toBe('timeout');
+    expect(d.tools.read('notes.txt')).toBeUndefined();
+  });
+
+  it('keeps the sandbox stopped when opening the journal uses up the deadline', async () => {
+    let clock = 0;
+    const run = vi.fn(async () => ({ ok: true as const, value: 'done' }));
+    const d = deps({}, {}, { run });
+    const begin = d.tools.beginTransaction.bind(d.tools);
+    d.tools.beginTransaction = () => {
+      clock = 11;
+      return begin();
+    };
+    const result = await runScript({ code: 'x', transaction: true, timeoutMs: 10 }, { ...d, now: () => clock });
+    expect(result.error?.kind).toBe('timeout');
+    expect(run).not.toHaveBeenCalled();
   });
 
   it('never rejects when the sandbox throws', async () => {

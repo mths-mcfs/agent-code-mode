@@ -98,6 +98,11 @@ function killTree(child: ChildProcess): void {
  * with its whole process group on timeout or abort. Never rejects.
  */
 export function runCommandHook(opts: CommandHookOptions): Promise<CommandHookResult> {
+  const noProcess = {
+    exitCode: null, signal: null, stdout: '', stderr: '',
+    stdoutTruncated: false, stderrTruncated: false, timedOut: false,
+  };
+  if (opts.signal?.aborted) return Promise.resolve({ ...noProcess, aborted: true, spawnError: null });
   const max = opts.maxOutputBytes ?? DEFAULT_HOOK_MAX_OUTPUT_BYTES;
   const stdout = new Capture(max);
   const stderr = new Capture(max);
@@ -150,13 +155,7 @@ export function runCommandHook(opts: CommandHookOptions): Promise<CommandHookRes
       });
     } catch (err) {
       resolve({
-        exitCode: null,
-        signal: null,
-        stdout: '',
-        stderr: '',
-        stdoutTruncated: false,
-        stderrTruncated: false,
-        timedOut: false,
+        ...noProcess,
         aborted: false,
         spawnError: err instanceof Error ? err.message : String(err),
       });
