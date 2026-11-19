@@ -359,8 +359,8 @@ export class MemoryToolRuntime implements ToolRuntime {
   }
 
   /** Sets a file, or deletes it when `content` is null, and returns its new revision. */
-  setFile(absPath: string, content: string | null, revision: number = this.#nextRevision++): number {
-    refuseUnc(absPath);
+  setFile(path: string, content: string | null, revision: number = this.#nextRevision++): number {
+    const absPath = this.#abs(path);
     if (content === null) this.files.delete(absPath);
     else this.files.set(absPath, content);
     if (revision === 0) this.#revisions.delete(absPath);
@@ -369,13 +369,13 @@ export class MemoryToolRuntime implements ToolRuntime {
   }
 
   /** Revision of the last change made through this runtime, if any. */
-  revision(absPath: string): number {
-    return this.#revisions.get(refuseUnc(absPath)) ?? 0;
+  revision(path: string): number {
+    return this.#revisions.get(this.#abs(path)) ?? 0;
   }
 
   /** Simulates a change made outside the run. */
   externalWrite(p: string, content: string): void {
-    this.setFile(this.#abs(p), content);
+    this.setFile(p, content);
   }
 
   read(p: string): string | undefined {
