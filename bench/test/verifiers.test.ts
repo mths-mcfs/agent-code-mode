@@ -11,6 +11,9 @@ import { TASK_IDS } from '../tasks/types.ts';
 // Every case builds its own workspace, so the cases run side by side. Two at a time: more starves the timing-sensitive suites in the other workers.
 vi.setConfig({ maxConcurrency: 2 });
 
+// Every case builds git workspaces and runs node --test on them: past the 20 s default on the slower Windows runner.
+vi.setConfig({ testTimeout: 120_000 });
+
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
 afterAll(async () => {
   await rm(root, { recursive: true, force: true });
