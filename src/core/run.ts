@@ -41,6 +41,8 @@ export interface RunDeps<P = unknown> {
   readonly stopGraceMs?: number;
   /** Upper bound of a transaction rollback. */
   readonly rollbackTimeoutMs?: number;
+  /** Monotonic clock in ms, for tests. */
+  readonly now?: () => number;
 }
 
 type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
@@ -88,15 +90,30 @@ function bounded<T>(work: () => Promise<T>, opts: { signal?: AbortSignal; ms?: n
   });
 }
 
-async function rollbackBounded(tx: Transaction, ms: number, warnings: string[]): Promise<RollbackReport | undefined> {
+/**
+ * Rolls back once no write or edit can still land. While some are running,
+ * the rollback waits for them in the background and a warning says so.
+ * `done` settles when the rollback has really ended, even past `ms`.
+ */
+async function rollbackBounded(
+  tx: Transaction,
+  writes: Promise<unknown> | undefined,
+  ms: number,
+  warnings: string[],
+): Promise<{ readonly report?: RollbackReport; readonly done: Promise<unknown> }> {
+  if (writes) {
+    warnings.push('the rollback is pending: some writes were still running when the run stopped; the final rollback outcome is unknown.');
+    return { done: writes.then(() => tx.rollback()) };
+  }
+  const done = Promise.resolve().then(() => tx.rollback());
   try {
-    const r = await bounded(() => tx.rollback(), { ms });
-    if (r.done) return r.value;
+    const r = await bounded(() => done, { ms });
+    if (r.done) return { report: r.value, done };
     warnings.push(`rollback did not finish within ${ms} ms; some files may not be restored.`);
   } catch (err) {
     warnings.push(`rollback failed: ${errorMessage(err)}`);
   }
-  return undefined;
+  return { done };
 }
 
 /** Applies defaults and clamps the timeout to `[1, min(maxTimeoutMs, MAX_RUN_TIMEOUT_MS)]`. */
@@ -186,7 +203,10 @@ function runError(stopReason: StopReason | undefined, outcome: SandboxOutcome, d
  * Never rejects.
  */
 export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<RunResult> {
+  const now = deps.now ?? (() => performance.now());
   const timeoutMs = resolveTimeoutMs(req.timeoutMs, deps.maxTimeoutMs);
+  // One deadline for the whole run, policy loading included; the grace after it is for stopping and finishing.
+  const deadline = now() + timeoutMs;
   const graceMs = deps.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const logs = new LogCollector();
   const controller = new AbortController();
@@ -194,6 +214,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
   let dispatcher: Dispatcher<P> | undefined;
   let denied: CallLogEntry | undefined;
   let tx: Transaction | undefined;
+  /** What must end before the journal is disposed: running writes, then the rollback. */
+  let journalBusy: Promise<unknown> | undefined;
 
   const stop = (reason: StopReason): void => {
     if (stopReason !== undefined) return;
@@ -201,14 +223,15 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     controller.abort(reason);
     void dispatcher?.stop(reason);
   };
+  const checkDeadline = (): void => {
+    if (now() >= deadline) stop('timeout');
+  };
   const onExternalAbort = (): void => stop('cancelled');
   deps.signal?.addEventListener('abort', onExternalAbort, { once: true });
   if (deps.signal?.aborted) stop('cancelled');
 
   const rollbackMs = deps.rollbackTimeoutMs ?? DEFAULT_ROLLBACK_TIMEOUT_MS;
-  // Backup deadline for the whole run, policy loading included. The sandbox
-  // enforces `timeoutMs` itself; this fires only if something does not return.
-  let timer: NodeJS.Timeout | undefined = setTimeout(() => stop('timeout'), timeoutMs + graceMs);
+  let timer: NodeJS.Timeout | undefined = setTimeout(() => stop('timeout'), timeoutMs);
   try {
     let policy: PolicySnapshot<P> | PolicyLoadError;
     try {
@@ -217,13 +240,17 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     } catch (err) {
       policy = { error: errorMessage(err) };
     }
+    checkDeadline();
+    if (req.transaction && stopReason === undefined) tx = deps.tools.beginTransaction();
 
-    if (req.transaction) tx = deps.tools.beginTransaction();
+    const leftMs = deadline - now();
+    if (leftMs <= 0) stop('timeout');
     dispatcher = new Dispatcher<P>({
       adapter: deps.adapter,
       tools: deps.tools,
       ctx: deps.ctx,
       policy,
+      checkDeadline,
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
     const active = dispatcher;
@@ -236,7 +263,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       let started: Promise<SandboxOutcome>;
       try {
         started = deps.sandbox.run(req.code, {
-          timeoutMs,
+          timeoutMs: Math.ceil(leftMs),
           memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
           signal: controller.signal,
           onCall: (tool, args) => active.dispatch(tool, args),
@@ -246,18 +273,22 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
         started = Promise.reject(err);
       }
       outcome = await waitOrGrace(started, controller.signal, graceMs);
+      if (outcome.ok) checkDeadline();
     }
     clearTimeout(timer);
     timer = undefined;
 
     // No call may start after the script ended; wait (bounded) for in-flight ones.
     await active.stop(stopReason ?? 'finished', graceMs);
+    journalBusy = active.pendingWrites;
 
     const error = runError(stopReason, outcome, denied, timeoutMs);
     const warnings = [...active.warnings];
     let rolledBack: RollbackReport | undefined;
     if (tx && error) {
-      rolledBack = await rollbackBounded(tx, rollbackMs, warnings);
+      const rollback = await rollbackBounded(tx, journalBusy, rollbackMs, warnings);
+      journalBusy = rollback.done;
+      rolledBack = rollback.report;
       if (active.bashCommits > 0) {
         warnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
       }
@@ -275,8 +306,14 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     return { ok: true, result: outcome.ok ? (outcome.value ?? null) : null, ...base };
   } catch (err) {
     if (dispatcher) await dispatcher.stop(stopReason ?? 'finished', graceMs);
+    journalBusy = dispatcher?.pendingWrites;
     const warnings = dispatcher ? [...dispatcher.warnings] : [];
-    const rolledBack = tx ? await rollbackBounded(tx, rollbackMs, warnings) : undefined;
+    let rolledBack: RollbackReport | undefined;
+    if (tx) {
+      const rollback = await rollbackBounded(tx, journalBusy, rollbackMs, warnings);
+      journalBusy = rollback.done;
+      rolledBack = rollback.report;
+    }
     return {
       ok: false,
       error: { kind: 'internal', name: 'InternalError', message: errorMessage(err) },
@@ -292,8 +329,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     deps.signal?.removeEventListener('abort', onExternalAbort);
     if (tx) {
       const journal = tx;
-      // Disposing only releases the journal; do not let it hold the result.
-      await bounded(() => journal.dispose(), { ms: graceMs }).catch(() => undefined);
+      // Released only after every commit and the rollback have ended; it never holds the result.
+      void Promise.resolve(journalBusy).catch(() => undefined).then(() => journal.dispose()).catch(() => undefined);
     }
   }
 }
