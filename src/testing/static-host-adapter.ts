@@ -28,6 +28,7 @@ export type HookBehavior =
 
 export interface StaticHostAdapterOptions {
   readonly host?: HostKind;
+  readonly recordCalls?: boolean;
   readonly rules?: readonly StaticRule[];
   /** Fixed behavior, or one chosen per call. Default allow. */
   readonly hook?: HookBehavior | ((prepared: PreparedCall) => HookBehavior);
@@ -64,7 +65,7 @@ export class StaticHostAdapter implements HostAdapter<null> {
   }
 
   checkStatic(prepared: PreparedCall, ctx: SessionContext): Decision {
-    this.staticChecked.push(prepared);
+    if (this.#opts.recordCalls !== false) this.staticChecked.push(prepared);
     const verdicts = (this.#opts.rules ?? []).map((rule) => rule(prepared, ctx));
     const deny = verdicts.find((v) => v?.kind === 'deny');
     if (deny) return { kind: 'deny', source: 'rule', reason: deny.reason };
@@ -74,7 +75,7 @@ export class StaticHostAdapter implements HostAdapter<null> {
   }
 
   authorize(prepared: PreparedCall, _ctx: SessionContext, _policy: PolicySnapshot<null>, signal: AbortSignal): Promise<Decision> {
-    this.authorized.push(prepared);
+    if (this.#opts.recordCalls !== false) this.authorized.push(prepared);
     const hook = this.#opts.hook;
     const behavior: HookBehavior = typeof hook === 'function' ? hook(prepared) : (hook ?? { kind: 'allow' });
     switch (behavior.kind) {
@@ -99,6 +100,6 @@ export class StaticHostAdapter implements HostAdapter<null> {
   }
 
   async postToolUse(prepared: PreparedCall, result: ToolResult): Promise<void> {
-    this.postToolUses.push({ prepared, result });
+    if (this.#opts.recordCalls !== false) this.postToolUses.push({ prepared, result });
   }
 }

@@ -1,3 +1,4 @@
+import { setImmediate as yieldToLoop, setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
 import type { CallReply, Sandbox, SandboxOutcome, SandboxRunOptions } from '../core/types.js';
 
@@ -47,9 +48,18 @@ class Stopped extends Error {}
  */
 export class FakeSandbox implements Sandbox {
   readonly runs: string[] = [];
+  readonly #recordRuns: boolean;
+  readonly #now: () => number;
+
+  /** `now` is a monotonic clock in ms, for tests. */
+  constructor({ recordRuns = true, now = () => performance.now() }: { readonly recordRuns?: boolean; readonly now?: () => number } = {}) {
+    this.#recordRuns = recordRuns;
+    this.#now = now;
+  }
 
   async run(code: string, opts: SandboxRunOptions): Promise<SandboxOutcome> {
-    this.runs.push(code);
+    const deadline = this.#now() + opts.timeoutMs;
+    if (this.#recordRuns) this.runs.push(code);
     let steps: FakeStep[];
     try {
       steps = ScriptSchema.parse(JSON.parse(code));
@@ -58,20 +68,29 @@ export class FakeSandbox implements Sandbox {
     }
 
     let timedOut = false;
-    const stopped = new Promise<never>((_resolve, reject) => {
-      const onAbort = (): void => reject(new Stopped());
-      if (opts.signal.aborted) onAbort();
-      else opts.signal.addEventListener('abort', onAbort, { once: true });
-      setTimeout(() => {
+    // Aborted when the run ends, so neither the deadline nor a sleep outlives it.
+    const finished = new AbortController();
+    const signal = AbortSignal.any([opts.signal, finished.signal]);
+    const stopped = sleep(Math.max(0, deadline - this.#now()), undefined, { signal }).then(
+      () => {
         timedOut = true;
-        reject(new Stopped());
-      }, opts.timeoutMs).unref();
-    });
+        throw new Stopped();
+      },
+      () => {
+        throw new Stopped();
+      },
+    );
     stopped.catch(() => undefined);
+    // A run of steps that never yields gives no timer a chance to fire, so the clock is checked too.
+    const check = (): void => {
+      if (this.#now() >= deadline) timedOut = true;
+      if (timedOut || opts.signal.aborted) throw new Stopped();
+    };
 
     const state = { throwOnError: false };
     const exec = async (step: FakeStep): Promise<unknown> => {
       if ('tool' in step) {
+        check();
         const reply: CallReply = await opts.onCall(step.tool, step.args);
         if (reply.ok) return reply.value;
         if (state.throwOnError) throw new ScriptFailure(reply.error.name, reply.error.message);
@@ -84,7 +103,7 @@ export class FakeSandbox implements Sandbox {
       }
       if ('throw' in step) throw new ScriptFailure('Error', step.throw);
       if ('sleep' in step) {
-        await new Promise((resolve) => setTimeout(resolve, step.sleep));
+        await sleep(step.sleep, undefined, { signal }).catch(() => Promise.reject(new Stopped()));
         return null;
       }
       state.throwOnError = step.throwOnError;
@@ -93,7 +112,12 @@ export class FakeSandbox implements Sandbox {
 
     try {
       const results: unknown[] = [];
-      for (const step of steps) results.push(await Promise.race([exec(step), stopped]));
+      for (const step of steps) {
+        await yieldToLoop();
+        check();
+        results.push(await Promise.race([exec(step), stopped]));
+      }
+      check();
       return { ok: true, value: results };
     } catch (err) {
       if (err instanceof Stopped) {
@@ -103,6 +127,8 @@ export class FakeSandbox implements Sandbox {
       }
       const e = err instanceof Error ? err : new Error(String(err));
       return { ok: false, kind: 'error', error: { name: e.name, message: e.message } };
+    } finally {
+      finished.abort();
     }
   }
 }
