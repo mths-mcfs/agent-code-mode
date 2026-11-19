@@ -1,6 +1,6 @@
 import type { CallReply, LogLevel, SandboxOutcome } from '../core/types.js';
 import { errorMessage } from '../core/errors.js';
-import { childMessageSchema, type ChildMessage, type ParentMessage, type SandboxLimits } from './protocol.js';
+import { childMessageSchema, OOM_EXIT_CODE, type ChildMessage, type ParentMessage, type SandboxLimits } from './protocol.js';
 
 /** What a `ChildSession` needs from the outside world. */
 export interface SessionHooks {
@@ -141,9 +141,12 @@ export class ChildSession {
     this.#stderr = (this.#stderr + chunk.toString('utf8')).slice(-STDERR_TAIL_CHARS);
   }
 
-  /** The child exited. Before an outcome, that is a crash. */
+  /** The child exited. Before an outcome, that is a crash, unless the child reports that its engine ran out of memory. */
   exited(code: number | null, signal: string | null): void {
     if (this.#finished) return;
+    if (code === OOM_EXIT_CODE && signal === null) {
+      return this.finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory: the script needed more memory than memoryBytes allows' } });
+    }
     const how = signal !== null ? `signal ${signal}` : `code ${String(code)}`;
     const tail = this.#stderr.trim();
     this.kill(`sandbox process exited unexpectedly (${how})${tail ? `: ${tail}` : ''}`);

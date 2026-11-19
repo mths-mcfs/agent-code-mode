@@ -32,6 +32,16 @@ declare const WebAssembly: { readonly Memory: new (descriptor: { initial: number
 const INITIAL_PAGES = 256;
 /** Largest memory the WASM build declares (2 GiB). */
 const MAX_PAGES = 32_768;
+/**
+ * Exit code that tells the parent the engine ran out of memory. The child exits with it from inside
+ * the refused memory growth, so no message can follow; must equal `OOM_EXIT_CODE` in protocol.ts.
+ */
+const OOM_EXIT_CODE = 86;
+/**
+ * Sizes the Emscripten glue tries per growth request before the allocation fails (its `_emscripten_resize_heap`
+ * retries with 20%, 10% and 5% of overgrowth); a success in between means the request was served.
+ */
+const GROW_ATTEMPTS = 3;
 
 // ---------------------------------------------------------------------------
 // Incoming messages (from the parent). Validated even though the parent is the
@@ -290,8 +300,6 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
       if (typeof stack === 'string') info.stack = stack;
     } else {
       info = { name: 'Error', message: typeof e === 'string' ? e : 'Uncaught ' + inspect(e, 0, [], false) };
-      // Out of memory can leave QuickJS unable to build an error object; it then throws null.
-      if (e === null || e === undefined) info.noError = true;
     }
     return stringify(info);
   }
@@ -350,13 +358,6 @@ function isOutOfMemory(info: ErrorInfo): boolean {
 }
 
 /**
- * The WASM memory of one run. QuickJS-ng's own accounting
- * (`runtime.setMemoryLimit`) undercounts in this WASM build because
- * `malloc_usable_size` is unavailable, so the hard limit is the maximum of
- * the WebAssembly memory itself: past it, allocations fail and QuickJS throws
- * "out of memory".
- */
-/**
  * The variant package's types describe its CommonJS entry, while Node loads
  * its ESM entry, whose default export is the variant itself. Checked at
  * runtime instead of cast.
@@ -367,6 +368,31 @@ function syncVariant(candidate: unknown): QuickJSSyncVariant {
   }
   if (typeof candidate === 'object' && candidate !== null && 'default' in candidate) return syncVariant(candidate.default);
   throw new Error('the QuickJS variant package did not load as expected');
+}
+
+/**
+ * Makes running out of memory fatal for the run. QuickJS-ng's own accounting (`runtime.setMemoryLimit`) undercounts
+ * in this WASM build because `malloc_usable_size` is unavailable, so the hard limit is the maximum of the WebAssembly
+ * memory itself. When every size the glue tries for one growth request is refused,
+ * the allocation is about to fail and the engine would throw into the script (an InternalError, or `null` when it
+ * cannot even build one). Instead the process exits right here, inside the refused growth: control never returns to
+ * the WASM code, so no catch, finally or later statement of the script runs. QuickJS's interrupt handler cannot do
+ * this: the engine polls it once every 10,000 interrupt points, long after a catch block has run.
+ */
+function exitOnRefusedGrowth(memory: WasmMemory): void {
+  const grow = memory.grow.bind(memory);
+  let refused = 0;
+  memory.grow = (deltaPages) => {
+    try {
+      const previous = grow(deltaPages);
+      refused = 0;
+      return previous;
+    } catch (err) {
+      refused++;
+      if (refused >= GROW_ATTEMPTS) process.exit(OOM_EXIT_CODE);
+      throw err;
+    }
+  };
 }
 
 /** Pages of WASM memory a run may use: all of it, initial memory included, fits in `memoryBytes`. */
@@ -381,27 +407,12 @@ class VmRun {
   readonly #deadline: number;
   readonly #pending = new Map<number, QuickJSDeferredPromise>();
   readonly #timer: NodeJS.Timeout;
-  /** The last attempt to grow the WASM memory failed: the engine's allocator is out of memory. */
-  #growFailed = false;
   #nextId = 1;
   #logBytes = 0;
   #logCapped = false;
   #done = false;
 
-  constructor(qjs: QuickJSWASMModule, memory: WasmMemory, start: StartMessage) {
-    // The Emscripten glue grows the heap through `grow` and retries smaller sizes when one fails; an allocation
-    // fails only when its last attempt throws, and any later successful growth means the engine recovered.
-    const grow = memory.grow.bind(memory);
-    memory.grow = (deltaPages) => {
-      try {
-        const previous = grow(deltaPages);
-        this.#growFailed = false;
-        return previous;
-      } catch (err) {
-        this.#growFailed = true;
-        throw err;
-      }
-    };
+  constructor(qjs: QuickJSWASMModule, start: StartMessage) {
     this.#limits = start.limits;
     this.#deadline = Date.now() + start.timeoutMs;
     this.#rt = qjs.newRuntime();
@@ -540,10 +551,8 @@ class VmRun {
         raw = 'the script failed with an unreadable error';
       }
       const info = toErrorInfo(raw);
+      // An explicit memory error with no refused growth behind it (e.g. one allocation over the QuickJS limit).
       if (info.name === 'InternalError' && isOutOfMemory(info)) return this.#finish({ ok: false, kind: 'oom', error: info });
-      // Out of memory can leave QuickJS unable to build an error object; the script then sees `null` thrown.
-      const noError = typeof raw === 'object' && raw !== null && 'noError' in raw && raw.noError === true;
-      if (noError && this.#growFailed) return this.#finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
       this.#finish({ ok: false, kind: 'error', error: info });
     });
   }
@@ -579,8 +588,7 @@ class VmRun {
     if (Date.now() > this.#deadline || info.message === 'interrupted') {
       return this.#finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: 'the script did not finish within its time limit' } });
     }
-    const concrete = LooseErrorSchema.safeParse(raw).success && info.message !== '';
-    this.#finish({ ok: false, kind: isOutOfMemory(info) || (!concrete && this.#growFailed) ? 'oom' : 'error', error: info.message === '' ? { ...info, message: 'out of memory' } : info });
+    this.#finish({ ok: false, kind: isOutOfMemory(info) ? 'oom' : 'error', error: info });
   }
 
   /** A host-side exception (e.g. a WASM trap when an allocation inside the bindings layer fails). */
@@ -590,7 +598,7 @@ class VmRun {
     if (err instanceof RangeError && /call stack/i.test(message)) {
       return this.#finish({ ok: false, kind: 'error', error: { name: 'RangeError', message: 'Maximum call stack size exceeded' } });
     }
-    const oom = this.#growFailed || /out of memory/i.test(message);
+    const oom = /out of memory/i.test(message);
     this.#finish({ ok: false, kind: oom ? 'oom' : 'error', error: { name: oom ? 'InternalError' : 'SandboxError', message: oom ? 'out of memory' : message.slice(0, MAX_ERROR_CHARS) } });
   }
 
@@ -633,9 +641,10 @@ function onMessage(message: IncomingMessage): void {
       return exitWith({ ok: false, kind: 'oom', error: { name: 'InternalError', message: `memoryBytes ${message.limits.memoryBytes} is below the ${INITIAL_PAGES * WASM_PAGE_BYTES} bytes the QuickJS build needs` } });
     }
     const memory = new WebAssembly.Memory({ initial: INITIAL_PAGES, maximum: pages });
+    exitOnRefusedGrowth(memory);
     newQuickJSWASMModuleFromVariant(newVariant(syncVariant(variantModule), { wasmMemory: memory })).then(
       (qjs) => {
-        run = new VmRun(qjs, memory, message);
+        run = new VmRun(qjs, message);
         run.begin(message.code);
         for (const reply of early.splice(0)) run.reply(reply);
       },

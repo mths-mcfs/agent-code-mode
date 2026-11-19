@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
 import { childEntryPath, childEnv, childExecArgv, permissionFlag, QuickJsSandbox, readGrants, SandboxUnavailableError, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
 
@@ -346,6 +346,67 @@ describe('QuickJsSandbox: no ambient authority', () => {
     expect(files).toContain(join(process.cwd(), 'package.json'));
   });
 
+  describe('read grants for probed paths', () => {
+    let root = '';
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), 'acm-grants-'));
+    });
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    /** Builds `<root>/a/b/entry` (the child entry directory) with a regular package.json at `<root>/a`; returns the entry. */
+    function layout(): { entry: string; probed: string; above: string } {
+      const entry = join(root, 'a', 'b', 'entry');
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(root, 'a', 'package.json'), '{}');
+      return { entry, probed: join(root, 'a', 'b', 'package.json'), above: join(root, 'a', 'package.json') };
+    }
+
+    it('grants an absent ancestor manifest and keeps walking to the first regular one', () => {
+      const { entry, probed, above } = layout();
+      const { files } = readGrants(entry, []);
+      expect(files).toContain(probed);
+      expect(files).toContain(above);
+    });
+
+    it('never grants an ancestor manifest that is a dangling link', () => {
+      const { entry, probed, above } = layout();
+      symlinkSync(join(root, 'missing-target.json'), probed);
+      const { files, dirs } = readGrants(entry, []);
+      expect([...files, ...dirs]).not.toContain(probed);
+      expect(files).not.toContain(above);
+    });
+
+    it('never grants an ancestor manifest that links to a regular file', () => {
+      const { entry, probed } = layout();
+      writeFileSync(join(root, 'target.json'), '{}');
+      symlinkSync(join(root, 'target.json'), probed);
+      const { files, dirs } = readGrants(entry, []);
+      expect([...files, ...dirs]).not.toContain(probed);
+    });
+
+    it('never grants a directory in place of an ancestor manifest', () => {
+      const { entry, probed } = layout();
+      mkdirSync(probed);
+      const { files, dirs } = readGrants(entry, []);
+      expect([...files, ...dirs]).not.toContain(probed);
+    });
+
+    it('never grants a node_modules lookup entry that is a link without a package, and still finds the package above it', () => {
+      const { entry } = layout();
+      const linked = join(root, 'a', 'b', 'node_modules', 'dep');
+      mkdirSync(dirname(linked), { recursive: true });
+      symlinkSync(join(root, 'missing-dep'), linked);
+      const real = join(root, 'a', 'node_modules', 'dep');
+      mkdirSync(real, { recursive: true });
+      writeFileSync(join(real, 'package.json'), '{}');
+      const { files, dirs } = readGrants(entry, ['dep']);
+      expect([...files, ...dirs]).not.toContain(linked);
+      expect(dirs).toContain(real);
+    });
+  });
+
   it('never lets the script observe a canary secret from the server env', async () => {
     const canary = `canary-${Math.random().toString(36).slice(2)}-${Date.now()}`;
     process.env.ACM_TEST_CANARY = canary;
@@ -517,6 +578,45 @@ describe('QuickJsSandbox: resource abuse', () => {
     const arr = await run('return new Array(1e8);');
     expect(failure(arr.outcome).error.name).toBe('ResultTooLarge');
     expect(arr.elapsedMs).toBeLessThan(5_000);
+  });
+});
+
+describe('QuickJsSandbox: out of memory is fatal', () => {
+  const MEMORY = 32 * 1024 * 1024;
+  /** Fills the heap with small objects: the engine's growth is refused and it could not even build an error object. */
+  const objectBomb = 'for (;;) a.push({ a: 1, b: [1, 2, 3] });';
+  /** Fills the heap with 100 kB strings: the engine could still build an InternalError for the script to catch. */
+  const stringBomb = 'for (let i = 0; ; i++) a.push("x".repeat(100000) + i);';
+  /** Visible effects a catch block would leave if it ran: it frees the heap first, then logs and calls a binding. */
+  const caught = 'a = null; console.log("catch ran"); await read({ path: "after-oom" });';
+
+  it('(1) ends an uncaught allocation bomb as oom', async () => {
+    const { outcome } = await run(`let a = []; ${objectBomb}`, { memoryBytes: MEMORY });
+    expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: expect.stringContaining('out of memory') } });
+  });
+
+  it('(2) ends the run at the refused growth: a catch never runs, whatever the script throws or returns next', async () => {
+    for (const [bomb, after] of [[objectBomb, 'throw null;'], [stringBomb, 'throw undefined;'], [objectBomb, 'return "recovered";']]) {
+      const { outcome, logs, calls } = await run(`let a = []; try { ${bomb} } catch (e) { ${caught} } finally { console.log("finally ran"); }\n${after}`, { memoryBytes: MEMORY });
+      expect(logs).toEqual([]);
+      expect(calls).toEqual([]);
+      expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError' } });
+    }
+  });
+
+  it('(3) reports throw null or undefined as a script error when no growth was refused', async () => {
+    for (const empty of ['null', 'undefined']) {
+      expect(failure((await run(`throw ${empty};`, { memoryBytes: MEMORY })).outcome)).toMatchObject({ kind: 'error', error: { name: 'Error', message: `Uncaught ${empty}` } });
+      // A memory error the QuickJS limit raises before any growth is an ordinary, catchable error.
+      const { outcome, logs } = await run(`try { "x".repeat(1e9); } catch (e) { console.log(e.name); } throw ${empty};`, { memoryBytes: MEMORY });
+      expect(failure(outcome)).toMatchObject({ kind: 'error', error: { message: `Uncaught ${empty}` } });
+      expect(logs.map((l) => l.text)).toEqual(['InternalError']);
+    }
+  });
+
+  it('(4) keeps an explicit memory error as oom', async () => {
+    const { outcome } = await run('return "x".repeat(1e9).length;', { memoryBytes: MEMORY });
+    expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
   });
 });
 

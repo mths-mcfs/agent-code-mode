@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, type Stats } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -88,22 +88,43 @@ const CHILD_PACKAGES = ['quickjs-emscripten-core', '@jitl/quickjs-ng-wasmfile-re
 const packageName = z.string().regex(/^(?:@[a-z\d][a-z\d._~-]*\/)?[a-z\d][a-z\d._~-]*$/i);
 const ManifestSchema = z.object({ dependencies: z.record(packageName, z.string()).optional() });
 
+/** What a probed path is, read without following a link at the path itself. */
+type ProbedEntry = 'absent' | 'file' | 'other';
+
+/**
+ * Classifies a path the child's Node may look up. `absent` (lstat fails with ENOENT) and `file` (a regular file that
+ * is not a link) may be granted: neither can send a read elsewhere. Anything else is `other` and is never granted:
+ * a link, dangling or not, could point at any file now or later, and a directory grant would cover its whole tree.
+ * If Node does read such a path, it gets ERR_ACCESS_DENIED. Every read grant of a probed path goes through here.
+ */
+function probeEntry(path: string): ProbedEntry {
+  let stat: Stats;
+  try {
+    stat = lstatSync(path);
+  } catch (err) {
+    return err instanceof Error && 'code' in err && err.code === 'ENOENT' ? 'absent' : 'other';
+  }
+  return stat.isFile() ? 'file' : 'other';
+}
+
 /**
  * What the child may read, with symlinks preserved: its entry directory, the directories of the packages it loads
- * and, as exact paths, each package.json and `node_modules/<name>` candidate Node looks up on the way.
+ * and, as exact paths, each package.json and `node_modules/<name>` candidate Node looks up on the way that
+ * `probeEntry` allows. A package directory is granted at the path Node loads it from, which is a link under pnpm or
+ * `npm link`.
  */
-export function readGrants(): { readonly dirs: string[]; readonly files: string[] } {
-  const dirs = new Set([here]);
+export function readGrants(from: string = here, packages: readonly string[] = CHILD_PACKAGES): { readonly dirs: string[]; readonly files: string[] } {
+  const dirs = new Set([from]);
   const files = new Set<string>();
-  for (let dir = here; ; dir = dirname(dir)) {
+  // The nearest package.json above the entry; the walk ends at the first path that exists in any form.
+  for (let dir = from; ; dir = dirname(dir)) {
     const path = join(dir, 'package.json');
-    const stat = statSync(path, { throwIfNoEntry: false });
-    if (stat && !stat.isFile()) throw new SandboxUnavailableError('Sandbox package metadata is not a regular file');
-    files.add(path);
-    if (stat || dirname(dir) === dir) break;
+    const entry = probeEntry(path);
+    if (entry !== 'other') files.add(path);
+    if (entry !== 'absent' || dirname(dir) === dir) break;
   }
-  const visit = (from: string, name: string): void => {
-    for (let dir = from; ; dir = dirname(dir)) {
+  const visit = (start: string, name: string): void => {
+    for (let dir = start; ; dir = dirname(dir)) {
       const candidate = join(dir, 'node_modules', name);
       if (existsSync(join(candidate, 'package.json'))) {
         if (dirs.has(candidate)) return;
@@ -112,12 +133,12 @@ export function readGrants(): { readonly dirs: string[]; readonly files: string[
         for (const dependency of Object.keys(manifest.dependencies ?? {})) visit(candidate, dependency);
         return;
       }
-      if (lstatSync(candidate, { throwIfNoEntry: false })) throw new SandboxUnavailableError(`Sandbox dependency ${name} has an unexpected lookup entry`);
-      files.add(candidate);
+      // Not a package: Node's lookup goes on to the parent directory.
+      if (probeEntry(candidate) !== 'other') files.add(candidate);
       if (dirname(dir) === dir) return;
     }
   };
-  for (const name of CHILD_PACKAGES) visit(here, name);
+  for (const name of packages) visit(from, name);
   // A grant inside a granted directory is redundant, and Node's permission tree can lose a shorter grant added after a longer one.
   const outside = (path: string): boolean => ![...dirs].some((dir) => path.startsWith(dir + sep));
   return { dirs: [...dirs].filter(outside), files: [...files].filter(outside) };
@@ -231,7 +252,8 @@ export class QuickJsSandbox implements Sandbox {
     const writer = new BoundedWriter(stdin, {
       maxPendingBytes: positive(o.maxPendingReplyBytes, DEFAULTS.maxPendingReplyBytes),
       maxTotalBytes: positive(o.maxReplyBytes, DEFAULTS.maxReplyBytes),
-      expired: () => session?.expired() ?? false,
+      deadline,
+      onExpired: () => session?.timeOut(),
       onOverflow: (message) => session?.finish({ ok: false, kind: 'oom', error: { name: 'ReplyBufferFull', message } }),
     });
     const active = new ChildSession({
@@ -279,11 +301,11 @@ export class QuickJsSandbox implements Sandbox {
     child.on('close', (exitCode, signal) => active.exited(exitCode, signal));
 
     const timer = setTimeout(() => active.timeOut(), Math.max(0, deadline - performance.now()));
-    if (!active.finished && !active.expired()) {
-      // `start` has its own size limit; the reply quotas count only binding results.
+    if (!active.finished) {
+      // `start` has its own size limit; the reply quotas count only binding results. The writer checks the deadline.
       const start = Buffer.from(`${JSON.stringify({ type: 'start', code, timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), limits } satisfies ParentMessage)}\n`, 'utf8');
       if (start.length > MAX_START_BYTES) active.kill(`the script is larger than ${MAX_START_BYTES} bytes`);
-      else if (!active.expired()) stdin.write(start);
+      else writer.writeStart(start);
     }
 
     return active.outcome.finally(() => {

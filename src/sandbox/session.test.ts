@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
-import type { ParentMessage, SandboxLimits } from './protocol.js';
+import { OOM_EXIT_CODE, type ParentMessage, type SandboxLimits } from './protocol.js';
 import { ChildSession } from './session.js';
 
 const LIMITS: SandboxLimits = {
@@ -250,6 +250,15 @@ describe('ChildSession: hostile child messages', () => {
     const message = await killed(t.session);
     expect(message).toContain('exited unexpectedly (code 134)');
     expect(message).toContain('something broke');
+  });
+
+  it('ends the run as oom when the child exits with the out-of-memory code, and as killed when it is signalled', async () => {
+    const t = setup();
+    t.session.exited(OOM_EXIT_CODE, null);
+    expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'oom', error: { name: 'InternalError' } });
+    const signalled = setup();
+    signalled.session.exited(OOM_EXIT_CODE, 'SIGKILL');
+    expect(await killed(signalled.session)).toContain('signal SIGKILL');
   });
 
   it('answers a throwing onCall with a tool error instead of crashing', async () => {

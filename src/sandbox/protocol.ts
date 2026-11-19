@@ -11,6 +11,12 @@
 import { z } from 'zod';
 import type { CallReply } from '../core/types.js';
 
+/**
+ * Exit code of a child whose engine ran out of memory: it exits from inside the refused memory growth, before any
+ * more script code runs, so no `done` message comes. Must equal `OOM_EXIT_CODE` in child.ts.
+ */
+export const OOM_EXIT_CODE = 86;
+
 /** Limits of one run, sent to the child in the `start` message. */
 export interface SandboxLimits {
   /** Ceiling of the WASM memory of the run, the memory the QuickJS build allocates up front included. */
