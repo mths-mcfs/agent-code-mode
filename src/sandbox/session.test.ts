@@ -11,9 +11,10 @@ const LIMITS: SandboxLimits = {
   maxLogLineChars: 50,
   maxResultChars: 500,
   maxArgsChars: 200,
+  maxPendingOutputBytes: 10_000,
 };
 
-function setup(onCall?: (tool: string, args: unknown) => Promise<CallReply>) {
+function setup(onCall?: (tool: string, args: unknown) => Promise<CallReply>, maxTotalBytes = 100_000, deadline = Infinity) {
   const sent: ParentMessage[] = [];
   const logs: { level: LogLevel; text: string }[] = [];
   const calls: { tool: string; args: unknown }[] = [];
@@ -21,6 +22,9 @@ function setup(onCall?: (tool: string, args: unknown) => Promise<CallReply>) {
   const session = new ChildSession({
     limits: LIMITS,
     maxFrameBytes: 1_000,
+    maxTotalBytes,
+    deadline,
+    timeoutMs: 1_000,
     hooks: {
       onCall: (tool, args) => {
         calls.push({ tool, args });
@@ -83,10 +87,10 @@ describe('ChildSession: valid traffic', () => {
     expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
   });
 
-  it('drops log output past the cap without killing the child', () => {
+  it('kills a child that sends console output past the cap and the room for its truncation note', async () => {
     const t = setup();
     for (let i = 0; i < 100; i++) t.line({ type: 'log', level: 'log', text: 'x'.repeat(40) });
-    expect(t.session.finished).toBe(false);
+    expect(await killed(t.session)).toContain('console output');
     const bytes = t.logs.reduce((n, l) => n + l.text.length + 1, 0);
     expect(bytes).toBeLessThanOrEqual(LIMITS.maxLogBytes + 1_024);
     expect(t.logs.length).toBeLessThan(100);
@@ -107,6 +111,30 @@ describe('ChildSession: hostile child messages', () => {
     const t = setup();
     t.line({ type: 'log', level: 'log', text: 'y'.repeat(300) });
     expect(await killed(t.session)).toContain('invalid message');
+  });
+
+  it('ends the run once the child sent more bytes than the run budget, before decoding them', async () => {
+    const t = setup(() => new Promise<CallReply>(() => undefined), 300);
+    for (let id = 1; id <= 3; id++) t.line({ type: 'call', id, tool: 'read', args: JSON.stringify({ path: 'p'.repeat(60) }) });
+    expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'oom', error: { name: 'OutputLimit' } });
+    expect(t.calls).toHaveLength(2);
+  });
+
+  it('handles no frame once the deadline has passed', async () => {
+    const t = setup(undefined, 100_000, performance.now() - 1);
+    t.line({ type: 'log', level: 'log', text: 'late' });
+    expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'timeout', error: { name: 'Timeout' } });
+    expect(t.logs).toEqual([]);
+  });
+
+  it('kills on a line that is not valid UTF-8 and on an empty line', async () => {
+    const t = setup();
+    t.session.feed(Buffer.concat([Buffer.from('{"type":"log","level":"log","text":"a'), Buffer.from([0xff]), Buffer.from('"}\n')]));
+    expect(await killed(t.session)).toContain('not UTF-8');
+    expect(t.logs).toEqual([]);
+    const empty = setup();
+    empty.session.feed(Buffer.from('\n'));
+    expect(await killed(empty.session)).toContain('not JSON');
   });
 
   it('kills on a line that is not JSON', async () => {

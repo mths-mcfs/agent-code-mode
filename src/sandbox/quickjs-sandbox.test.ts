@@ -2,10 +2,10 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
-import { childEntryPath, childEnv, childExecArgv, permissionFlag, QuickJsSandbox, SandboxUnavailableError, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
+import { childEntryPath, childEnv, childExecArgv, permissionFlag, QuickJsSandbox, readGrants, SandboxUnavailableError, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
 
 interface Recorded {
   readonly outcome: SandboxOutcome;
@@ -190,6 +190,25 @@ describe('QuickJsSandbox: script semantics', () => {
     ]);
   });
 
+  it('reports an error whose name or message getter throws', async () => {
+    const f = failure((await run('const e = new Error("x"); Object.defineProperty(e, "message", { get() { throw 1; } }); throw e;')).outcome);
+    expect(f.kind).toBe('error');
+    expect(f.error).toMatchObject({ name: 'Error', message: '[unreadable message]' });
+  });
+
+  it('formats arrays in console output without running their getters and keeps text after a NUL', async () => {
+    const { outcome, logs } = await run('const a = [1, 2]; let reads = 0; Object.defineProperty(a, 1, { get() { reads++; return 3; } }); console.log(a); console.log("a\\u0000b"); return reads;');
+    expect(value(outcome)).toBe(0);
+    expect(logs.map((l) => l.text)).toEqual(['[ 1, [Getter/Setter] ]', 'a\u0000b']);
+  });
+
+  it('keeps a concrete script error when the WASM memory starts close to its maximum, and reports oom below it', async () => {
+    const thrown = failure((await run('throw new Error("boom");', { memoryBytes: 17 * 1024 * 1024 })).outcome);
+    expect(thrown).toMatchObject({ kind: 'error', error: { name: 'Error', message: 'boom' } });
+    const small = failure((await run('return 1;', { memoryBytes: 1024 * 1024 })).outcome);
+    expect(small).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: expect.stringContaining('below') } });
+  });
+
   it('fails fast when the script waits on a promise nothing can settle', async () => {
     const { outcome, elapsedMs } = await run('await new Promise(() => {});', { timeoutMs: 10_000 });
     expect(failure(outcome).error.name).toBe('Deadlock');
@@ -311,17 +330,23 @@ describe('QuickJsSandbox: no ambient authority', () => {
     expect(permissionFlag(new Set(['--experimental-permission']))).toBe('--experimental-permission');
     const legacy = childExecArgv('child.js', 64, new Set(['--experimental-permission']));
     expect(legacy).toContain('--experimental-permission');
-    const grants = legacy.filter((flag) => flag.startsWith('--allow-fs-read='));
-    expect(grants).toHaveLength(1);
-    expect(grants[0]?.slice('--allow-fs-read='.length).split(',').every((path) => path.endsWith('*'))).toBe(true);
+    expect(legacy).toContain('--preserve-symlinks');
+    expect(legacy).toContain(`--allow-fs-read=${join(dirname(childEntryPath()), '*')}`);
     expect(() => childExecArgv('child.js', 64, new Set())).toThrow(SandboxUnavailableError);
     expect(permissionFlag()).toBeDefined();
+  });
+
+  it('lets the child read only its own entry directory and the packages it loads', () => {
+    const { dirs, files } = readGrants();
+    const packages = ['@jitl/quickjs-ffi-types', '@jitl/quickjs-ng-wasmfile-release-sync', 'quickjs-emscripten-core', 'zod'];
+    expect(dirs.sort()).toEqual([...packages.map((name) => join(process.cwd(), 'node_modules', name)), dirname(childEntryPath())].sort());
+    expect(files).toContain(join(process.cwd(), 'package.json'));
   });
 
   it('never lets the script observe a canary secret from the server env', async () => {
     const canary = `canary-${Math.random().toString(36).slice(2)}-${Date.now()}`;
     process.env.ACM_TEST_CANARY = canary;
-    let childEnviron = '';
+    let childEnviron: string | undefined;
     try {
       let pid = 0;
       const recorded = await run(
@@ -339,7 +364,7 @@ describe('QuickJsSandbox: no ambient authority', () => {
         {
           sandbox: { onSpawn: (p) => (pid = p) },
           onCall: async (tool) => {
-            if (process.platform === 'linux' && pid > 0 && childEnviron === '') childEnviron = readFileSync(`/proc/${pid}/environ`, 'utf8');
+            if (process.platform === 'linux' && pid > 0 && childEnviron === undefined) childEnviron = readFileSync(`/proc/${pid}/environ`, 'utf8');
             return { ok: false, error: { name: 'ToolError', code: 'tool-error', message: `${tool} failed` } };
           },
         },
@@ -348,6 +373,7 @@ describe('QuickJsSandbox: no ambient authority', () => {
       expect(recorded.outcome.ok).toBe(true);
       expect(everything).not.toContain(canary);
       if (process.platform === 'linux') {
+        expect(childEnviron).toBeTypeOf('string');
         expect(childEnviron).not.toContain(canary);
         expect(childEnviron).not.toContain('PATH=');
       }
@@ -414,6 +440,19 @@ describe('QuickJsSandbox: resource abuse', () => {
     const { outcome, elapsedMs } = await run('await read({ path: "slow" });', { timeoutMs: 600, onCall: () => new Promise<CallReply>(() => undefined) });
     expect(failure(outcome).kind).toBe('timeout');
     expect(elapsedMs).toBeLessThan(600 + 1_000);
+  });
+
+  it('counts the time spent starting the child against the deadline', async () => {
+    let spawnReturnedAt = 0;
+    const onSpawn = (): void => {
+      const until = performance.now() + 400;
+      while (performance.now() < until);
+      spawnReturnedAt = performance.now();
+    };
+    const { outcome, calls } = await run('await read({ path: "x" }); return 1;', { timeoutMs: 300, sandbox: { onSpawn } });
+    expect(failure(outcome)).toMatchObject({ kind: 'timeout', error: { message: 'the script did not finish within 300 ms' } });
+    expect(calls).toEqual([]);
+    expect(performance.now() - spawnReturnedAt).toBeLessThan(100);
   });
 
   it('reports an allocation bomb as oom', async () => {
@@ -496,6 +535,12 @@ describe('QuickJsSandbox: reply buffering', () => {
     expect(elapsedMs).toBeLessThan(5_000);
     const after = process.memoryUsage();
     expect(after.external + after.arrayBuffers - (before.external + before.arrayBuffers)).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it('does not count the script itself against the reply quotas', async () => {
+    const code = `// ${'p'.repeat(8_192)}\nreturn await read({ path: 'x' });`;
+    const { outcome } = await run(code, { sandbox: { maxReplyBytes: 4_096, maxPendingReplyBytes: 4_096 } });
+    expect(value(outcome)).toEqual({ tool: 'read', args: { path: 'x' } });
   });
 
   it('caps the total bytes of binding results per run', async () => {

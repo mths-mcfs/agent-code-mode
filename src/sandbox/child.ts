@@ -47,6 +47,7 @@ const LimitsSchema = z.strictObject({
   maxLogLineChars: int,
   maxResultChars: int,
   maxArgsChars: int,
+  maxPendingOutputBytes: int,
 });
 const BindingErrorSchema = z.strictObject({
   name: z.enum(['PermissionDenied', 'ToolError']),
@@ -67,8 +68,9 @@ const ParentMessageSchema = z.discriminatedUnion('type', [
 ]);
 type IncomingMessage = z.infer<typeof ParentMessageSchema>;
 
-function send(message: ChildMessage): void {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+/** Writes the final message, outside the cap of `#send`, and exits once it is flushed. */
+function exitWith(outcome: DoneOutcome): void {
+  process.stdout.write(`${JSON.stringify({ type: 'done', outcome } satisfies ChildMessage)}\n`, () => process.exit(0));
 }
 
 function fatal(message: string): never {
@@ -148,7 +150,10 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
       if (isArray(v)) {
         if (depth > 2) { seen.length--; return '[Array]'; }
         var n = v.length, shown = n > 100 ? 100 : n;
-        for (var i = 0; i < shown; i++) push(parts, inspect(v[i], depth + 1, seen, false));
+        for (var i = 0; i < shown; i++) {
+          var item = getOwnPropertyDescriptor(v, i);
+          push(parts, item === undefined ? 'undefined' : 'value' in item ? inspect(item.value, depth + 1, seen, false) : '[Getter/Setter]');
+        }
         if (n > shown) push(parts, '... ' + (n - shown) + ' more items');
         seen.length--;
         return parts.length ? '[ ' + join(parts, ', ') + ' ]' : '[]';
@@ -172,7 +177,8 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     return function () {
       var parts = [];
       for (var i = 0; i < arguments.length; i++) push(parts, inspect(arguments[i], 0, [], true));
-      hostLog(level, cut(join(parts, ' '), maxLogLineChars));
+      // JSON text: the native side reads strings up to the first NUL character.
+      hostLog(level, stringify(cut(join(parts, ' '), maxLogLineChars)));
     };
   }
   define('console', { log: logger('log'), info: logger('info'), warn: logger('warn'), error: logger('error') });
@@ -275,15 +281,17 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
   }
 
   // ---- runner ---------------------------------------------------------------
+  function readProp(o, key, fallback) { try { return o[key]; } catch (x) { return fallback; } }
   function errorInfo(e) {
     var info;
     if (isError(e)) {
-      var stack;
-      try { stack = e.stack; } catch (x) { stack = undefined; }
-      info = { name: safeString(e.name), message: safeString(e.message) };
+      var stack = readProp(e, 'stack', undefined);
+      info = { name: safeString(readProp(e, 'name', 'Error')), message: safeString(readProp(e, 'message', '[unreadable message]')) };
       if (typeof stack === 'string') info.stack = stack;
     } else {
       info = { name: 'Error', message: typeof e === 'string' ? e : 'Uncaught ' + inspect(e, 0, [], false) };
+      // Out of memory can leave QuickJS unable to build an error object; it then throws null.
+      if (e === null || e === undefined) info.noError = true;
     }
     return stringify(info);
   }
@@ -355,15 +363,15 @@ function isOutOfMemory(info: ErrorInfo): boolean {
  */
 function syncVariant(candidate: unknown): QuickJSSyncVariant {
   if (typeof candidate === 'object' && candidate !== null && 'type' in candidate && candidate.type === 'sync' && 'importFFI' in candidate && 'importModuleLoader' in candidate) {
-    return candidate as QuickJSSyncVariant;
+    if (typeof candidate.importFFI === 'function' && typeof candidate.importModuleLoader === 'function') return candidate as QuickJSSyncVariant;
   }
   if (typeof candidate === 'object' && candidate !== null && 'default' in candidate) return syncVariant(candidate.default);
   throw new Error('the QuickJS variant package did not load as expected');
 }
 
-function runMemory(memoryBytes: number): WasmMemory {
-  const maximum = Math.min(MAX_PAGES, INITIAL_PAGES + Math.ceil(memoryBytes / WASM_PAGE_BYTES));
-  return new WebAssembly.Memory({ initial: INITIAL_PAGES, maximum });
+/** Pages of WASM memory a run may use: all of it, initial memory included, fits in `memoryBytes`. */
+function memoryPages(memoryBytes: number): number {
+  return Math.min(MAX_PAGES, Math.floor(memoryBytes / WASM_PAGE_BYTES));
 }
 
 class VmRun {
@@ -382,13 +390,14 @@ class VmRun {
 
   constructor(qjs: QuickJSWASMModule, memory: WasmMemory, start: StartMessage) {
     this.#memory = memory;
-    this.#memoryMaxBytes = Math.min(MAX_PAGES, INITIAL_PAGES + Math.ceil(start.limits.memoryBytes / WASM_PAGE_BYTES)) * WASM_PAGE_BYTES;
+    this.#memoryMaxBytes = memoryPages(start.limits.memoryBytes) * WASM_PAGE_BYTES;
     this.#limits = start.limits;
     this.#deadline = Date.now() + start.timeoutMs;
     this.#rt = qjs.newRuntime();
     this.#rt.setMemoryLimit(start.limits.memoryBytes);
     this.#rt.setMaxStackSize(start.limits.stackBytes);
-    this.#rt.setInterruptHandler(() => Date.now() > this.#deadline);
+    // Also stops a script that keeps running after the run ended, so the final message can flush.
+    this.#rt.setInterruptHandler(() => this.#done || Date.now() > this.#deadline);
     this.#ctx = this.#rt.newContext();
     this.#timer = setTimeout(() => this.#finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: `the script did not finish within ${start.timeoutMs} ms` } }), start.timeoutMs);
   }
@@ -463,7 +472,7 @@ class VmRun {
       } else {
         const id = this.#nextId++;
         this.#pending.set(id, deferred);
-        send({ type: 'call', id, tool, args });
+        this.#send({ type: 'call', id, tool, args });
       }
       return handle;
     });
@@ -482,16 +491,23 @@ class VmRun {
       if (this.#logCapped || this.#done) return;
       const rawLevel = ctx.getString(levelHandle);
       const level = rawLevel === 'info' || rawLevel === 'warn' || rawLevel === 'error' ? rawLevel : 'log';
-      let text = ctx.getString(textHandle);
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(ctx.getString(textHandle));
+      } catch {
+        return;
+      }
+      if (typeof decoded !== 'string') return;
+      let text = decoded;
       if (text.length > this.#limits.maxLogLineChars) text = `${text.slice(0, this.#limits.maxLogLineChars)}... [truncated]`;
       const bytes = Buffer.byteLength(text, 'utf8') + 1;
       if (this.#logBytes + bytes > this.#limits.maxLogBytes) {
         this.#logCapped = true;
-        send({ type: 'log', level: 'warn', text: `[console output truncated: the limit of ${this.#limits.maxLogBytes} bytes was reached]` });
+        this.#send({ type: 'log', level: 'warn', text: `[console output truncated: the limit of ${this.#limits.maxLogBytes} bytes was reached]` });
         return;
       }
       this.#logBytes += bytes;
-      send({ type: 'log', level, text });
+      this.#send({ type: 'log', level, text });
     });
   }
 
@@ -515,7 +531,8 @@ class VmRun {
       const info = toErrorInfo(raw);
       if (info.name === 'InternalError' && isOutOfMemory(info)) return this.#finish({ ok: false, kind: 'oom', error: info });
       // Out of memory can leave QuickJS unable to build an error object; the script then sees `null` thrown.
-      if (this.#memoryFull()) return this.#finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
+      const noError = typeof raw === 'object' && raw !== null && 'noError' in raw && raw.noError === true;
+      if (noError && this.#memoryFull()) return this.#finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
       this.#finish({ ok: false, kind: 'error', error: info });
     });
   }
@@ -551,7 +568,8 @@ class VmRun {
     if (Date.now() > this.#deadline || info.message === 'interrupted') {
       return this.#finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: 'the script did not finish within its time limit' } });
     }
-    this.#finish({ ok: false, kind: isOutOfMemory(info) || this.#memoryFull() ? 'oom' : 'error', error: info.message === '' ? { ...info, message: 'out of memory' } : info });
+    const concrete = LooseErrorSchema.safeParse(raw).success && info.message !== '';
+    this.#finish({ ok: false, kind: isOutOfMemory(info) || (!concrete && this.#memoryFull()) ? 'oom' : 'error', error: info.message === '' ? { ...info, message: 'out of memory' } : info });
   }
 
   /** A host-side exception (e.g. a WASM trap when an allocation inside the bindings layer fails). */
@@ -563,6 +581,14 @@ class VmRun {
     }
     const oom = this.#memoryFull() || /out of memory/i.test(message);
     this.#finish({ ok: false, kind: oom ? 'oom' : 'error', error: { name: oom ? 'InternalError' : 'SandboxError', message: oom ? 'out of memory' : message.slice(0, MAX_ERROR_CHARS) } });
+  }
+
+  /** Writes one message, or ends the run when the bytes queued on stdout (not read by the parent yet) would pass the cap. */
+  #send(message: ChildMessage): void {
+    const line = `${JSON.stringify(message)}\n`;
+    const cap = this.#limits.maxPendingOutputBytes;
+    if (process.stdout.writableLength + Buffer.byteLength(line, 'utf8') <= cap) process.stdout.write(line);
+    else this.#finish({ ok: false, kind: 'oom', error: { name: 'OutputBufferFull', message: `messages the parent has not read yet exceeded ${cap} bytes` } });
   }
 
   /** True when the WASM memory grew to (nearly) its maximum. */
@@ -579,7 +605,7 @@ class VmRun {
     if (this.#done) return;
     this.#done = true;
     clearTimeout(this.#timer);
-    process.stdout.write(`${JSON.stringify({ type: 'done', outcome } satisfies ChildMessage)}\n`, () => process.exit(0));
+    exitWith(outcome);
   }
 }
 
@@ -596,7 +622,11 @@ function onMessage(message: IncomingMessage): void {
   if (message.type === 'start') {
     if (started) fatal('received a second start message');
     started = true;
-    const memory = runMemory(message.limits.memoryBytes);
+    const pages = memoryPages(message.limits.memoryBytes);
+    if (pages < INITIAL_PAGES) {
+      return exitWith({ ok: false, kind: 'oom', error: { name: 'InternalError', message: `memoryBytes ${message.limits.memoryBytes} is below the ${INITIAL_PAGES * WASM_PAGE_BYTES} bytes the QuickJS build needs` } });
+    }
+    const memory = new WebAssembly.Memory({ initial: INITIAL_PAGES, maximum: pages });
     newQuickJSWASMModuleFromVariant(newVariant(syncVariant(variantModule), { wasmMemory: memory })).then(
       (qjs) => {
         run = new VmRun(qjs, memory, message);

@@ -13,7 +13,7 @@ import type { CallReply } from '../core/types.js';
 
 /** Limits of one run, sent to the child in the `start` message. */
 export interface SandboxLimits {
-  /** QuickJS heap limit (`runtime.setMemoryLimit`). */
+  /** Ceiling of the WASM memory of the run, the memory the QuickJS build allocates up front included. */
   readonly memoryBytes: number;
   /** QuickJS stack limit (`runtime.setMaxStackSize`). */
   readonly stackBytes: number;
@@ -27,6 +27,8 @@ export interface SandboxLimits {
   readonly maxResultChars: number;
   /** Maximum length of the JSON-serialized arguments of one call, in characters. */
   readonly maxArgsChars: number;
+  /** Most bytes the child may queue on its stdout before the parent reads them; past it the run ends with outcome `oom`. */
+  readonly maxPendingOutputBytes: number;
 }
 
 /** First message of a run: what to execute and with which limits. */

@@ -17,12 +17,18 @@ export interface SessionOptions {
   readonly limits: SandboxLimits;
   /** Longest line accepted from the child, in bytes. A longer line kills the child. */
   readonly maxFrameBytes: number;
+  /** Most bytes accepted from the child's stdout over the whole run; past it the run ends with outcome `oom`. */
+  readonly maxTotalBytes: number;
+  /** `performance.now()` time past which no frame is handled; the run ends with outcome `timeout`. */
+  readonly deadline: number;
+  readonly timeoutMs: number;
   readonly hooks: SessionHooks;
 }
 
 /** Bytes of log output tolerated above `maxLogBytes` (the child's own "truncated" note). */
 const LOG_SLACK_BYTES = 1_024;
 const STDERR_TAIL_CHARS = 2_000;
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** Builds a `killed` outcome. */
 export function killedOutcome(message: string): SandboxOutcome {
@@ -42,12 +48,16 @@ export class ChildSession {
   readonly outcome: Promise<SandboxOutcome>;
   readonly #limits: SandboxLimits;
   readonly #maxFrameBytes: number;
+  readonly #maxTotalBytes: number;
+  readonly #deadline: number;
+  readonly #timeoutMs: number;
   readonly #hooks: SessionHooks;
   readonly #schema: ReturnType<typeof childMessageSchema>;
   #resolve!: (outcome: SandboxOutcome) => void;
   #finished = false;
   #chunks: Buffer[] = [];
   #chunkBytes = 0;
+  #totalBytes = 0;
   #nextCallId = 1;
   #logBytes = 0;
   #stderr = '';
@@ -55,6 +65,9 @@ export class ChildSession {
   constructor(options: SessionOptions) {
     this.#limits = options.limits;
     this.#maxFrameBytes = options.maxFrameBytes;
+    this.#maxTotalBytes = options.maxTotalBytes;
+    this.#deadline = options.deadline;
+    this.#timeoutMs = options.timeoutMs;
     this.#hooks = options.hooks;
     this.#schema = childMessageSchema(options.limits);
     this.outcome = new Promise((resolve) => {
@@ -73,6 +86,11 @@ export class ChildSession {
 
   /** Feeds raw bytes from the child's stdout. */
   feed(chunk: Buffer): void {
+    // Counted before anything is buffered or decoded: calls the dispatcher has not answered yet stay bounded too.
+    this.#totalBytes += chunk.length;
+    if (this.#totalBytes > this.#maxTotalBytes) {
+      return this.finish({ ok: false, kind: 'oom', error: { name: 'OutputLimit', message: `the script sent more than ${this.#maxTotalBytes} bytes of calls and logs` } });
+    }
     let rest = chunk;
     while (!this.#finished) {
       const nl = rest.indexOf(0x0a);
@@ -90,14 +108,19 @@ export class ChildSession {
       this.#chunks = [];
       this.#chunkBytes = 0;
       rest = rest.subarray(nl + 1);
-      this.handleLine(line.toString('utf8'));
+      let text: string;
+      try {
+        text = utf8.decode(line);
+      } catch {
+        return this.kill('sandbox sent a message that is not UTF-8');
+      }
+      this.handleLine(text);
     }
   }
 
   /** Handles one complete line from the child. */
   handleLine(line: string): void {
     if (this.#finished) return;
-    if (line.trim() === '') return;
     let raw: unknown;
     try {
       raw = JSON.parse(line);
@@ -106,6 +129,8 @@ export class ChildSession {
     }
     const parsed = this.#schema.safeParse(raw);
     if (!parsed.success) return this.kill(`sandbox sent an invalid message: ${parsed.error.issues[0]?.message ?? 'unknown issue'}`);
+    // Checked per frame: one stdout chunk can carry many frames that arrive after the deadline.
+    if (performance.now() >= this.#deadline) return this.timeOut();
     this.#handle(parsed.data);
   }
 
@@ -136,6 +161,10 @@ export class ChildSession {
 
   kill(reason: string): void {
     this.finish(killedOutcome(reason));
+  }
+
+  timeOut(): void {
+    this.finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: `the script did not finish within ${this.#timeoutMs} ms` } });
   }
 
   #handle(message: ChildMessage): void {
@@ -179,7 +208,7 @@ export class ChildSession {
 
   #log(level: LogLevel, text: string): void {
     const bytes = Buffer.byteLength(text, 'utf8') + 1;
-    if (this.#logBytes + bytes > this.#limits.maxLogBytes + LOG_SLACK_BYTES) return;
+    if (this.#logBytes + bytes > this.#limits.maxLogBytes + LOG_SLACK_BYTES) return this.kill(`sandbox sent more than ${this.#limits.maxLogBytes} bytes of console output`);
     this.#logBytes += bytes;
     this.#hooks.onLog(level, text);
   }

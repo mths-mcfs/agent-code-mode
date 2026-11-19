@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
-import { BoundedWriter } from './writer.js';
+import { describe, expect, it, vi } from 'vitest';
+import { BoundedWriter, jsonBytes } from './writer.js';
 
 /** A stream whose reader is stalled until `drainAll()`; it reports false once 10 bytes are buffered. */
 class StalledStream extends EventEmitter {
@@ -42,6 +42,20 @@ describe('BoundedWriter', () => {
     expect(writer.pendingBytes).toBeLessThanOrEqual(50);
     expect(overflows).toHaveLength(1);
     expect(overflows[0]).toContain('not read yet');
+  });
+
+  it('sizes a JSON line exactly and never builds one that is over a cap', () => {
+    const value = { ok: true, value: { content: 'a"\\\n\u0001é€😀\ud800\udc00x', n: [1, null, undefined, -0.5], skip: undefined } };
+    expect(jsonBytes(value, Infinity)).toBe(Buffer.byteLength(JSON.stringify(value)));
+    const stream = new StalledStream();
+    const writer = new BoundedWriter(stream, { maxPendingBytes: 1_000, maxTotalBytes: 50, onOverflow: () => undefined });
+    expect(writer.writeJson({ a: 'b' })).toBe(true);
+    const stringify = vi.spyOn(JSON, 'stringify');
+    expect(writer.writeJson({ content: 'z'.repeat(100) })).toBe(false);
+    const stringified = stringify.mock.calls.length;
+    stringify.mockRestore();
+    expect(stringified).toBe(0);
+    expect(stream.written).toEqual(['{"a":"b"}\n']);
   });
 
   it('caps the total bytes even when the reader keeps up', () => {

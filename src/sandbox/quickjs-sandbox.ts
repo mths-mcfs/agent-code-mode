@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { basename, dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import { errorMessage } from '../core/errors.js';
+import { MAX_CODE_CHARS } from '../core/schemas.js';
 import type { Sandbox, SandboxOutcome, SandboxRunOptions } from '../core/types.js';
 import type { ParentMessage, SandboxLimits } from './protocol.js';
 import { ChildSession, killedOutcome } from './session.js';
@@ -52,6 +53,13 @@ const DEFAULTS = {
   maxReplyBytes: 512 * 1024 * 1024,
 } as const;
 
+/** Most bytes the child may send in one run (calls, logs and the outcome), unless one frame needs more; past it the run ends with outcome `oom`. */
+const MAX_CHILD_OUTPUT_BYTES = 64 * 1024 * 1024;
+/** Most bytes of messages the child may queue on its stdout while the parent has not read them. */
+const CHILD_PENDING_OUTPUT_BYTES = 64 * 1024 * 1024;
+/** Largest `start` message: the longest accepted script, JSON-escaped, plus the limits. */
+const MAX_START_BYTES = 6 * MAX_CODE_CHARS + 64 * 1024;
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** The child entry: compiled `child.js` next to this file, or `child.ts` when running from source. */
@@ -75,38 +83,39 @@ export function childEnv(parentEnv: NodeJS.ProcessEnv = process.env, platform: N
   return env;
 }
 
-function packageRoot(start: string): string {
-  let dir = start;
-  for (;;) {
-    if (existsSync(join(dir, 'package.json'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return start;
-    dir = parent;
-  }
-}
+/** Packages the child imports; their runtime dependencies come from their package.json files. */
+const CHILD_PACKAGES = ['quickjs-emscripten-core', '@jitl/quickjs-ng-wasmfile-release-sync', 'zod'];
+const ManifestSchema = z.object({ dependencies: z.record(z.string(), z.string()).optional() });
 
-function nodeModulesDirOf(file: string): string {
-  let dir = dirname(file);
-  for (;;) {
-    if (basename(dir) === 'node_modules') return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return dirname(file);
-    dir = parent;
+/**
+ * What the child may read, with symlinks preserved: its entry directory, the directories of the packages it loads
+ * and, as exact paths, each package.json and `node_modules/<name>` candidate Node looks up on the way.
+ */
+export function readGrants(): { readonly dirs: string[]; readonly files: string[] } {
+  const dirs = new Set([here]);
+  const files = new Set<string>();
+  for (let dir = here; ; dir = dirname(dir)) {
+    files.add(join(dir, 'package.json'));
+    if (existsSync(join(dir, 'package.json')) || dirname(dir) === dir) break;
   }
-}
-
-/** Directories the child may read under the Node permission model: this package and its runtime dependencies. */
-function readableRoots(): string[] {
-  const require = createRequire(import.meta.url);
-  const roots = new Set<string>([packageRoot(here)]);
-  for (const spec of ['quickjs-emscripten-core', '@jitl/quickjs-ng-wasmfile-release-sync', 'zod']) {
-    try {
-      roots.add(nodeModulesDirOf(require.resolve(spec)));
-    } catch {
-      // Not resolvable with CommonJS conditions: the child fails to start and the run ends `killed`.
+  const visit = (from: string, name: string): void => {
+    for (let dir = from; ; dir = dirname(dir)) {
+      const candidate = join(dir, 'node_modules', name);
+      if (existsSync(join(candidate, 'package.json'))) {
+        if (dirs.has(candidate)) return;
+        dirs.add(candidate);
+        const manifest = ManifestSchema.parse(JSON.parse(readFileSync(join(candidate, 'package.json'), 'utf8')));
+        for (const dependency of Object.keys(manifest.dependencies ?? {})) visit(candidate, dependency);
+        return;
+      }
+      files.add(candidate);
+      if (dirname(dir) === dir) return;
     }
-  }
-  return [...roots];
+  };
+  for (const name of CHILD_PACKAGES) visit(here, name);
+  // A grant inside a granted directory is redundant, and Node's permission tree can lose a shorter grant added after a longer one.
+  const outside = (path: string): boolean => ![...dirs].some((dir) => path.startsWith(dir + sep));
+  return { dirs: [...dirs].filter(outside), files: [...files].filter(outside) };
 }
 
 /** Thrown when this Node cannot start the child under its permission model. */
@@ -136,18 +145,14 @@ export function childExecArgv(entry: string, heapMb: number, flags: ReadonlySet<
   }
   const args = [`--max-old-space-size=${heapMb}`, '--disallow-code-generation-from-strings'];
   if (entry.endsWith('.ts') && !('typescript' in process.features && process.features.typescript)) args.push('--experimental-strip-types');
-  args.push(permission);
-  const roots = readableRoots();
-  if (permission === '--permission') {
-    for (const root of roots) args.push(`--allow-fs-read=${root}`);
-  } else {
-    // Node 22.0 to 22.12: repeated grants do not add up (only one comma-separated list works), and a
-    // directory grant covers only the directory itself unless it ends with the `*` wildcard.
-    if (roots.some((root) => root.includes(','))) {
-      throw new SandboxUnavailableError(`Node ${process.version} cannot grant read access to a path that contains a comma; upgrade to Node 22.13 or later`);
-    }
-    args.push(`--allow-fs-read=${roots.map((root) => join(root, '*')).join(',')}`);
+  args.push(permission, '--preserve-symlinks', '--preserve-symlinks-main');
+  const { dirs, files } = readGrants();
+  // Node 22.0 to 22.12 grants a directory itself only, unless it ends with the `*` wildcard; one flag per path adds up on every version.
+  const paths = [...files, ...(permission === '--permission' ? dirs : dirs.map((dir) => join(dir, '*')))];
+  if (permission === '--experimental-permission' && paths.some((path) => path.includes(','))) {
+    throw new SandboxUnavailableError(`Node ${process.version} cannot grant read access to a path that contains a comma; upgrade to Node 22.13 or later`);
   }
+  for (const path of paths) args.push(`--allow-fs-read=${path}`);
   return args;
 }
 
@@ -172,10 +177,10 @@ export class QuickJsSandbox implements Sandbox {
   }
 
   run(code: string, opts: SandboxRunOptions): Promise<SandboxOutcome> {
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     if (opts.signal.aborted) return Promise.resolve(killedOutcome('the run was stopped before the script started'));
     const o = this.#options;
-    const limits: SandboxLimits = {
+    const sized = {
       memoryBytes: positive(opts.memoryBytes, DEFAULT_SANDBOX_MEMORY_BYTES),
       stackBytes: positive(o.stackBytes, DEFAULTS.stackBytes),
       maxCalls: positive(o.maxCalls, DEFAULTS.maxCalls),
@@ -185,8 +190,10 @@ export class QuickJsSandbox implements Sandbox {
       maxArgsChars: positive(o.maxArgsChars, DEFAULTS.maxArgsChars),
     };
     const timeoutMs = positive(opts.timeoutMs, 1);
+    const deadline = startedAt + timeoutMs;
     // Each string field is bounded in characters; JSON escaping turns one character into at most 6 bytes.
-    const maxFrameBytes = 6 * Math.max(limits.maxArgsChars, limits.maxResultChars, limits.maxLogLineChars + 200) + 64 * 1024;
+    const maxFrameBytes = 6 * Math.max(sized.maxArgsChars, sized.maxResultChars, sized.maxLogLineChars + 200) + 64 * 1024;
+    const limits: SandboxLimits = { ...sized, maxPendingOutputBytes: Math.max(CHILD_PENDING_OUTPUT_BYTES, maxFrameBytes) };
 
     let execArgv: string[];
     try {
@@ -218,12 +225,12 @@ export class QuickJsSandbox implements Sandbox {
       maxTotalBytes: positive(o.maxReplyBytes, DEFAULTS.maxReplyBytes),
       onOverflow: (message) => session?.finish({ ok: false, kind: 'oom', error: { name: 'ReplyBufferFull', message } }),
     });
-    const write = (message: ParentMessage): void => {
-      writer.write(`${JSON.stringify(message)}\n`);
-    };
     const active = new ChildSession({
       limits,
       maxFrameBytes,
+      maxTotalBytes: Math.max(MAX_CHILD_OUTPUT_BYTES, 2 * maxFrameBytes),
+      deadline,
+      timeoutMs,
       hooks: {
         onCall: (tool, args) => {
           // Never forward a call once the run is stopped, even if the abort event has not been seen yet.
@@ -234,7 +241,7 @@ export class QuickJsSandbox implements Sandbox {
           return opts.onCall(tool, args);
         },
         onLog: (level, text) => opts.onLog(level, text),
-        send: write,
+        send: (message) => void writer.writeJson(message),
         kill: () => {
           writer.close();
           child.kill('SIGKILL');
@@ -262,12 +269,14 @@ export class QuickJsSandbox implements Sandbox {
     child.on('error', (err) => active.kill(`sandbox process error: ${errorMessage(err)}`));
     child.on('close', (exitCode, signal) => active.exited(exitCode, signal));
 
-    const timer = setTimeout(
-      () => active.finish({ ok: false, kind: 'timeout', error: { name: 'Timeout', message: `the script did not finish within ${timeoutMs} ms` } }),
-      timeoutMs,
-    );
-
-    if (!active.finished) write({ type: 'start', code, timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)), limits });
+    const timer = setTimeout(() => active.timeOut(), Math.max(0, deadline - performance.now()));
+    if (!active.finished && performance.now() >= deadline) active.timeOut();
+    if (!active.finished) {
+      // `start` has its own size limit; the reply quotas count only binding results.
+      const start = Buffer.from(`${JSON.stringify({ type: 'start', code, timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), limits } satisfies ParentMessage)}\n`, 'utf8');
+      if (start.length > MAX_START_BYTES) active.kill(`the script is larger than ${MAX_START_BYTES} bytes`);
+      else stdin.write(start);
+    }
 
     return active.outcome.finally(() => {
       clearTimeout(timer);
