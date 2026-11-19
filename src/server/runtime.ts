@@ -36,10 +36,11 @@ export function createRuntime(host: HostKind): Runtime {
     contextProvider,
     adapter: new StaticHostAdapter({
       host,
+      recordCalls: false,
       rules: [(p) => (p.tool === 'bash' && /^\s*rm\s/.test(p.effect.command) ? { kind: 'deny', reason: 'rm is denied by the placeholder policy' } : undefined)],
     }),
-    tools: new MemoryToolRuntime({ root: '/workspace' }),
-    sandbox: new FakeSandbox(),
+    tools: new MemoryToolRuntime({ recordCalls: false }),
+    sandbox: new FakeSandbox({ recordRuns: false }),
     maxTimeoutMs: host === 'codex' ? CODEX_MAX_TIMEOUT_MS : MAX_RUN_TIMEOUT_MS,
   };
 }
