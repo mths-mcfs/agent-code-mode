@@ -43,6 +43,18 @@ describe('companion hook and context store', () => {
     expect(await readdir(path.join(dir, 'ctx'))).toEqual([]);
   });
 
+  it.skipIf(!posix)('writes and reads the record when the platform reports win32', async () => {
+    const dir = await stateDir();
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      expect(await runContextHook(hookInput(), { stateDir: dir })).toBe(0);
+      expect(await new FileHookContextStore(dir).lookup('toolu_01ABC')).toMatchObject({ sessionId: 'sess-1', toolUseId: 'toolu_01ABC' });
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
   it.skipIf(!posix)('creates the directory 0700 and the file 0600', async () => {
     const dir = await stateDir();
     await runContextHook(hookInput(), { stateDir: dir });
