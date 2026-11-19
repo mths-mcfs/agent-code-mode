@@ -3,7 +3,7 @@ import { ToolError } from '../core/errors.js';
 import { parseToolCall } from '../core/schemas.js';
 import type { PolicySnapshot, SessionContext } from '../core/types.js';
 import { makeContext } from './context.js';
-import { MemoryToolRuntime, simpleDiff } from './memory-tool-runtime.js';
+import { MAX_DIFF_LINES, MAX_EDIT_REPLACEMENTS, MemoryToolRuntime, simpleDiff } from './memory-tool-runtime.js';
 
 const workers = vi.hoisted(() => ({ live: 0, max: 0 }));
 vi.mock('node:worker_threads', async (importOriginal) => {
@@ -125,5 +125,62 @@ describe('MemoryToolRuntime', () => {
     expect(edit).toMatchObject({ effect: { afterContent: '$&$1-$&$1\n$&$1', replacements: 3 } });
     expect(simpleDiff('/f', 'x\n\n', 'y')).toBe('--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n-x\n-\n+y\n\\ No newline at end of file\n');
     await expect(prepare(tools, 'edit', { path: 'a.txt', oldString: 'a', newString: 'b' })).rejects.toMatchObject({ message: expect.stringContaining('3 times') });
+  });
+
+  it('refuses network-share (UNC) roots and paths before preparing a call', async () => {
+    for (const share of ['\\\\server\\share', '//server/share']) {
+      expect(() => new MemoryToolRuntime({ root: share })).toThrow(expect.objectContaining({ code: 'outside-workspace', message: expect.stringContaining('network share') }));
+      expect(() => new MemoryToolRuntime({ root: '/ws', files: { [`${share}/a.txt`]: 'x' } })).toThrow(expect.objectContaining({ code: 'outside-workspace' }));
+      const tools = new MemoryToolRuntime({ files: { '/server/share/a.txt': 'x' } });
+      const write = { path: 'a.txt', content: 'y' };
+      await expect(prepare(tools, 'write', write, makeContext(share))).rejects.toMatchObject({ code: 'outside-workspace', message: expect.stringContaining('network share') });
+      await expect(prepare(tools, 'write', write, makeContext('/server/share', { roots: [share] }))).rejects.toMatchObject({ code: 'outside-workspace' });
+      await expect(prepare(tools, 'write', { ...write, path: `${share}/a.txt` }, makeContext('/'))).rejects.toMatchObject({ code: 'outside-workspace' });
+      await expect(prepare(new MemoryToolRuntime({ root: '/' }), 'read', { path: 'a.txt' }, makeContext(share))).rejects.toMatchObject({ code: 'outside-workspace' });
+    }
+  });
+
+  it('refuses an edit over the replacement or diff budget before building its text or diff', async () => {
+    const tooMany = 'a'.repeat(MAX_EDIT_REPLACEMENTS + 1);
+    const tooLong = `head\n${'x\n'.repeat(MAX_DIFF_LINES / 2 - 1)}`;
+    const tools = new MemoryToolRuntime({ root: '/ws', files: { 'many.txt': tooMany, 'long.txt': tooLong } });
+    const replaceAll = vi.spyOn(String.prototype, 'replaceAll');
+    const replace = vi.spyOn(String.prototype, 'replace');
+    try {
+      await expect(prepare(tools, 'edit', { path: 'many.txt', oldString: 'a', newString: 'b', replaceAll: true })).rejects.toMatchObject({
+        code: 'invalid-args',
+        message: expect.stringContaining(`more than ${MAX_EDIT_REPLACEMENTS}`),
+      });
+      await expect(prepare(tools, 'edit', { path: 'long.txt', oldString: 'head', newString: 'y' })).rejects.toMatchObject({
+        code: 'invalid-args',
+        message: expect.stringContaining(`more than ${MAX_DIFF_LINES} lines`),
+      });
+      await expect(prepare(tools, 'write', { path: 'long.txt', content: tooLong })).rejects.toMatchObject({ code: 'invalid-args' });
+      expect(replaceAll).not.toHaveBeenCalled();
+      expect(replace.mock.contexts.filter((self) => self === tooMany || self === tooLong)).toEqual([]);
+    } finally {
+      replaceAll.mockRestore();
+      replace.mockRestore();
+    }
+    expect(tools.read('many.txt')).toBe(tooMany);
+    expect(tools.read('long.txt')).toBe(tooLong);
+  });
+
+  it('prepares an edit just under the budget with the same text and diff as before', async () => {
+    const many = 'a'.repeat(MAX_EDIT_REPLACEMENTS);
+    const lines = MAX_DIFF_LINES / 2 - 1;
+    const long = `head\n${'x\n'.repeat(lines - 1)}`;
+    const tools = new MemoryToolRuntime({ root: '/ws', files: { 'many.txt': many, 'long.txt': long } });
+    const wide = await prepare(tools, 'edit', { path: 'many.txt', oldString: 'a', newString: 'b', replaceAll: true });
+    const after = 'b'.repeat(MAX_EDIT_REPLACEMENTS);
+    expect(wide).toMatchObject({ effect: { afterContent: after, replacements: MAX_EDIT_REPLACEMENTS } });
+    expect(wide.tool === 'edit' && wide.effect.diff).toBe(
+      `--- a/ws/many.txt\n+++ b/ws/many.txt\n@@ -1,1 +1,1 @@\n-${many}\n\\ No newline at end of file\n+${after}\n\\ No newline at end of file\n`,
+    );
+    const tall = await prepare(tools, 'edit', { path: 'long.txt', oldString: 'head', newString: 'y' });
+    expect(tall).toMatchObject({ effect: { afterContent: `y${long.slice(4)}`, replacements: 1 } });
+    expect(tall.tool === 'edit' && tall.effect.diff).toBe(
+      `--- a/ws/long.txt\n+++ b/ws/long.txt\n@@ -1,${lines} +1,${lines} @@\n-head\n${'-x\n'.repeat(lines - 1)}+y\n${'+x\n'.repeat(lines - 1)}`,
+    );
   });
 });
