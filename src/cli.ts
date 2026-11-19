@@ -2,15 +2,21 @@
 import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { stateDirPath } from './core/state-dir.js';
 import type { HostKind } from './core/types.js';
+import { runContextHook } from './hosts/claude/context-hook.js';
+import { applyPlan, parseInstallArgs, planDiff, planInstall } from './install.js';
 import { createMcpServer } from './server/mcp.js';
+import { recoverStaleJournals } from './tools/journal.js';
 
 const USAGE = `Usage: agent-code-mode <command>
 
 Commands:
   serve [--host claude|codex|generic]   Run the MCP stdio server
-  hook                                  Companion hook entry point (not implemented yet)
-  install                               Register the server with a host (not implemented yet)
+  hook                                  Claude Code companion PreToolUse hook (reads the hook JSON on stdin)
+  install --host claude|codex [--scope user|project] [--write] [--local]
+                                        Print the host configuration; --write applies it after showing the diff;
+                                        --local runs this checkout with node instead of npx
 
 Options:
   --version   Print the version
@@ -53,14 +59,44 @@ export async function main(argv: readonly string[]): Promise<number> {
         process.stderr.write(`${host.message}\n`);
         return 2;
       }
+      // Undo what runs of a crashed server left in this workspace before serving.
+      const recovered = await recoverStaleJournals(stateDirPath(), [process.cwd()]);
+      for (const { id, report } of recovered) {
+        process.stderr.write(`agent-code-mode: recovered interrupted run ${id}: ${report.restored.length} file(s) restored, ${report.skipped.length} skipped\n`);
+      }
       const server = createMcpServer({ version: readVersion(), ...(host ? { host } : {}) });
       await server.connect(new StdioServerTransport());
       return -1; // keep running until stdin closes
     }
-    case 'hook':
-    case 'install':
-      process.stderr.write(`agent-code-mode ${command}: not implemented yet\n`);
-      return 1;
+    case 'hook': {
+      // Prints nothing: any stdout would be read by Claude Code as the hook's decision.
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      return runContextHook(Buffer.concat(chunks).toString('utf8'));
+    }
+    case 'install': {
+      const opts = parseInstallArgs(rest, { cwd: process.cwd(), env: process.env });
+      if (opts instanceof Error) {
+        process.stderr.write(`${opts.message}\n${USAGE}\n`);
+        return 2;
+      }
+      const plan = await planInstall(opts);
+      process.stdout.write(plan.text);
+      if (!opts.write) {
+        if (plan.changes.length > 0) process.stdout.write(`\n# Run again with --write to apply the file changes above.\n`);
+        return 0;
+      }
+      const diff = planDiff(plan);
+      if (diff === '') {
+        process.stdout.write('\n# Nothing to write: the configuration is already in place.\n');
+        return 0;
+      }
+      process.stdout.write(`\n# Writing:\n${diff}`);
+      await applyPlan(plan);
+      for (const c of plan.changes) process.stdout.write(`# wrote ${c.file}\n`);
+      if (plan.commands.length > 0) process.stdout.write(`# Still to run yourself:\n${plan.commands.join('\n')}\n`);
+      return 0;
+    }
     default:
       process.stderr.write(`unknown command ${JSON.stringify(command)}\n${USAGE}\n`);
       return 2;

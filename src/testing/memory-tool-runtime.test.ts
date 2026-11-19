@@ -39,7 +39,7 @@ describe('MemoryToolRuntime', () => {
     await expect(prepare(tools, 'read', { path: '/client/a/notes.txt' }, b)).rejects.toMatchObject({ code: 'outside-workspace' });
     await expect(prepare(tools, 'read', { path: 'notes.txt' }, b)).rejects.toMatchObject({ code: 'not-found' });
     const listed = await tools.commit(await prepare(tools, 'glob', { pattern: '**' }, b), new AbortController().signal);
-    expect(listed).toEqual({ files: [], truncated: false });
+    expect(listed).toEqual({ files: [], truncated: false, filtered: 0 });
     const extraRoot = makeContext('/client/b', { roots: ['/client/b', '/client/a'] });
     expect(await prepare(tools, 'read', { path: '/client/a/notes.txt' }, extraRoot)).toMatchObject({ effect: { absPath: '/client/a/notes.txt' } });
     expect(await prepare(tools, 'read', { path: 'C:\\ws\\a.txt' }, makeContext('C:\\ws')).catch((e: unknown) => e)).toMatchObject({ code: 'not-found', message: '/C:/ws/a.txt does not exist' });
@@ -88,14 +88,14 @@ describe('MemoryToolRuntime', () => {
 
   it('searches off the main thread, stops at the first extra match and can be stopped', async () => {
     const atRoot = new MemoryToolRuntime({ files: { '/a.txt': 'one' } });
-    expect(await atRoot.commit(await prepare(atRoot, 'glob', { pattern: '*.txt', maxResults: 1 }, makeContext('/')), new AbortController().signal)).toEqual({ files: ['/a.txt'], truncated: false });
+    expect(await atRoot.commit(await prepare(atRoot, 'glob', { pattern: '*.txt', maxResults: 1 }, makeContext('/')), new AbortController().signal)).toEqual({ files: ['/a.txt'], truncated: false, filtered: 0 });
     const tools = new MemoryToolRuntime({ root: '/ws', files: { 'a.txt': 'one\ntwo\none', 'src/b.ts': 'one', 'src/c.md': 'one' } });
     const listed = await tools.commit(await prepare(tools, 'glob', { pattern: '**', maxResults: 1 }), new AbortController().signal);
-    expect(listed).toEqual({ files: ['/ws/a.txt'], truncated: true });
+    expect(listed).toEqual({ files: ['/ws/a.txt'], truncated: true, filtered: 0 });
     const found = await tools.commit(await prepare(tools, 'grep', { pattern: 'o.e', glob: '*.ts' }), new AbortController().signal);
-    expect(found).toEqual({ matches: [{ file: '/ws/src/b.ts', line: 1, text: 'one' }], truncated: false });
+    expect(found).toEqual({ matches: [{ file: '/ws/src/b.ts', line: 1, text: 'one' }], truncated: false, filtered: 0 });
     const capped = await tools.commit(await prepare(tools, 'grep', { pattern: 'ONE', ignoreCase: true, maxResults: 1 }), new AbortController().signal);
-    expect(capped).toEqual({ matches: [{ file: '/ws/a.txt', line: 1, text: 'one' }], truncated: true });
+    expect(capped).toEqual({ matches: [{ file: '/ws/a.txt', line: 1, text: 'one' }], truncated: true, filtered: 0 });
 
     const controller = new AbortController();
     const pending = tools.commit(await prepare(tools, 'grep', { pattern: 'one' }), controller.signal);
@@ -117,14 +117,14 @@ describe('MemoryToolRuntime', () => {
     for (const result of await Promise.all(running)) expect(result).toMatchObject({ matches: [{ line: 1 }, { line: 1 }], truncated: false });
     expect(workers.max).toBeGreaterThan(0);
     expect(workers.max).toBeLessThanOrEqual(4);
-    await expect(tools.commit(await prepare(tools, 'glob', { pattern: '*.ts' }), signal)).resolves.toEqual({ files: ['/ws/b.ts'], truncated: false });
+    await expect(tools.commit(await prepare(tools, 'glob', { pattern: '*.ts' }), signal)).resolves.toEqual({ files: ['/ws/b.ts'], truncated: false, filtered: 0 });
   });
 
   it('copies only the content a search needs and rejects a search over the size limit', async () => {
     const big = 'x'.repeat(11_000_000);
     const tools = new MemoryToolRuntime({ root: '/ws', files: { 'a.txt': big, 'b.txt': big, 'c.ts': 'one' } });
     const signal = new AbortController().signal;
-    expect(await tools.commit(await prepare(tools, 'grep', { pattern: 'one', glob: '*.ts' }), signal)).toEqual({ matches: [{ file: '/ws/c.ts', line: 1, text: 'one' }], truncated: false });
+    expect(await tools.commit(await prepare(tools, 'grep', { pattern: 'one', glob: '*.ts' }), signal)).toEqual({ matches: [{ file: '/ws/c.ts', line: 1, text: 'one' }], truncated: false, filtered: 0 });
     await expect(tools.commit(await prepare(tools, 'grep', { pattern: 'one' }), signal)).rejects.toMatchObject({ code: 'tool-error', message: expect.stringContaining('narrow') });
   });
 

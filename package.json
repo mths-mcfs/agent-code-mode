@@ -21,13 +21,19 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p bench/tsconfig.json && tsc -p test/tsconfig.json",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test && npm run build",
-    "bench": "node -e \"console.log('bench: not implemented yet')\""
+    "bench": "node bench/run.ts",
+    "bench:report": "node bench/report.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.81",
+    "@jitl/quickjs-ng-wasmfile-release-sync": "^0.32.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "quickjs-emscripten-core": "^0.32.0",
+    "sh-syntax": "^0.8.7",
+    "smol-toml": "^1.9.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {

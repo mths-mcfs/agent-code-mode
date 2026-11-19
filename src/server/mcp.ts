@@ -1,3 +1,5 @@
+import { appendFile } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -6,7 +8,8 @@ import { formatRunResult, type McpToolResponse } from '../core/output.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
-import type { HostKind, RunResult } from '../core/types.js';
+import type { HostKind, RunResult, SessionContext } from '../core/types.js';
+import { recoverStaleJournals } from '../tools/journal.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 
@@ -18,8 +21,8 @@ The script is the body of an async JavaScript function; return a value to get it
   read({path, offset?, limit?}) -> {path, content, startLine, totalLines, truncated}
   write({path, content}) -> {path, created, diff}
   edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStrategy, diff}
-  grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {matches: [{file, line, text}], truncated}
-  glob({pattern, path?, maxResults?}) -> {files, truncated}
+  grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {matches: [{file, line, text}], truncated, filtered}
+  glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
   console.log/info/warn/error
 A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError. Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).`;
 
@@ -33,27 +36,6 @@ export const RUN_TOOL: Tool = {
   _meta: { 'anthropic/alwaysLoad': true },
 };
 
-/** A runnable `code` for the placeholder runtime that `createRuntime` builds today. */
-export const PLACEHOLDER_EXAMPLE = JSON.stringify([
-  { tool: 'write', args: { path: 'example.txt', content: 'hello\n' } },
-  { tool: 'read', args: { path: 'example.txt' } },
-]);
-
-/** Instructions served with the default runtime, whose components are placeholders. */
-export const PLACEHOLDER_INSTRUCTIONS = `This build serves placeholder components: run does not execute JavaScript yet.
-Its code is a JSON array of steps run in order, and the result is the array of step results. Steps: {"tool": name, "args": {...}}, {"parallel": [steps]}, {"log": text}, {"sleep": ms}, {"throw": message}, {"throwOnError": true}.
-read, write, edit, grep and glob act on an in-memory file system that starts empty; bash only echoes the command. A fixed placeholder policy stands in for the host's rules and hooks.
-Example code: ${PLACEHOLDER_EXAMPLE}`;
-
-const PLACEHOLDER_RUN_TOOL: Tool = {
-  ...RUN_TOOL,
-  description: 'Run a JSON array of placeholder steps (see the server instructions) against an in-memory file system.',
-  inputSchema: {
-    ...RUN_INPUT_JSON_SCHEMA,
-    properties: { ...RUN_INPUT_JSON_SCHEMA.properties, code: { type: 'string', description: `JSON array of placeholder steps, e.g. ${PLACEHOLDER_EXAMPLE}` } },
-  },
-};
-
 export interface McpServerOptions {
   readonly version: string;
   /** `--host` flag; skips detection. */
@@ -64,6 +46,8 @@ export interface McpServerOptions {
   readonly createRuntime?: RuntimeFactory;
   /** How long to wait for `roots/list`. */
   readonly rootsTimeoutMs?: number;
+  /** Restore journals left by dead server processes for each workspace first seen. Default true. */
+  readonly recoverJournals?: boolean;
 }
 
 /** A failed `RunResult` for protocol and validation errors, so they go through the same capped formatter. */
@@ -84,14 +68,44 @@ function rootPaths(roots: readonly { uri: string }[]): string[] {
   return out;
 }
 
+/** Env var naming a file where the server appends one JSON line per run (context sources and call log), for debugging host setups. */
+export const RUN_LOG_ENV = 'AGENT_CODE_MODE_LOG';
+
+async function appendRunLog(file: string | undefined, ctx: SessionContext, result: RunResult): Promise<void> {
+  if (file === undefined || file === '' || !path.isAbsolute(file)) return;
+  const line = {
+    at: new Date().toISOString(),
+    host: ctx.host,
+    cwd: ctx.cwd,
+    permissionMode: ctx.permissionMode,
+    sources: ctx.sources,
+    ...(ctx.agentType === undefined ? {} : { agentType: ctx.agentType }),
+    ok: result.ok,
+    calls: result.calls.map((c) => ({ id: c.id, summary: c.summary, decision: c.decision, ...(c.reason === undefined ? {} : { reason: c.reason }) })),
+  };
+  await appendFile(file, `${JSON.stringify(line)}\n`, { mode: 0o600 }).catch(() => undefined);
+}
+
 /** Creates the MCP server exposing the `run` tool. Connect it to a transport to serve. */
 export function createMcpServer(opts: McpServerOptions): Server {
   const env = opts.env ?? process.env;
   const serverCwd = opts.serverCwd ?? process.cwd();
   const stateDir = opts.stateDir ?? stateDirPath(env);
-  const factory = opts.createRuntime ?? createRuntime;
-  const placeholder = opts.createRuntime === undefined;
-  const runTool = placeholder ? PLACEHOLDER_RUN_TOOL : RUN_TOOL;
+  const factory = opts.createRuntime ?? ((host: HostKind) => createRuntime(host, { env, serverCwd, stateDir }));
+  const recoverJournals = opts.recoverJournals ?? opts.createRuntime === undefined;
+  const recoveredRoots = new Set<string>();
+  /** Rolls back what runs of crashed server processes left in this workspace, once per root; returns warnings for the model. */
+  const recoverFor = async (ctx: SessionContext): Promise<string[]> => {
+    if (!recoverJournals) return [];
+    const roots = [...new Set([ctx.cwd, ...ctx.roots])].filter((r) => !recoveredRoots.has(r));
+    if (roots.length === 0) return [];
+    roots.forEach((r) => recoveredRoots.add(r));
+    const recovered = await recoverStaleJournals(stateDir, roots);
+    return recovered.flatMap(({ id, report }) => [
+      ...(report.restored.length > 0 ? [`an earlier run (${id}) was cut off mid-transaction; restored: ${report.restored.join(', ')}`] : []),
+      ...report.skipped.map((s) => `an earlier run (${id}) was cut off mid-transaction; ${s.path} was not restored (${s.reason})`),
+    ]);
+  };
   const runtimes = new Map<HostKind, Runtime>();
   const runtimeFor = (host: HostKind): Runtime => {
     let runtime = runtimes.get(host);
@@ -102,10 +116,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return runtime;
   };
 
-  const server = new Server({ name: SERVER_NAME, version: opts.version }, {
-    capabilities: { tools: {} },
-    instructions: placeholder ? PLACEHOLDER_INSTRUCTIONS : SERVER_INSTRUCTIONS,
-  });
+  const server = new Server({ name: SERVER_NAME, version: opts.version }, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS });
 
   const listRoots = async (signal: AbortSignal): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
@@ -117,7 +128,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
     }
   };
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [runTool] }));
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [RUN_TOOL] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
     const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir });
@@ -131,7 +142,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
       const roots = await listRoots(extra.signal);
       if (extra.signal.aborted) return respond(errorResult('the run was cancelled before context resolution'));
       const ctx = await runtime.contextProvider.resolve({ env, meta, roots, serverCwd });
-      const result = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
+      const recoveryWarnings = await recoverFor(ctx);
+      const ran = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
         sandbox: runtime.sandbox,
         adapter: runtime.adapter,
         tools: runtime.tools,
@@ -139,6 +151,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
       });
+      const result = recoveryWarnings.length === 0 ? ran : { ...ran, warnings: [...recoveryWarnings, ...ran.warnings] };
+      await appendRunLog(env[RUN_LOG_ENV], ctx, result);
       return await respond(result);
     } catch (err) {
       return respond(errorResult(`internal error: ${errorMessage(err)}`));

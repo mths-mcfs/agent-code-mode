@@ -7,3 +7,20 @@ Third-party code
 ----------------
 Portions of this product that are derived from third-party projects are
 listed below together with their copyright notices and licenses.
+
+Turnpack
+  Files: src/tools/edit-match.ts, src/tools/edit-match.test.ts (ported),
+         src/tools/journal.ts and src/tools/jail.ts (design and parts adapted)
+  Source: https://github.com/OnlyTerp/turnpack (commit b14330d)
+  License: Apache License, Version 2.0
+  Modified by the agent-code-mode authors (see the header of each file).
+  Turnpack's NOTICE:
+
+    Turnpack
+    Copyright 2026 OnlyTerp (https://github.com/OnlyTerp)
+
+    This product is licensed under the Apache License, Version 2.0.
+    You may obtain a copy of the License in the LICENSE file, or at
+    http://www.apache.org/licenses/LICENSE-2.0
+
+    Project home: https://github.com/OnlyTerp/turnpack

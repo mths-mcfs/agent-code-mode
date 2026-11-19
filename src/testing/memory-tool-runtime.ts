@@ -603,10 +603,11 @@ export class MemoryToolRuntime implements ToolRuntime {
       const names = glob === null ? null : regExpSource(pathPatternRegExp(glob, false));
       const job = { names, lines: { source: pattern, flags: ignoreCase ? 'i' : '' }, maxResults, files };
       const contents = inRoot.map(([, content]) => content);
-      return searchInWorker(job, contents, budget, GrepReplySchema, signal, release);
+      // The memory runtime has no read filter, so nothing is ever filtered.
+      return searchInWorker(job, contents, budget, GrepReplySchema, signal, release).then((reply) => ({ ...reply, filtered: 0 }));
     }
     const names = regExpSource(pathPatternRegExp(prepared.effect.pattern, false));
-    return searchInWorker({ names, lines: null, maxResults, files }, null, budget, GlobReplySchema, signal, release);
+    return searchInWorker({ names, lines: null, maxResults, files }, null, budget, GlobReplySchema, signal, release).then((reply) => ({ ...reply, filtered: 0 }));
   }
 
   #commitRead(prepared: Extract<PreparedCall, { tool: 'read' }>): ToolResult {
