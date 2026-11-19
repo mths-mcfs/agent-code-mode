@@ -10,11 +10,12 @@
 
 const cache = new Map<string, RegExp>();
 
-function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
+/** The compiled form of a path pattern, e.g. to evaluate it off the main thread. */
+export function pathPatternRegExp(pattern: string, caseInsensitive = DEFAULT_CASE_INSENSITIVE): RegExp {
   const key = `${caseInsensitive ? 'i' : 's'}:${pattern}`;
   const hit = cache.get(key);
   if (hit) return hit;
-  const p = normalizeSeparators(pattern);
+  const p = normalizeDrivePath(pattern);
   let src = '';
   for (let i = 0; i < p.length; i++) {
     const ch = p[i] ?? '';
@@ -40,7 +41,7 @@ function toRegExp(pattern: string, caseInsensitive: boolean): RegExp {
       src += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
     }
   }
-  const re = new RegExp(`^${src}$`, caseInsensitive ? 'i' : '');
+  const re = new RegExp(`^${src}$`, caseInsensitive ? 'is' : 's');
   cache.set(key, re);
   return re;
 }
@@ -50,12 +51,32 @@ export function normalizeSeparators(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
+/**
+ * Normalizes drive-letter paths for comparison with the in-memory filesystem,
+ * and collapses redundant leading slashes of a POSIX path the way path
+ * resolution does (see `isUncPath`).
+ */
+export function normalizeDrivePath(p: string): string {
+  if (p.startsWith('///') && !isUncPath(p)) return p.replace(/^\/+/, '/');
+  const normalized = normalizeSeparators(p);
+  return /^[A-Za-z]:(\/|$)/.test(normalized) ? `/${normalized}` : normalized;
+}
+
+/**
+ * Whether `p` is a Windows network-share (UNC) path such as `\\server\share`
+ * or `//server/share`, including `\\?\` device paths. Not supported.
+ * Three or more leading forward slashes in a POSIX path are redundant.
+ */
+export function isUncPath(p: string): boolean {
+  return /^[\\/]{2}/.test(p) && !(p.startsWith('///') && !p.includes('\\'));
+}
+
 /** Whether file names on this platform are usually case-insensitive. */
 export const DEFAULT_CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 
 /** Whether `path` matches `pattern`. Case-insensitive by default on macOS and Windows. */
 export function matchesPathPattern(path: string, pattern: string, caseInsensitive = DEFAULT_CASE_INSENSITIVE): boolean {
-  return toRegExp(pattern, caseInsensitive).test(normalizeSeparators(path));
+  return pathPatternRegExp(pattern, caseInsensitive).test(normalizeDrivePath(path));
 }
 
 /** The first pattern `path` matches, or undefined. */
