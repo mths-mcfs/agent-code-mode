@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { z } from 'zod';
-import { ToolError } from '../core/errors.js';
-import { findMatchingPattern, normalizeSeparators, pathPatternRegExp } from '../core/paths.js';
+import { ToolError, errorMessage } from '../core/errors.js';
+import { findMatchingPattern, normalizeDrivePath, normalizeSeparators, pathPatternRegExp } from '../core/paths.js';
 import { MAX_ARG_CHARS } from '../core/schemas.js';
 import type {
   PolicySnapshot,
@@ -23,15 +23,28 @@ export function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-/** Minimal whole-file unified diff, good enough for tests. */
+/** Minimal whole-file unified diff, good enough for tests. Builds no per-line arrays. */
 export function simpleDiff(file: string, before: string | null, after: string): string {
-  const lines = (s: string): string[] => (s === '' ? [] : s.replace(/\n$/, '').split('\n'));
-  const a = before === null ? [] : lines(before);
-  const b = lines(after);
-  const head = `--- ${before === null ? '/dev/null' : `a${file}`}\n+++ b${file}\n@@ -${a.length > 0 ? 1 : 0},${a.length} +${b.length > 0 ? 1 : 0},${b.length} @@\n`;
-  const side = (prefix: string, content: string, rows: readonly string[]): string =>
-    rows.map((row) => `${prefix}${row}\n`).join('') + (rows.length > 0 && !content.endsWith('\n') ? '\\ No newline at end of file\n' : '');
-  return head + side('-', before ?? '', a) + side('+', after, b);
+  const side = (prefix: string, content: string): { rows: number; text: string } => {
+    if (content === '') return { rows: 0, text: '' };
+    const newline = content.endsWith('\n');
+    const body = newline ? content.slice(0, -1) : content;
+    let rows = 1;
+    for (let at = body.indexOf('\n'); at !== -1; at = body.indexOf('\n', at + 1)) rows++;
+    const text = `${prefix}${body.replaceAll('\n', `\n${prefix}`)}\n${newline ? '' : '\\ No newline at end of file\n'}`;
+    return { rows, text };
+  };
+  const a = side('-', before ?? '');
+  const b = side('+', after);
+  const head = `--- ${before === null ? '/dev/null' : `a${file}`}\n+++ b${file}\n@@ -${a.rows > 0 ? 1 : 0},${a.rows} +${b.rows > 0 ? 1 : 0},${b.rows} @@\n`;
+  return head + a.text + b.text;
+}
+
+/** Non-overlapping literal occurrences of `needle` (not empty) in `text`, without building arrays. */
+function countOccurrences(text: string, needle: string): number {
+  let count = 0;
+  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + needle.length)) count++;
+  return count;
 }
 
 export interface MemoryToolRuntimeOptions {
@@ -60,35 +73,55 @@ export interface CommitRecord {
 
 interface JournalEntry {
   readonly original: string | null;
+  readonly originalRevision: number;
   /** Revision of the file this transaction last wrote. */
   revision: number;
 }
 
 /**
  * Runs a grep or glob job in a worker thread, so a costly user pattern never
- * blocks the server and can be stopped. Files with no content are only listed.
+ * blocks the server and can be stopped. The worker first filters the file
+ * names; a grep then asks for the content of the kept files only.
  */
 const SEARCH_WORKER = `
 const { parentPort, workerData } = require('node:worker_threads');
 const { names, lines, maxResults, files } = workerData;
 const nameRe = names === null ? null : new RegExp(names.source, names.flags);
-const lineRe = lines === null ? null : new RegExp(lines.source, lines.flags);
-const found = [];
-let truncated = false;
-scan: for (const [file, candidates, content] of files) {
-  if (nameRe !== null && !candidates.some((name) => nameRe.test(name))) continue;
-  const rows = lineRe === null ? [null] : content.split('\\n');
-  for (let i = 0; i < rows.length; i++) {
-    if (lineRe !== null && !lineRe.test(rows[i])) continue;
-    if (found.length >= maxResults) {
-      truncated = true;
-      break scan;
-    }
-    found.push(lineRe === null ? file : { file, line: i + 1, text: rows[i] });
-  }
+const keep = [];
+for (let i = 0; i < files.length; i++) {
+  if (nameRe === null || files[i][1].some((name) => nameRe.test(name))) keep.push(i);
 }
-parentPort.postMessage(lineRe === null ? { files: found, truncated } : { matches: found, truncated });
+if (lines === null) {
+  const truncated = keep.length > maxResults;
+  parentPort.postMessage({ files: keep.slice(0, maxResults).map((i) => files[i][0]), truncated });
+} else {
+  const lineRe = new RegExp(lines.source, lines.flags);
+  parentPort.once('message', (contents) => {
+    const found = [];
+    let truncated = false;
+    scan: for (let k = 0; k < keep.length; k++) {
+      const rows = contents[k].split('\\n');
+      for (let i = 0; i < rows.length; i++) {
+        if (!lineRe.test(rows[i])) continue;
+        if (found.length >= maxResults) {
+          truncated = true;
+          break scan;
+        }
+        found.push({ file: files[keep[k]][0], line: i + 1, text: rows[i] });
+      }
+    }
+    parentPort.postMessage({ matches: found, truncated });
+  });
+  parentPort.postMessage({ keep });
+}
 `;
+
+/** Searches that may run at once per runtime; more wait for a free slot. */
+const MAX_CONCURRENT_SEARCHES = 4;
+/** Characters of names and content one search may copy to its worker. */
+const MAX_SEARCH_CHARS = MAX_ARG_CHARS;
+
+const KeepReplySchema = z.object({ keep: z.array(z.number().int().nonnegative()) });
 
 const GrepReplySchema = z.object({
   matches: z.array(z.object({ file: z.string(), line: z.number(), text: z.string() })),
@@ -100,37 +133,82 @@ interface SearchJob {
   readonly names: { readonly source: string; readonly flags: string } | null;
   readonly lines: { readonly source: string; readonly flags: string } | null;
   readonly maxResults: number;
-  /** `[absolute path, names the name pattern is tried on, content]`, sorted. */
-  readonly files: readonly (readonly [string, readonly string[], string])[];
+  /** `[absolute path, names the name pattern is tried on]`, sorted. */
+  readonly files: readonly (readonly [string, readonly string[]])[];
 }
 
-function searchInWorker<T>(job: SearchJob, schema: z.ZodType<T>, signal: AbortSignal): Promise<T> {
+const tooLarge = (): ToolError =>
+  new ToolError('tool-error', `the search covers more than ${MAX_SEARCH_CHARS} characters; narrow its path or glob`);
+
+/**
+ * Runs `job` in a worker. `contents` lines up with `job.files` for a grep and
+ * is null for a glob. `onExit` runs once, after the worker has stopped (or at
+ * once when no worker starts), so its slot is reused only then.
+ */
+function searchInWorker<T>(
+  job: SearchJob,
+  contents: readonly string[] | null,
+  budget: number,
+  schema: z.ZodType<T>,
+  signal: AbortSignal,
+  onExit: () => void,
+): Promise<T> {
   return new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(new ToolError('cancelled', 'the search was stopped'));
-    const worker = new Worker(SEARCH_WORKER, { eval: true, workerData: job });
+    if (signal.aborted) {
+      onExit();
+      return reject(new ToolError('cancelled', 'the search was stopped'));
+    }
+    let worker: Worker;
+    try {
+      worker = new Worker(SEARCH_WORKER, { eval: true, workerData: job });
+    } catch (err) {
+      onExit();
+      return reject(new ToolError('tool-error', `the search failed: ${errorMessage(err)}`));
+    }
+    worker.once('exit', onExit);
+    let sentContents = false;
+    let settled = false;
     const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
       signal.removeEventListener('abort', onAbort);
-      void worker.terminate();
+      void worker.terminate().catch(() => undefined);
       settle();
     };
-    const onAbort = (): void => finish(() => reject(new ToolError('cancelled', 'the search was stopped')));
+    const fail = (err: ToolError): void => finish(() => reject(err));
+    const onAbort = (): void => fail(new ToolError('cancelled', 'the search was stopped'));
     signal.addEventListener('abort', onAbort, { once: true });
-    worker.once('message', (message: unknown) => {
+    worker.on('message', (message: unknown) => {
+      if (settled) return;
+      if (contents !== null && !sentContents) {
+        sentContents = true;
+        const want = KeepReplySchema.safeParse(message);
+        if (!want.success) return fail(new ToolError('tool-error', 'the search returned an invalid reply'));
+        const kept: string[] = [];
+        let size = budget;
+        for (const i of want.data.keep) {
+          const content = contents[i];
+          if (content === undefined) return fail(new ToolError('tool-error', 'the search returned an invalid reply'));
+          size += content.length;
+          if (size > MAX_SEARCH_CHARS) return fail(tooLarge());
+          kept.push(content);
+        }
+        try {
+          worker.postMessage(kept);
+        } catch (err) {
+          fail(new ToolError('tool-error', `the search failed: ${errorMessage(err)}`));
+        }
+        return;
+      }
       const reply = schema.safeParse(message);
       finish(() => (reply.success ? resolve(reply.data) : reject(new ToolError('tool-error', 'the search returned an invalid reply'))));
     });
-    worker.once('error', (err) => finish(() => reject(new ToolError('tool-error', `the search failed: ${err.message}`))));
-    worker.once('exit', (code) => finish(() => reject(new ToolError('tool-error', `the search stopped with exit code ${code}`))));
+    worker.once('error', (err) => fail(new ToolError('tool-error', `the search failed: ${err.message}`)));
+    worker.once('exit', (code) => fail(new ToolError('tool-error', `the search stopped with exit code ${code}`)));
   });
 }
 
 const regExpSource = (re: RegExp): { source: string; flags: string } => ({ source: re.source, flags: re.flags });
-
-/** POSIX form of a host path, so a Windows cwd such as `C:\ws` becomes `/C:/ws` instead of a relative path. */
-function virtualPath(p: string): string {
-  const s = normalizeSeparators(p);
-  return /^[A-Za-z]:(\/|$)/.test(s) ? `/${s}` : s;
-}
 
 function isInside(abs: string, root: string): boolean {
   const rel = posix.relative(root, abs);
@@ -158,11 +236,11 @@ class MemoryTransaction implements Transaction {
 
   constructor(private readonly runtime: MemoryToolRuntime) {}
 
-  record(absPath: string, before: string | null, revision: number): void {
+  record(absPath: string, before: string | null, originalRevision: number, revision: number): void {
     if (this.disposed) return;
     const entry = this.journal.get(absPath);
     if (entry) entry.revision = revision;
-    else this.journal.set(absPath, { original: before, revision });
+    else this.journal.set(absPath, { original: before, originalRevision, revision });
   }
 
   async rollback(): Promise<RollbackReport> {
@@ -174,7 +252,7 @@ class MemoryTransaction implements Transaction {
         skipped.push({ path: absPath, reason: 'changed-externally' });
         continue;
       }
-      this.runtime.setFile(absPath, entry.original);
+      this.runtime.setFile(absPath, entry.original, entry.originalRevision);
       restored.push(absPath);
     }
     this.journal.clear();
@@ -201,30 +279,32 @@ export class MemoryToolRuntime implements ToolRuntime {
   /** Highest number of concurrent prepare/commit calls of read-only tools seen. */
   maxConcurrentReads = 0;
   #reading = 0;
+  #searches = 0;
+  readonly #searchQueue: (() => void)[] = [];
   readonly #opts: MemoryToolRuntimeOptions;
 
   constructor(opts: MemoryToolRuntimeOptions) {
     this.#opts = opts;
-    this.root = opts.root === undefined ? undefined : posix.resolve(opts.root);
+    this.root = opts.root === undefined ? undefined : posix.resolve(normalizeDrivePath(opts.root));
     for (const [p, content] of Object.entries(opts.files ?? {})) this.files.set(this.#abs(p), content);
   }
 
   #abs(p: string): string {
-    return posix.resolve(this.root ?? '/', p);
+    return posix.resolve(this.root ?? '/', normalizeDrivePath(p));
   }
 
   /** Sets a file, or deletes it when `content` is null, and returns its new revision. */
-  setFile(absPath: string, content: string | null): number {
+  setFile(absPath: string, content: string | null, revision: number = this.#nextRevision++): number {
     if (content === null) this.files.delete(absPath);
     else this.files.set(absPath, content);
-    const revision = this.#nextRevision++;
-    this.#revisions.set(absPath, revision);
+    if (revision === 0) this.#revisions.delete(absPath);
+    else this.#revisions.set(absPath, revision);
     return revision;
   }
 
   /** Revision of the last change made through this runtime, if any. */
-  revision(absPath: string): number | undefined {
-    return this.#revisions.get(absPath);
+  revision(absPath: string): number {
+    return this.#revisions.get(absPath) ?? 0;
   }
 
   /** Simulates a change made outside the run. */
@@ -238,8 +318,8 @@ export class MemoryToolRuntime implements ToolRuntime {
 
   /** Resolves `p` against the session cwd and keeps it inside the fixed root, or else the session cwd and roots. */
   #resolve(p: string, ctx: SessionContext): string {
-    const abs = posix.resolve(virtualPath(ctx.cwd), virtualPath(p));
-    const roots = this.root === undefined ? [ctx.cwd, ...ctx.roots].map((root) => posix.resolve(virtualPath(root))) : [this.root];
+    const abs = posix.resolve(normalizeDrivePath(ctx.cwd), normalizeDrivePath(p));
+    const roots = this.root === undefined ? [ctx.cwd, ...ctx.roots].map((root) => posix.resolve(normalizeDrivePath(root))) : [this.root];
     if (!roots.some((root) => isInside(abs, root))) {
       throw new ToolError('outside-workspace', `${p} is outside the workspace ${roots.join(', ')}`);
     }
@@ -308,8 +388,7 @@ export class MemoryToolRuntime implements ToolRuntime {
         this.#protect(absPath, policy);
         const before = this.files.get(absPath);
         if (before === undefined) throw new ToolError('not-found', `${absPath} does not exist`);
-        const parts = before.split(call.args.oldString);
-        const count = parts.length - 1;
+        const count = countOccurrences(before, call.args.oldString);
         if (count === 0) throw new ToolError('not-found', `oldString not found in ${absPath}`);
         if (count > 1 && call.args.replaceAll !== true) {
           throw new ToolError('invalid-args', `oldString matches ${count} times in ${absPath}; pass replaceAll or a longer oldString`);
@@ -317,7 +396,9 @@ export class MemoryToolRuntime implements ToolRuntime {
         const replacements = call.args.replaceAll === true ? count : 1;
         const afterLength = before.length + replacements * (call.args.newString.length - call.args.oldString.length);
         if (afterLength > MAX_ARG_CHARS) throw new ToolError('invalid-args', 'edited content is too large');
-        const afterContent = parts.join(call.args.newString);
+        const newString = call.args.newString;
+        const afterContent =
+          call.args.replaceAll === true ? before.replaceAll(call.args.oldString, () => newString) : before.replace(call.args.oldString, () => newString);
         return {
           id: call.id,
           tool: 'edit',
@@ -382,29 +463,71 @@ export class MemoryToolRuntime implements ToolRuntime {
     }
   }
 
+  /** Waits, cancelably, for a search slot and returns its release, which runs at most once. */
+  async #takeSearchSlot(signal: AbortSignal): Promise<() => void> {
+    if (signal.aborted) throw new ToolError('cancelled', 'the search was stopped');
+    if (this.#searches < MAX_CONCURRENT_SEARCHES) this.#searches++;
+    else {
+      await new Promise<void>((resolve, reject) => {
+        const grant = (): void => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        };
+        const onAbort = (): void => {
+          this.#searchQueue.splice(this.#searchQueue.indexOf(grant), 1);
+          reject(new ToolError('cancelled', 'the search was stopped'));
+        };
+        this.#searchQueue.push(grant);
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.#searchQueue.shift();
+      if (next === undefined) this.#searches--;
+      else next();
+    };
+  }
+
   async #search(prepared: Extract<PreparedCall, { tool: 'grep' | 'glob' }>, signal: AbortSignal): Promise<ToolResult> {
+    const release = await this.#takeSearchSlot(signal);
+    let pending: Promise<ToolResult>;
+    try {
+      pending = this.#startSearch(prepared, signal, release);
+    } catch (err) {
+      // No worker started, so the slot is free again.
+      release();
+      throw err;
+    }
+    const result = await pending;
+    this.#recordCommit(prepared, prepared.effect.absRoot);
+    return result;
+  }
+
+  /** Builds the job once a slot is held; the content stays here until the worker asks for it. */
+  #startSearch(prepared: Extract<PreparedCall, { tool: 'grep' | 'glob' }>, signal: AbortSignal, release: () => void): Promise<ToolResult> {
     const { absRoot, maxResults } = prepared.effect;
-    const inRoot = [...this.files.entries()].filter(([file]) => isInside(file, absRoot));
-    const rel = (file: string): string => normalizeSeparators(posix.relative(absRoot, file));
-    let result: ToolResult;
+    const inRoot = [...this.files.entries()].filter(([file]) => isInside(file, absRoot) && (prepared.tool === 'grep' || file !== absRoot));
+    inRoot.sort(([a], [b]) => (prepared.tool === 'grep' ? a.localeCompare(b) : a < b ? -1 : a > b ? 1 : 0));
+    let budget = 0;
+    const files = inRoot.map(([file]) => {
+      const rel = normalizeSeparators(posix.relative(absRoot, file));
+      const names = prepared.tool === 'grep' ? [normalizeSeparators(posix.basename(file)), rel] : [rel];
+      budget += file.length + names.reduce((sum, name) => sum + name.length, 0);
+      return [file, names] as const;
+    });
+    if (budget > MAX_SEARCH_CHARS) throw tooLarge();
     if (prepared.tool === 'grep') {
       const { pattern, ignoreCase, glob } = prepared.effect;
-      const files = inRoot
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([file, content]) => [file, [normalizeSeparators(posix.basename(file)), rel(file)], content] as const);
       const names = glob === null ? null : regExpSource(pathPatternRegExp(glob, false));
-      result = await searchInWorker({ names, lines: { source: pattern, flags: ignoreCase ? 'i' : '' }, maxResults, files }, GrepReplySchema, signal);
-    } else {
-      const files = inRoot
-        .filter(([file]) => file !== absRoot)
-        .map(([file]) => file)
-        .sort()
-        .map((file) => [file, [rel(file)], ''] as const);
-      const names = regExpSource(pathPatternRegExp(prepared.effect.pattern, false));
-      result = await searchInWorker({ names, lines: null, maxResults, files }, GlobReplySchema, signal);
+      const job = { names, lines: { source: pattern, flags: ignoreCase ? 'i' : '' }, maxResults, files };
+      const contents = inRoot.map(([, content]) => content);
+      return searchInWorker(job, contents, budget, GrepReplySchema, signal, release);
     }
-    this.#recordCommit(prepared, absRoot);
-    return result;
+    const names = regExpSource(pathPatternRegExp(prepared.effect.pattern, false));
+    return searchInWorker({ names, lines: null, maxResults, files }, null, budget, GlobReplySchema, signal, release);
   }
 
   #commitRead(prepared: Extract<PreparedCall, { tool: 'read' }>): ToolResult {
@@ -429,8 +552,9 @@ export class MemoryToolRuntime implements ToolRuntime {
         const current = this.files.get(absPath) ?? null;
         const currentHash = current === null ? null : sha256(current);
         if (currentHash !== beforeHash) throw new ToolError('stale', `${absPath} changed after the call was prepared`);
+        const originalRevision = this.revision(absPath);
         const revision = this.setFile(absPath, afterContent);
-        if (tx instanceof MemoryTransaction) tx.record(absPath, current, revision);
+        if (tx instanceof MemoryTransaction) tx.record(absPath, current, originalRevision, revision);
         this.#recordCommit(prepared, absPath);
         if (prepared.tool === 'write') return { path: absPath, created: current === null, diff };
         return { path: absPath, replacements: prepared.effect.replacements, matchStrategy: prepared.effect.matchStrategy, diff };

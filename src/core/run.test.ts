@@ -325,6 +325,20 @@ describe('runScript', () => {
     expect(d.tools.read('notes.txt')).toBeUndefined();
   });
 
+  it('keeps the sandbox stopped when opening the journal uses up the deadline', async () => {
+    let clock = 0;
+    const run = vi.fn(async () => ({ ok: true as const, value: 'done' }));
+    const d = deps({}, {}, { run });
+    const begin = d.tools.beginTransaction.bind(d.tools);
+    d.tools.beginTransaction = () => {
+      clock = 11;
+      return begin();
+    };
+    const result = await runScript({ code: 'x', transaction: true, timeoutMs: 10 }, { ...d, now: () => clock });
+    expect(result.error?.kind).toBe('timeout');
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('never rejects when the sandbox throws', async () => {
     const sandbox: Sandbox = {
       run: () => {

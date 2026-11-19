@@ -102,7 +102,7 @@ async function rollbackBounded(
   warnings: string[],
 ): Promise<{ readonly report?: RollbackReport; readonly done: Promise<unknown> }> {
   if (writes) {
-    warnings.push('the rollback is pending: some writes were still running when the run stopped; their files are restored once they end.');
+    warnings.push('the rollback is pending: some writes were still running when the run stopped; the final rollback outcome is unknown.');
     return { done: writes.then(() => tx.rollback()) };
   }
   const done = Promise.resolve().then(() => tx.rollback());
@@ -240,10 +240,11 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     } catch (err) {
       policy = { error: errorMessage(err) };
     }
+    checkDeadline();
+    if (req.transaction && stopReason === undefined) tx = deps.tools.beginTransaction();
+
     const leftMs = deadline - now();
     if (leftMs <= 0) stop('timeout');
-
-    if (req.transaction) tx = deps.tools.beginTransaction();
     dispatcher = new Dispatcher<P>({
       adapter: deps.adapter,
       tools: deps.tools,
