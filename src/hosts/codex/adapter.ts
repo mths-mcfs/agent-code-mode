@@ -219,7 +219,12 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       case 'unchanged':
         return { kind: 'allow' };
       case 'updated':
-        return { kind: 'allow', updatedArgs: mapped.args, reason: 'rewritten by a Codex PreToolUse hook' };
+        return {
+          kind: 'allow',
+          updatedArgs: mapped.args,
+          ...(mapped.bindsPreparedFile ? { bindsPreparedFile: true } : {}),
+          reason: 'rewritten by a Codex PreToolUse hook',
+        };
       case 'invalid':
         return { kind: 'deny', source: 'hook-error', reason: mapped.reason };
       case 'unsupported':

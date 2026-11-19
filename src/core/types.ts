@@ -382,11 +382,16 @@ export type DenySource =
  *   this project's camelCase args shape for the same tool (the adapter maps
  *   from the host's native shape). It is untrusted: the dispatcher re-validates,
  *   re-prepares and re-checks it statically.
+ * - `bindsPreparedFile: true` (only meaningful with `updatedArgs`): the hook
+ *   evaluated a write/edit against the file version the first preparation
+ *   read. The re-prepared call must then target the same `absPath` with the
+ *   same `beforeHash` (null included), or the dispatcher denies it (source
+ *   `hook`). Without it, a rewrite may point anywhere the static rules allow.
  * - `ask`: the host would prompt the user. Without an interactive channel the
  *   dispatcher turns it into `deny` with source `ask-unavailable`.
  */
 export type Decision =
-  | { readonly kind: 'allow'; readonly updatedArgs?: unknown; readonly reason?: string }
+  | { readonly kind: 'allow'; readonly updatedArgs?: unknown; readonly bindsPreparedFile?: true; readonly reason?: string }
   | { readonly kind: 'deny'; readonly reason: string; readonly source: DenySource }
   | { readonly kind: 'ask'; readonly reason: string };
 

@@ -114,7 +114,10 @@ describe.runIf(posix)('Codex hooks', () => {
 
   it('maps updatedInput back to bash args', async () => {
     const a = adapter(managed([{ matcher: 'Bash', hooks: [{ type: 'command', command: hooks.rewrite }] }]));
-    expect(await authorize(a, bash('echo original'))).toMatchObject({ kind: 'allow', updatedArgs: { command: 'echo rewritten' } });
+    const decision = await authorize(a, bash('echo original'));
+    expect(decision).toMatchObject({ kind: 'allow', updatedArgs: { command: 'echo rewritten' } });
+    // A bash rewrite has no file version to bind to.
+    expect(decision).not.toHaveProperty('bindsPreparedFile');
   });
 
   it('times out, kills the hook and denies', async () => {
@@ -265,8 +268,17 @@ describe.runIf(posix)('exactness: what the hook sees is what will be applied', (
   it('maps a rewritten apply_patch back to a write', async () => {
     const file = `${WS}/hello.txt`;
     const a = adapter(managed([{ hooks: [{ type: 'command', command: hooks.patchRewrite }] }]), { current: { [file]: 'hello\n' } });
-    expect(await authorize(a, write(file, 'hello\n', 'hello\nworld\n'))).toMatchObject({ kind: 'allow', updatedArgs: { path: 'hello.txt', content: 'hello\nWORLD\n' } });
-    expect(await authorize(a, edit(file, 'hello\n', 'hello\nworld\n'))).toMatchObject({ kind: 'allow', updatedArgs: { path: 'hello.txt', oldString: 'hello\n', newString: 'hello\nWORLD\n' } });
+    // The patch was applied to the version the hook saw, so the rewrite is bound to it.
+    expect(await authorize(a, write(file, 'hello\n', 'hello\nworld\n'))).toMatchObject({
+      kind: 'allow',
+      updatedArgs: { path: 'hello.txt', content: 'hello\nWORLD\n' },
+      bindsPreparedFile: true,
+    });
+    expect(await authorize(a, edit(file, 'hello\n', 'hello\nworld\n'))).toMatchObject({
+      kind: 'allow',
+      updatedArgs: { path: 'hello.txt', oldString: 'hello\n', newString: 'hello\nWORLD\n' },
+      bindsPreparedFile: true,
+    });
   });
 
   it('denies when the file changed after prepare', async () => {
@@ -390,6 +402,44 @@ describe.runIf(posix)('dispatcher integration', () => {
     const reply = await d.dispatch('bash', { command: 'echo original' });
     expect(reply.ok).toBe(true);
     expect(tools.commits.map((x) => x.target)).toEqual(['echo rewritten']);
+  });
+
+  /** A Codex adapter over the memory runtime's files; `afterHook` runs once the hook has decided. */
+  function patchRewriteSetup(initial: string, afterHook: (tools: MemoryToolRuntime) => void = () => undefined) {
+    const tools = new MemoryToolRuntime({ root: WS, files: { 'hello.txt': initial } });
+    class Racing extends CodexHostAdapter {
+      override async authorize(...args: Parameters<CodexHostAdapter['authorize']>) {
+        const decision = await super.authorize(...args);
+        afterHook(tools);
+        return decision;
+      }
+    }
+    const a = new Racing({
+      io: () => memoryIo({ files: managed([{ hooks: [{ type: 'command', command: hooks.patchRewrite }] }]), argv: ['codex'] }),
+      hookEnv: { ...process.env, SHELL: '/bin/sh' },
+      stateDir: '/state',
+      tmpDirs: { slashTmp: '/tmp', tmpdir: null },
+      readCurrent: async (abs) => tools.files.get(abs) ?? null,
+    });
+    return { tools, a };
+  }
+
+  it('commits a patch rewrite against the version the hook evaluated', async () => {
+    const { tools, a } = patchRewriteSetup('hello\n');
+    const c = ctx({ sandboxMode: 'danger-full-access' });
+    const d = new Dispatcher({ adapter: a, tools, ctx: c, policy: await a.loadPolicy(c) });
+    expect((await d.dispatch('write', { path: 'hello.txt', content: 'hello\nworld\n' })).ok).toBe(true);
+    expect(tools.read('hello.txt')).toBe('hello\nWORLD\n');
+  });
+
+  it('denies a patch rewrite when the file changed after the hook evaluated it', async () => {
+    const { tools, a } = patchRewriteSetup('hello\n', (t) => t.externalWrite('hello.txt', 'changed meanwhile\n'));
+    const c = ctx({ sandboxMode: 'danger-full-access' });
+    const d = new Dispatcher({ adapter: a, tools, ctx: c, policy: await a.loadPolicy(c) });
+    const reply = await d.dispatch('write', { path: 'hello.txt', content: 'hello\nworld\n' });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'denied', source: 'hook' } });
+    expect(tools.read('hello.txt')).toBe('changed meanwhile\n');
+    expect(tools.commits).toHaveLength(0);
   });
 
   it('denies every call when the config cannot be loaded', async () => {
