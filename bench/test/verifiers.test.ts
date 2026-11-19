@@ -8,8 +8,8 @@ import { TASKS } from '../tasks/index.ts';
 import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
 
-// Every case builds its own workspace, so the cases run side by side: two at a time on the slower Windows runner.
-if (process.platform === 'win32') vi.setConfig({ maxConcurrency: 2 });
+// Every case builds its own workspace, so the cases run side by side. Two at a time: more starves the timing-sensitive suites in the other workers.
+vi.setConfig({ maxConcurrency: 2 });
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
 afterAll(async () => {
