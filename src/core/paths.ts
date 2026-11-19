@@ -57,6 +57,14 @@ export function normalizeDrivePath(p: string): string {
   return /^[A-Za-z]:(\/|$)/.test(normalized) ? `/${normalized}` : normalized;
 }
 
+/**
+ * Whether `p` is a Windows network-share (UNC) path such as `\\server\share`
+ * or `//server/share`, including `\\?\` device paths. Not supported.
+ */
+export function isUncPath(p: string): boolean {
+  return /^[\\/]{2}/.test(p);
+}
+
 /** Whether file names on this platform are usually case-insensitive. */
 export const DEFAULT_CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 
