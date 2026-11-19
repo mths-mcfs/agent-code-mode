@@ -4,12 +4,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { SessionContext } from '../core/types.js';
+import type { Sandbox, SessionContext } from '../core/types.js';
 import { FakeSandbox } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter } from '../testing/static-host-adapter.js';
 import { ClaudeContextProvider, CodexContextProvider, GenericContextProvider } from './context.js';
-import { createMcpServer } from './mcp.js';
+import { PLACEHOLDER_EXAMPLE, createMcpServer } from './mcp.js';
 import type { Runtime } from './runtime.js';
 
 const root = os.tmpdir();
@@ -18,7 +18,7 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic' } = {}) {
+async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; sandbox?: Sandbox; defaultRuntime?: boolean } = {}) {
   const seen: SessionContext[] = [];
   const tools = new MemoryToolRuntime({ root, files: { 'notes.txt': 'hello\n' } });
   const adapter = new StaticHostAdapter({
@@ -34,7 +34,7 @@ async function connect(opts: { env?: Record<string, string>; host?: 'claude' | '
     contextProvider: host === 'claude' ? new ClaudeContextProvider() : host === 'codex' ? new CodexContextProvider() : new GenericContextProvider(),
     adapter,
     tools,
-    sandbox: new FakeSandbox(),
+    sandbox: opts.sandbox ?? new FakeSandbox(),
     maxTimeoutMs: 10_000,
   });
   const server = createMcpServer({
@@ -42,7 +42,7 @@ async function connect(opts: { env?: Record<string, string>; host?: 'claude' | '
     env: opts.env ?? {},
     serverCwd: root,
     stateDir: `${root}/acm-test-state`,
-    createRuntime: runtime,
+    ...(opts.defaultRuntime ? {} : { createRuntime: runtime }),
     ...(opts.host ? { host: opts.host } : {}),
   });
   const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
@@ -156,13 +156,37 @@ describe('MCP server', () => {
     expect(unknown.isError).toBe(true);
     const text = textOf(unknown);
     expect(text.length).toBeLessThanOrEqual(9_500);
-    const body = JSON.parse(text) as { overflowPath?: string; truncated?: boolean };
-    expect(body.truncated).toBe(true);
-    expect(typeof body.overflowPath).toBe('string');
+    const body: unknown = JSON.parse(text);
+    expect(body).toMatchObject({ truncated: true });
+    if (process.platform === 'win32') expect(body).not.toHaveProperty('overflowPath');
+    else expect(body).toHaveProperty('overflowPath', expect.any(String));
 
     const invalid = await client.callTool({ name: 'run', arguments: { code: 'x', transaction: 'y'.repeat(100_000) } });
     expect(invalid.isError).toBe(true);
     expect(textOf(invalid).length).toBeLessThanOrEqual(9_500);
+  });
+
+  it('describes the placeholder runtime it serves by default and runs its example', async () => {
+    const { client } = await connect({ defaultRuntime: true });
+    expect(client.getInstructions()).toContain(`Example code: ${PLACEHOLDER_EXAMPLE}`);
+    expect(client.getInstructions()).not.toContain('async JavaScript function');
+    const [tool] = (await client.listTools()).tools;
+    expect(tool?.description).toContain('placeholder');
+    expect(JSON.stringify(tool?.inputSchema)).not.toContain('JavaScript');
+
+    const result = await client.callTool({ name: 'run', arguments: { code: PLACEHOLDER_EXAMPLE } });
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(textOf(result))).toMatchObject({ ok: true, result: [{ created: true }, { content: 'hello\n' }] });
+  });
+
+  it('stops a fake script at its deadline before a later write, even when no timer could fire', async () => {
+    let clock = 0;
+    const { client, tools } = await connect({ sandbox: new FakeSandbox({ now: () => (clock += 1_000) }) });
+    const code = JSON.stringify([{ tool: 'write', args: { path: 'late.txt', content: 'x' } }]);
+    const result = await client.callTool({ name: 'run', arguments: { code, timeoutMs: 1_500 } });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(textOf(result))).toMatchObject({ ok: false, error: { kind: 'timeout' } });
+    expect(tools.read('late.txt')).toBeUndefined();
   });
 
   it('returns isError for invalid arguments and unknown tools', async () => {
