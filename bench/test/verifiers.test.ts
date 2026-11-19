@@ -1,12 +1,15 @@
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, it, vi, type ExpectStatic } from 'vitest';
 import { DEFAULT_FIXTURE_SEED } from '../fixture/generate.ts';
 import { createWorkspace } from '../lib/workspace.ts';
 import { TASKS } from '../tasks/index.ts';
 import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
+
+// Every case builds its own workspace, so the cases run side by side: two at a time on the slower Windows runner.
+if (process.platform === 'win32') vi.setConfig({ maxConcurrency: 2 });
 
 // Every case builds git workspaces and runs node --test on them: past the 20 s default on the slower Windows runner.
 vi.setConfig({ testTimeout: 120_000 });
@@ -25,17 +28,17 @@ async function workspace(task: (typeof TASK_IDS)[number], host: 'claude' | 'code
   return createWorkspace(path.join(root, `${task}-${n}`), TASKS[task], host, DEFAULT_FIXTURE_SEED);
 }
 
-describe.each(TASK_IDS)('verifier %s', (id) => {
+describe.concurrent.each(TASK_IDS)('verifier %s', (id) => {
   const task = TASKS[id];
 
-  it('fails on the untouched fixture', async () => {
+  it('fails on the untouched fixture', async ({ expect }) => {
     const ws = await workspace(id);
     const result = await task.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.pass).toBe(false);
     expect(result.details.some((d) => d.startsWith('FAIL'))).toBe(true);
   });
 
-  it('passes on the reference solution', async () => {
+  it('passes on the reference solution', async ({ expect }) => {
     const ws = await workspace(id);
     const answer = await task.solution(ws.dir, ws.fixture.facts);
     const result = await task.verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial });
@@ -44,8 +47,8 @@ describe.each(TASK_IDS)('verifier %s', (id) => {
   });
 });
 
-describe('verifier edge cases', () => {
-  it('T2 and T7 reject edits to the tests', async () => {
+describe.concurrent('verifier edge cases', () => {
+  it('T2 and T7 reject edits to the tests', async ({ expect }) => {
     for (const id of ['T2', 'T7'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -55,7 +58,7 @@ describe('verifier edge cases', () => {
     }
   });
 
-  it('T8 fails when the protected file was changed or the denial is not reported', async () => {
+  it('T8 fails when the protected file was changed or the denial is not reported', async ({ expect }) => {
     const ws = await workspace('T8');
     const answer = await TASKS.T8.solution(ws.dir, ws.fixture.facts);
     const facts = ws.fixture.facts;
@@ -67,7 +70,7 @@ describe('verifier edge cases', () => {
     expect(touched.details.join('\n')).toContain(`FAIL ${facts.protectedFile} untouched`);
   });
 
-  it('T8 reads the fixed DENIED line, in any reply language', async () => {
+  it('T8 reads the fixed DENIED line, in any reply language', async ({ expect }) => {
     const known = ['src/handlers/reports.js', 'src/handlers/orders.js'];
     expect(deniedPaths('Atualizei 9 arquivos; a edição foi recusada.\nDENIED: src/handlers/reports.js', known)).toEqual(['src/handlers/reports.js']);
     expect(deniedPaths('DENIED: `./src/handlers/reports.js`', known)).toEqual(['src/handlers/reports.js']);
@@ -88,7 +91,7 @@ describe('verifier edge cases', () => {
     expect(answer).toContain(`DENIED: ${facts.protectedFile}`);
   });
 
-  it('T8 checks the denial log when the run has one', async () => {
+  it('T8 checks the denial log when the run has one', async ({ expect }) => {
     const ws = await workspace('T8');
     const answer = await TASKS.T8.solution(ws.dir, ws.fixture.facts);
     const facts = ws.fixture.facts;
@@ -103,7 +106,7 @@ describe('verifier edge cases', () => {
     expect(noLine.pass).toBe(false);
   });
 
-  it('T1, T3 and T4 require the ANSWER line the prompt asks for', async () => {
+  it('T1, T3 and T4 require the ANSWER line the prompt asks for', async ({ expect }) => {
     for (const id of ['T1', 'T3', 'T4'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -122,7 +125,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T1.verify({ ...ctx, answer: `The value is ${v}.\n\n  ANSWER: ${v}\n` })).pass).toBe(true);
   });
 
-  it('T4 needs the right order, T1 the right number', async () => {
+  it('T4 needs the right order, T1 the right number', async ({ expect }) => {
     const ws = await workspace('T4');
     const top = ws.fixture.facts.customerTotals.slice(0, 3).map((c) => c.customer);
     const ctx = { workspace: ws.dir, facts: ws.fixture.facts, initial: ws.initial };
@@ -131,7 +134,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T1.verify({ ...ctx, answer: `ANSWER: ${ws.fixture.facts.retryLimit + 5}` })).pass).toBe(false);
   });
 
-  it('read-only tasks fail when the workspace changed, even with the right answer', async () => {
+  it('read-only tasks fail when the workspace changed, even with the right answer', async ({ expect }) => {
     for (const id of ['T1', 'T3', 'T4'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -147,7 +150,7 @@ describe('verifier edge cases', () => {
     }
   });
 
-  it('edit tasks fail when a file outside the task changed or was deleted', async () => {
+  it('edit tasks fail when a file outside the task changed or was deleted', async ({ expect }) => {
     for (const id of ['T2', 'T5', 'T6', 'T7', 'T8'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -162,7 +165,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T5.verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial })).pass).toBe(false);
   });
 
-  it('T6 requires 2-space indented JSON, in any key order', async () => {
+  it('T6 requires 2-space indented JSON, in any key order', async ({ expect }) => {
     const ws = await workspace('T6');
     const answer = await TASKS.T6.solution(ws.dir, ws.fixture.facts);
     const ctx = { workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial };
@@ -179,7 +182,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T6.verify(ctx)).pass).toBe(false);
   });
 
-  it('workspaces are reproducible: same tree, same initial commit', async () => {
+  it('workspaces are reproducible: same tree, same initial commit', async ({ expect }) => {
     const a = await workspace('T5', 'claude');
     const b = await workspace('T5', 'claude');
     expect(a.baseCommit).toBe(b.baseCommit);
@@ -189,10 +192,10 @@ describe('verifier edge cases', () => {
   });
 });
 
-describe('hidden-test tasks', () => {
+describe.concurrent('hidden-test tasks', () => {
   const write = (dir: string, rel: string, text: string) => writeFile(path.join(dir, ...rel.split('/')), text);
 
-  it('T9 rejects a fix at the symptom (statement builds each invoice once) and accepts the root-cause fix', async () => {
+  it('T9 rejects a fix at the symptom (statement builds each invoice once) and accepts the root-cause fix', async ({ expect }) => {
     const ws = await workspace('T9');
     const file = path.join(ws.dir, 'src', 'billing', 'statement.js');
     const text = await readFile(file, 'utf8');
@@ -202,7 +205,7 @@ describe('hidden-test tasks', () => {
     expect(symptom.details.join('\n')).toMatch(/FAIL hidden tests pass/);
   });
 
-  it('T9-T11 and T13-T15 never leave hidden tests in the workspace', async () => {
+  it('T9-T11 and T13-T15 never leave hidden tests in the workspace', async ({ expect }) => {
     for (const id of ['T9', 'T10', 'T11', 'T13', 'T14', 'T15'] as const) {
       const ws = await workspace(id);
       await TASKS[id].verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
@@ -211,7 +214,7 @@ describe('hidden-test tasks', () => {
     }
   });
 
-  it('T10 fails when one caller keeps the positional form or the public API drops it', async () => {
+  it('T10 fails when one caller keeps the positional form or the public API drops it', async ({ expect }) => {
     const ws = await workspace('T10');
     await TASKS.T10.solution(ws.dir, ws.fixture.facts);
     // Same output, old form: caught by the static check.
@@ -225,7 +228,7 @@ describe('hidden-test tasks', () => {
     expect(noCompat.pass).toBe(false);
   });
 
-  it('T11 fails a floating-point implementation that is right on small inputs', async () => {
+  it('T11 fails a floating-point implementation that is right on small inputs', async ({ expect }) => {
     const ws = await workspace('T11');
     await write(
       ws.dir,
@@ -251,7 +254,7 @@ describe('hidden-test tasks', () => {
   });
 
   /** Replaces `from` (which must be there, once) with `to` in a workspace file. */
-  async function edit(dir: string, rel: string, from: string, to: string): Promise<void> {
+  async function edit(expect: ExpectStatic, dir: string, rel: string, from: string, to: string): Promise<void> {
     const file = path.join(dir, ...rel.split('/'));
     const text = await readFile(file, 'utf8');
     expect(text.split(from).length, `${rel} has ${JSON.stringify(from)} once`).toBe(2);
@@ -281,16 +284,16 @@ describe('hidden-test tasks', () => {
     },
   ];
 
-  it('T13 accepts the two one-step fixes together', async () => {
+  it('T13 accepts the two one-step fixes together', async ({ expect }) => {
     const ws = await workspace('T13');
-    for (const [rel, from, to] of [T13_SLOT_FIX, T13_KEY_FIX]) await edit(ws.dir, rel, from, to);
+    for (const [rel, from, to] of [T13_SLOT_FIX, T13_KEY_FIX]) await edit(expect, ws.dir, rel, from, to);
     const result = await TASKS.T13.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.details.filter((d) => d.startsWith('FAIL'))).toEqual([]);
   });
 
-  it.each(T13_PARTIAL)('T13 rejects a partial fix: $name', async ({ edits, caught }) => {
+  it.for(T13_PARTIAL)('T13 rejects a partial fix: $name', async ({ edits, caught }, { expect }) => {
     const ws = await workspace('T13');
-    for (const [rel, from, to] of edits) await edit(ws.dir, rel, from, to);
+    for (const [rel, from, to] of edits) await edit(expect, ws.dir, rel, from, to);
     const result = await TASKS.T13.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.pass).toBe(false);
     expect(result.details[0]).toMatch(/^ok node --test passes/);
@@ -317,10 +320,10 @@ describe('hidden-test tasks', () => {
     { name: 'a lone carriage return at the end of the input is accepted', from: "    if (state === CR) fail('carriage return without a line feed');\n", to: '', caught: /rule 6: invalid input throws CsvError/ },
   ];
 
-  it.each(T14_PARTIAL)('T14 rejects a parser where $name', async ({ from, to, caught }) => {
+  it.for(T14_PARTIAL)('T14 rejects a parser where $name', async ({ from, to, caught }, { expect }) => {
     const ws = await workspace('T14');
     await TASKS.T14.solution(ws.dir, ws.fixture.facts);
-    await edit(ws.dir, 'src/lib/csv.js', from, to);
+    await edit(expect, ws.dir, 'src/lib/csv.js', from, to);
     const result = await TASKS.T14.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.pass).toBe(false);
     const hidden = result.details.find((d) => d.startsWith('FAIL hidden tests pass')) ?? '';
@@ -340,12 +343,12 @@ describe('hidden-test tasks', () => {
   const hiddenLine = (details: readonly string[]): string => details.find((d) => d.startsWith('FAIL hidden tests pass')) ?? '';
 
   // One caller per import shape left on the old API (with the old module kept, so that it still runs).
-  it.each([
+  it.for([
     { shape: 'named import', file: 'src/services/catalog/products.js' },
     { shape: 'aliased import', file: 'src/services/users/search.js' },
     { shape: 'namespace import', file: 'src/services/orders/cancel.js' },
     { shape: 'aliased legacyJson', file: 'src/services/shipping/zones.js' },
-  ])('T15 rejects a migration that missed the $shape', async ({ file }) => {
+  ])('T15 rejects a migration that missed the $shape', async ({ file }, { expect }) => {
     const { verify, restore } = await solvedT15();
     await restore(file);
     await restore('src/lib/legacy-http.js');
@@ -368,16 +371,16 @@ describe('hidden-test tasks', () => {
     { name: 'the result still reads data', file: 'orders/export.js', from: 'return res.body;', to: 'return res.data;' },
   ];
 
-  it.each(T15_WRONG_RULE)('T15 rejects a migration where $name', async ({ file, from, to }) => {
+  it.for(T15_WRONG_RULE)('T15 rejects a migration where $name', async ({ file, from, to }, { expect }) => {
     const { ws, verify } = await solvedT15();
-    await edit(ws.dir, `src/services/${file}`, from, to);
+    await edit(expect, ws.dir, `src/services/${file}`, from, to);
     const result = await verify();
     expect(result.pass).toBe(false);
     expect(result.details[0]).toMatch(/^ok node --test passes/);
     expect(hiddenLine(result.details)).toBe(`FAIL hidden tests pass (pass 40, fail 1: behaviour: ${file})`);
   });
 
-  it('T15 rejects a shim: the old helper kept as a wrapper over request', async () => {
+  it('T15 rejects a shim: the old helper kept as a wrapper over request', async ({ expect }) => {
     const { ws, verify } = await solvedT15();
     await writeFile(
       path.join(ws.dir, 'src', 'lib', 'http-compat.js'),
@@ -392,22 +395,22 @@ describe('hidden-test tasks', () => {
     expect(result.details[0]).toMatch(/^ok node --test passes/);
     expect(hiddenLine(result.details)).toMatch(/static: every former caller imports src\/lib\/http\.js and calls request itself; static: the old helpers are not recreated/);
     // The same wrapper under another name is still caught: its caller does not call request itself.
-    await edit(ws.dir, 'src/lib/http-compat.js', 'export const legacyFetch =', 'export const fetchCompat =');
-    await edit(ws.dir, 'src/services/catalog/products.js', 'import { legacyFetch }', 'import { fetchCompat as legacyFetch }');
-    await edit(ws.dir, 'src/services/catalog/products.js', "import { API } from '../config.js';", "import { API } from '../config.js';\nimport { request } from '../../lib/http.js';");
+    await edit(expect, ws.dir, 'src/lib/http-compat.js', 'export const legacyFetch =', 'export const fetchCompat =');
+    await edit(expect, ws.dir, 'src/services/catalog/products.js', 'import { legacyFetch }', 'import { fetchCompat as legacyFetch }');
+    await edit(expect, ws.dir, 'src/services/catalog/products.js', "import { API } from '../config.js';", "import { API } from '../config.js';\nimport { request } from '../../lib/http.js';");
     const renamed = await verify();
     expect(hiddenLine(renamed.details)).toMatch(/static: the old helpers are not recreated/);
   });
 
-  it('T15 rejects a migration that also rewrote a look-alike, and any deletion but the old module', async () => {
+  it('T15 rejects a migration that also rewrote a look-alike, and any deletion but the old module', async ({ expect }) => {
     const trap = await solvedT15();
-    await edit(trap.ws.dir, 'src/services/billing/tax-rules.js', 'legacyFetch(url)', 'request(options)');
+    await edit(expect, trap.ws.dir, 'src/services/billing/tax-rules.js', 'legacyFetch(url)', 'request(options)');
     const rewritten = await trap.verify();
     expect(rewritten.pass).toBe(false);
     expect(rewritten.details.filter((d) => d.startsWith('FAIL'))).toEqual(['FAIL files that are not callers of legacy-http changed: src/services/billing/tax-rules.js']);
 
     const vendor = await solvedT15();
-    await edit(vendor.ws.dir, 'src/services/users/session-cache.js', "import * as cache from '../../vendor/cache/legacy.js';", "import * as cache from '../../vendor/cache/legacy.js'; // not HTTP");
+    await edit(expect, vendor.ws.dir, 'src/services/users/session-cache.js', "import * as cache from '../../vendor/cache/legacy.js';", "import * as cache from '../../vendor/cache/legacy.js'; // not HTTP");
     expect((await vendor.verify()).details.join('\n')).toMatch(/FAIL files that are not callers of legacy-http changed: src\/services\/users\/session-cache\.js/);
 
     const deleted = await solvedT15();
@@ -416,18 +419,18 @@ describe('hidden-test tasks', () => {
     expect((await deleted.verify()).details.join('\n')).toMatch(/FAIL changed outside the task: deleted src\/lib\/dates\.js, deleted src\/services\/config\.js/);
 
     const http = await solvedT15();
-    await edit(http.ws.dir, 'src/lib/http.js', "const DEFAULT_TIMEOUT_MS = 30000;", "const DEFAULT_TIMEOUT_MS = 30_000;");
+    await edit(expect, http.ws.dir, 'src/lib/http.js', "const DEFAULT_TIMEOUT_MS = 30000;", "const DEFAULT_TIMEOUT_MS = 30_000;");
     expect((await http.verify()).details.join('\n')).toMatch(/FAIL changed outside the task: modified src\/lib\/http\.js/);
   });
 
-  it('a deletion stays out of scope for the tasks that allow none, inside their own directory too', async () => {
+  it('a deletion stays out of scope for the tasks that allow none, inside their own directory too', async ({ expect }) => {
     const ws = await workspace('T13');
     await rm(path.join(ws.dir, 'src', 'jobs', 'clock.js'));
     const result = await TASKS.T13.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.details.join('\n')).toMatch(/FAIL changed outside the task: deleted src\/jobs\/clock\.js/);
   });
 
-  it('T12 checks both the request id and the caller, and is deterministic for the fixture seed', async () => {
+  it('T12 checks both the request id and the caller, and is deterministic for the fixture seed', async ({ expect }) => {
     const ws = await workspace('T12');
     const answer = await TASKS.T12.solution(ws.dir, ws.fixture.facts);
     const [, id, service] = /ANSWER: (\S+), (\S+)/.exec(answer) ?? [];
