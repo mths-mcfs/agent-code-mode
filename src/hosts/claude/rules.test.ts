@@ -158,14 +158,36 @@ describe('BashAnalyzer file targets and directories', () => {
   it.each([
     ['echo hi >& out.txt', [{ access: 'write', path: 'out.txt' }]],
     ['echo hi >&2 2>&-', []],
-    ['sort -oout.txt', [{ access: 'read', path: 'out.txt' }, { access: 'write', path: 'out.txt' }]],
+    ['sort -oout.txt', [{ access: 'write', path: 'out.txt' }]],
+    // Direction follows the option or operand position.
+    ['dd if=a of=b', [{ access: 'read', path: 'a' }, { access: 'write', path: 'b' }]],
+    ['grep -fpatterns.txt x', [{ access: 'read', path: 'patterns.txt' }, { access: 'read', path: 'x' }]],
+    ['cut -d: -f1 a', [{ access: 'read', path: 'a' }]],
+    // An attached value of an option outside the tables may be a file: unknown.
+    ['sort -X/etc/x a', [{ access: 'read', path: undefined }, { access: 'read', path: 'a' }]],
+    // Escape parity: `\\*` is a backslash and a glob, `\*` a literal star.
+    ['cat \\\\*', [{ access: 'read', path: undefined }]],
+    // Only an unquoted `~` or `~/` expands to home; a quoted one is a file name, `~user` is unknown.
+    ['cat "~/x"', [{ access: 'read', path: './~/x' }]],
+    ['cat ~root/x', [{ access: 'read', path: undefined }]],
     ['cat -- -n', [{ access: 'read', path: '-n' }]],
     ['cat {a,b}.txt', [{ access: 'read', path: undefined }]],
   ])('%j', (command, expected) => {
     expect(files(command)).toEqual(expected);
   });
 
-  it.each(['env -C /tmp cat a', 'sudo -D /tmp cat a', 'find . -execdir cat {} \\;'])('%j changes the directory of what it runs', (command) => {
-    expect(BashAnalyzer.analyze(command).changesDirectory).toBe(true);
+  it.each(['env -C /tmp cat a', 'sudo -D /tmp cat a', 'find . -execdir cat {} \\;', 'env -iC/tmp cat a', 'sudo -i cat a', "env -S 'cat a'"])(
+    '%j changes the directory of what it runs',
+    (command) => {
+      expect(BashAnalyzer.analyze(command).changesDirectory).toBe(true);
+    },
+  );
+
+  it.each(['env FOO=1 grep -C 3 x a', 'sudo -u root cat a'])('%j keeps the directory', (command) => {
+    expect(BashAnalyzer.analyze(command).changesDirectory).toBe(false);
+  });
+
+  it('slices words by byte offsets, so non-ASCII text keeps whole words', () => {
+    expect(BashAnalyzer.analyze('printf café done').commands[0]?.allowForm).toBe('printf café done');
   });
 });

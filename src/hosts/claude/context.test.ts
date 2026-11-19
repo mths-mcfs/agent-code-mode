@@ -43,16 +43,10 @@ describe('companion hook and context store', () => {
     expect(await readdir(path.join(dir, 'ctx'))).toEqual([]);
   });
 
-  it.skipIf(!posix)('writes no record when the platform reports win32, where none could be trusted', async () => {
+  it.skipIf(posix)('does not write a companion record on Windows', async () => {
     const dir = await stateDir();
-    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', { value: 'win32' });
-    try {
-      expect(await runContextHook(hookInput(), { stateDir: dir })).toBe(0);
-      expect(await readdir(dir)).toEqual([]);
-    } finally {
-      if (platform) Object.defineProperty(process, 'platform', platform);
-    }
+    expect(await runContextHook(hookInput(), { stateDir: dir })).toBe(0);
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it.skipIf(!posix)('creates the directory 0700 and the file 0600', async () => {
@@ -81,7 +75,7 @@ describe('companion hook and context store', () => {
     expect(await runContextHook(hookInput(), { stateDir: path.join(dir, 'file-not-dir', 'x') })).toBe(0);
   });
 
-  it('prunes records older than one hour', async () => {
+  it.skipIf(!posix)('prunes records older than one hour', async () => {
     const dir = await stateDir();
     await runContextHook(hookInput({ tool_use_id: 'toolu_old' }), { stateDir: dir });
     const old = (Date.now() - CONTEXT_TTL_MS - 60_000) / 1000;
@@ -90,20 +84,37 @@ describe('companion hook and context store', () => {
     expect(await readdir(path.join(dir, 'ctx'))).toEqual(['toolu_new.json']);
   });
 
-  it.skipIf(!posix)('does not follow a symlink planted under the record name', async () => {
+  /** A state directory the companion writer made private, with a baseline record the store accepts. */
+  async function privateStore(): Promise<{ dir: string; store: FileHookContextStore }> {
     const dir = await stateDir();
-    await mkdir(path.join(dir, 'ctx'), { recursive: true });
+    await runContextHook(hookInput({ tool_use_id: 'toolu_base' }), { stateDir: dir });
+    const store = new FileHookContextStore(dir);
+    expect(await store.lookup('toolu_base')).toMatchObject({ toolUseId: 'toolu_base' });
+    return { dir, store };
+  }
+
+  it.skipIf(!posix)('does not follow a symlink planted under the record name', async () => {
+    const { dir, store } = await privateStore();
     const target = path.join(dir, 'elsewhere.json');
-    await writeFile(target, JSON.stringify({ tool_use_id: 'toolu_link', session_id: 's' }));
+    await writeFile(target, JSON.stringify({ tool_use_id: 'toolu_link', session_id: 's' }), { mode: 0o600 });
     await symlink(target, path.join(dir, 'ctx', 'toolu_link.json'));
-    expect(await new FileHookContextStore(dir).lookup('toolu_link')).toBeUndefined();
+    expect(await store.lookup('toolu_link')).toBeUndefined();
   });
 
-  it('refuses a record whose tool-use id differs from its file name', async () => {
+  it.skipIf(!posix)('refuses a record whose tool-use id differs from its file name', async () => {
+    const { dir, store } = await privateStore();
+    await writeFile(path.join(dir, 'ctx', 'toolu_a.json'), JSON.stringify({ tool_use_id: 'toolu_b', session_id: 's' }), { mode: 0o600 });
+    expect(await store.lookup('toolu_a')).toBeUndefined();
+  });
+
+  it.skipIf(!posix)('writes nothing through a context directory entry that is a link', async () => {
     const dir = await stateDir();
-    await mkdir(path.join(dir, 'ctx'), { recursive: true });
-    await writeFile(path.join(dir, 'ctx', 'toolu_a.json'), JSON.stringify({ tool_use_id: 'toolu_b', session_id: 's' }));
-    expect(await new FileHookContextStore(dir).lookup('toolu_a')).toBeUndefined();
+    const elsewhere = await stateDir();
+    await chmod(elsewhere, 0o755);
+    await symlink(elsewhere, path.join(dir, 'ctx'));
+    expect(await runContextHook(hookInput(), { stateDir: dir })).toBe(0);
+    expect(await readdir(elsewhere)).toEqual([]);
+    expect((await stat(elsewhere)).mode & 0o777).toBe(0o755);
   });
 });
 

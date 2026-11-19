@@ -70,6 +70,7 @@ export const SettingsSchema = z.looseObject({
   disableAllHooks: z.boolean().optional(),
   allowManagedHooksOnly: z.boolean().optional(),
   allowManagedPermissionRulesOnly: z.boolean().optional(),
+  disableCommandPluginSources: z.boolean().optional(),
   allowedHttpHookUrls: stringList.optional(),
   httpHookAllowedEnvVars: stringList.optional(),
   enabledPlugins: z.record(z.string(), z.boolean()).optional(),
@@ -107,10 +108,26 @@ export interface PluginHooks {
   readonly hooks: z.infer<typeof HooksSchema>;
 }
 
+/** Which hooks run (https://code.claude.com/docs/en/hooks#hook-locations), resolved once from every source. */
+function hookControls(docs: readonly SettingsDoc[]) {
+  const managed = docs.filter((d) => d.source === 'managed');
+  const managedHooksOnly = firstSetting(managed, (s) => s.allowManagedHooksOnly) === true;
+  const commandSources = firstSetting(managed, (s) => s.disableCommandPluginSources);
+  return {
+    /** Managed `disableAllHooks`: no hook runs. */
+    allOff: firstSetting(managed, (s) => s.disableAllHooks) === true,
+    /** Only managed hooks and plugins managed settings enable run. */
+    managedOnly: managedHooksOnly || firstSetting(docs.filter((d) => d.source !== 'managed'), (s) => s.disableAllHooks) === true,
+    /** Command-sourced plugins are disabled (unset under `allowManagedHooksOnly`): a plugin's source, not recorded here, cannot be verified. */
+    commandPluginsBlocked: commandSources === true || (commandSources === undefined && managedHooksOnly),
+  };
+}
+
 export interface LoadedSettings {
   /** Highest precedence first. */
   readonly docs: readonly SettingsDoc[];
   readonly plugins: readonly PluginHooks[];
+  readonly hookControls: ReturnType<typeof hookControls>;
   /** Whether project (and repository-supplied local) allow rules and additional directories apply. */
   readonly projectTrusted: boolean;
 }
@@ -292,23 +309,33 @@ async function localSettingsRoot(main: string | undefined, home: string): Promis
 }
 
 /**
- * A linked worktree's main checkout, only when git metadata agrees both ways: the `.git` file names
- * `<main>/.git/worktrees/<name>`, owned by this user, whose `gitdir` points back. Never on Windows.
+ * A linked worktree's main checkout, only when git metadata agrees both ways and is this user's: the `.git`
+ * file (not a link) names `<main>/.git/worktrees/<name>`, a directory of this user whose `gitdir` file (not a
+ * link) points back at that very `.git` file, and `<main>/.git` is a directory of this user. Never on Windows.
  */
 async function verifiedMainCheckout(dotGit: string): Promise<string | undefined> {
   const uid = process.getuid?.();
   if (uid === undefined) return undefined;
   try {
+    const self = await lstat(dotGit);
+    if (!self.isFile() || self.uid !== uid) return undefined;
     const m = /^gitdir:\s*(.+)$/m.exec((await readOptional(dotGit)) ?? '');
     if (!m?.[1]) return undefined;
     const gitdir = await realpath(path.resolve(path.dirname(dotGit), m[1].trim()));
     const at = gitdir.lastIndexOf(`${path.sep}.git${path.sep}worktrees${path.sep}`);
     const st = await lstat(gitdir);
     if (at === -1 || !st.isDirectory() || st.uid !== uid) return undefined;
-    const back = ((await readOptional(path.join(gitdir, 'gitdir'))) ?? '').trim();
-    if (back === '' || (await realpath(path.resolve(gitdir, back))) !== (await realpath(dotGit))) return undefined;
+    const backFile = path.join(gitdir, 'gitdir');
+    const backSt = await lstat(backFile);
+    if (!backSt.isFile() || backSt.uid !== uid) return undefined;
+    const back = ((await readOptional(backFile)) ?? '').trim();
+    if (back === '') return undefined;
+    // The backlink names this workspace's own `.git` entry: the same file, not a link to it or a copy.
+    const named = await lstat(path.resolve(gitdir, back));
+    if (!named.isFile() || named.dev !== self.dev || named.ino !== self.ino) return undefined;
     const main = gitdir.slice(0, at);
-    return (await lstat(path.join(main, '.git'))).isDirectory() ? main : undefined;
+    const mainGit = await lstat(path.join(main, '.git'));
+    return mainGit.isDirectory() && mainGit.uid === uid ? main : undefined;
   } catch {
     return undefined;
   }
@@ -419,12 +446,10 @@ export async function loadSettings(opts: LoadSettingsOptions): Promise<LoadedSet
         if (!decided.has(name)) decided.set(name, { on, managed: doc.source === 'managed' });
       }
     }
-    const managedDocs = docs.filter((d) => d.source === 'managed');
-    const allHooksOff = firstSetting(managedDocs, (s) => s.disableAllHooks) === true;
-    const managedOnly = firstSetting(managedDocs, (s) => s.allowManagedHooksOnly) === true || firstSetting(docs.filter((d) => d.source !== 'managed'), (s) => s.disableAllHooks) === true;
-    const enabled = allHooksOff ? [] : [...decided].filter(([, d]) => d.on && (d.managed || !managedOnly)).map(([name]) => name);
+    const controls = hookControls(docs);
+    const enabled = controls.allOff ? [] : [...decided].filter(([, d]) => d.on && (d.managed || !controls.managedOnly)).map(([name]) => name);
     const plugins = await readPluginHooks(enabled, configDir);
-    return { docs, plugins, projectTrusted };
+    return { docs, plugins, projectTrusted, hookControls: controls };
   } catch (err) {
     if (err instanceof SettingsError) throw err;
     throw new SettingsError(errorMessage(err));

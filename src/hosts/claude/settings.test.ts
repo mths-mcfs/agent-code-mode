@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -167,6 +167,11 @@ describe('settings boundaries', () => {
     expect(await decide(l, 'make x', undefined, 'default')).toBe('ask');
     await writeFile(path.join(main, '.git', 'worktrees', 'wt', 'gitdir'), `${path.join(l.project, '.git')}\n`);
     expect(await decide(l, 'make x', undefined, 'default')).toBe(process.platform === 'win32' ? 'ask' : 'allow');
+    if (process.platform === 'win32') return;
+    // A backlink that names a link to the workspace's `.git` file, not that file itself, grants nothing.
+    await symlink(path.join(l.project, '.git'), path.join(l.base, 'alias.git'));
+    await writeFile(path.join(main, '.git', 'worktrees', 'wt', 'gitdir'), `${path.join(l.base, 'alias.git')}\n`);
+    expect(await decide(l, 'make x', undefined, 'default')).toBe('ask');
   });
 
   it('keeps hooks of managed-enabled plugins under allowManagedHooksOnly and skips the others before reading them', async () => {
@@ -182,6 +187,13 @@ describe('settings boundaries', () => {
     const { policy } = await policyOf(l);
     if ('error' in policy) throw new Error(policy.error);
     expect(policy.payload.preHooks.map((h) => h.origin)).toEqual(['plugin guard@m']);
+    // Command-sourced plugins are disabled here and the installation source is not recorded: the hook denies instead of running.
+    expect(policy.payload.preHooks[0]?.unsupported).toMatch(/source cannot be verified/);
+    await writeFile(path.join(l.managed, 'managed-settings.json'), JSON.stringify({ allowManagedHooksOnly: true, disableCommandPluginSources: false, enabledPlugins: { 'guard@m': true } }));
+    const allowed = (await policyOf(l)).policy;
+    if ('error' in allowed) throw new Error(allowed.error);
+    // On Windows the shell-form hook stays unsupported for its own reason.
+    expect(allowed.payload.preHooks[0]?.unsupported).toEqual(process.platform === 'win32' ? expect.stringMatching(/not supported on Windows/) : undefined);
   });
 
   it('drops grants and refuses restrictions read from a joined command line', async () => {
@@ -192,6 +204,83 @@ describe('settings boundaries', () => {
     expect(granted.policy.payload.mode).toBe('default');
     expect(granted.policy.payload.rules.allow).toEqual([]);
     expect((await policyOf(l, ['--disallowedTools', 'Bash'], { lossy: true })).policy).toHaveProperty('error');
+    // Every word is scanned: a restriction after `--` or after a variadic list still fails the load.
+    expect((await policyOf(l, ['--add-dir', 'a', '--', '--settings', 'x.json'], { lossy: true })).policy).toHaveProperty('error');
+    expect((await policyOf(l, ['--permission-mode', 'plan', '--permission-mode', 'acceptEdits'], { lossy: true })).policy).toHaveProperty('error');
+    const plan = (await policyOf(l, ['--permission-mode', 'plan'], { lossy: true })).policy;
+    expect('error' in plan ? plan.error : plan.payload.mode).toBe('plan');
+  });
+
+  it('a permissive mode read from a joined command line starts default, not the settings default', async () => {
+    const l = await layout({ 'home/.claude/settings.json': { permissions: { defaultMode: 'bypassPermissions' } } });
+    const { policy } = await policyOf(l, ['--permission-mode', 'acceptEdits'], { lossy: true });
+    expect('error' in policy ? policy.error : policy.payload.mode).toBe('default');
+  });
+
+  it('a rejected repository default mode starts default instead of falling through to the user default', async () => {
+    const l = await layout({ 'home/.claude/settings.json': { permissions: { defaultMode: 'acceptEdits' } }, 'project/.claude/settings.json': { permissions: { defaultMode: 'bypassPermissions' } } });
+    const { policy } = await policyOf(l);
+    expect('error' in policy ? policy.error : policy.payload.mode).toBe('default');
+  });
+
+  it('anchors sandbox write grants at their settings source and skips grants without a documented anchor', async () => {
+    const sub = 'project/sub';
+    const l = await layout({ [`${sub}/.claude/settings.json`]: { sandbox: { enabled: true, filesystem: { allowWrite: ['./out', '~/cache', '/abs/dir/'] } } } });
+    const flag = JSON.stringify({ sandbox: { filesystem: { allowWrite: ['./flag-out'] } } });
+    const { policy } = await policyOf(l, ['--settings', flag], { cwd: path.join(l.base, sub) });
+    if ('error' in policy) throw new Error(policy.error);
+    const roots = policy.bashContainment.mode === 'sandbox' ? policy.bashContainment.writableRoots : [];
+    expect(roots).toEqual(expect.arrayContaining([path.join(l.base, sub, 'out'), path.join(l.home, 'cache'), path.resolve('/abs/dir')]));
+    expect(roots.filter((r) => r.endsWith('flag-out'))).toEqual([]);
+  });
+
+  it('reads settings at the current directory the companion record reports and runs hooks there', async () => {
+    const sub = path.join('project', 'sub');
+    const l = await layout({ [`${sub}/.claude/settings.json`]: { permissions: { deny: ['Read(/secret.txt)'] } } });
+    const adapter = adapterFor(l);
+    const ctx = makeContext(path.join(l.base, sub), { host: 'claude', roots: [l.project], sources: { cwd: 'ctx-file' } });
+    const policy = await adapter.loadPolicy(ctx);
+    if ('error' in policy) throw new Error(policy.error);
+    const secret = path.join(l.base, sub, 'secret.txt');
+    const read: PreparedCall = { id: 'c1', tool: 'read', args: { path: secret, offset: 1, limit: 1 }, effect: { absPath: secret, offset: 1, limit: 1 } };
+    expect(adapter.checkStatic(read, ctx, policy).kind).toBe('deny');
+    expect(policy.payload.cwd).toBe(path.join(l.base, sub));
+    // Without a record, hooks run in Claude's process directory, which is also a working directory.
+    const elsewhere = path.join(l.base, 'elsewhere');
+    const fromParent = await adapterFor(l, [], { cwd: elsewhere }).loadPolicy(makeContext(l.project, { host: 'claude' }));
+    if ('error' in fromParent) throw new Error(fromParent.error);
+    expect(fromParent.payload.cwd).toBe(elsewhere);
+    expect(fromParent.payload.workingDirs).toContain(elsewhere);
+    expect(fromParent.payload.hookEnv['CLAUDE_PROJECT_DIR']).toBe(l.project);
+  });
+
+  it('directories only repository settings add do not pass the read block', async () => {
+    const l = await layout({
+      'home/.claude/settings.json': { permissions: { blockReadsOutsideWorkingDirectories: true, additionalDirectories: ['~/user-extra'] } },
+      'project/.claude/settings.json': { permissions: { additionalDirectories: ['../repo-extra'] } },
+    });
+    const [extra, userExtra] = [path.join(l.base, 'repo-extra'), path.join(l.home, 'user-extra')];
+    const { adapter, ctx, policy } = await policyOf(l);
+    if ('error' in policy) throw new Error(policy.error);
+    const read = (p: string): PreparedCall => ({ id: 'c1', tool: 'read', args: { path: p, offset: 1, limit: 1 }, effect: { absPath: p, offset: 1, limit: 1 } });
+    expect(policy.payload.workingDirs).toContain(extra);
+    expect(adapter.checkStatic(read(path.join(extra, 'a')), ctx, policy).kind).toBe('deny');
+    expect(adapter.checkStatic(read(path.join(userExtra, 'a')), ctx, policy).kind).toBe('allow');
+  });
+
+  it('matches allowedHttpHookUrls against the URL fetch requests, and fetches that URL', async () => {
+    const hook = (url: string) => ({ allowedHttpHookUrls: ['https://hooks.example.com/allowed/*', 'https://bare.example.com'], hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'http', url }] }] } });
+    const urls = ['https://hooks.example.com/allowed/../other', 'https://bare.example.com'];
+    const compiled = [];
+    for (const url of urls) {
+      const { policy } = await policyOf(await layout({ 'home/.claude/settings.json': hook(url) }));
+      if ('error' in policy) throw new Error(policy.error);
+      compiled.push(policy.payload.preHooks.map((h) => [h.handler.url, h.unsupported === undefined]));
+    }
+    expect(compiled).toEqual([
+      [['https://hooks.example.com/other', false]],
+      [['https://bare.example.com/', true]],
+    ]);
   });
 
   it('managed filesystem settings lock the filesystem sandbox switch', async () => {

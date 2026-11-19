@@ -42,6 +42,12 @@ export function contextDir(stateDir: string): string {
   return path.join(stateDir, 'ctx');
 }
 
+/** Whether `dir` is a directory itself (not a link to one) owned by `uid` that no one else can use. */
+export async function isPrivateDir(dir: string, uid: number): Promise<boolean> {
+  const st = await lstat(dir).catch(() => undefined);
+  return st !== undefined && st.isDirectory() && st.uid === uid && (st.mode & 0o077) === 0;
+}
+
 /** Reads and consumes companion-hook records. */
 export class FileHookContextStore implements HookContextStore {
   readonly #dir: string;
@@ -58,11 +64,7 @@ export class FileHookContextStore implements HookContextStore {
     if (!SAFE_TOOL_USE_ID.test(toolUseId)) return undefined;
     const uid = process.getuid?.();
     if (uid === undefined) return undefined;
-    const privateDir = async (dir: string): Promise<boolean> => {
-      const st = await lstat(dir).catch(() => undefined);
-      return st !== undefined && st.isDirectory() && st.uid === uid && (st.mode & 0o077) === 0;
-    };
-    if (!(await privateDir(path.dirname(this.#dir))) || !(await privateDir(this.#dir))) return undefined;
+    if (!(await isPrivateDir(path.dirname(this.#dir), uid)) || !(await isPrivateDir(this.#dir, uid))) return undefined;
     // Claim: an atomic rename off the lookup name gives the record to one reader, even if cleanup fails.
     const file = path.join(this.#dir, `${toolUseId}.json`);
     const claimed = path.join(this.#dir, `.${toolUseId}.${randomBytes(6).toString('hex')}.claimed`);
