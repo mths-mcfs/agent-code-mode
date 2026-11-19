@@ -12,7 +12,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import { ToolError, errorMessage } from '../core/errors.js';
+import { ToolError, TransactionFinalizeError, errorMessage } from '../core/errors.js';
 import type { RollbackReport, Transaction } from '../core/types.js';
 import {
   type RegularFile,
@@ -24,6 +24,7 @@ import {
   removeRegularFile,
   sha256,
   syncDir,
+  syncDirStrict,
   writeDurable,
 } from './fs-ops.js';
 import { isInsideDir, isInsideGitDir } from './jail.js';
@@ -34,6 +35,12 @@ export const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 const BOOT_SLACK_MS = 10_000;
 const MANIFEST = 'manifest.json';
 const RECOVERING = '.recovering-';
+/**
+ * Suffix of a finalized transaction directory. Renaming `<txid>` to
+ * `<txid>.committed` is the commit point: recovery never undoes such a
+ * directory, whatever is left in it, and only deletes it.
+ */
+export const COMMITTED = '.committed';
 
 const EntrySchema = z.object({
   path: z.string().min(1),
@@ -66,6 +73,19 @@ export function journalRoot(stateDir: string): string {
   return path.join(stateDir, 'journal');
 }
 
+/** File system steps of finalization; replaceable in tests. */
+export interface JournalIo {
+  /** fsyncs a directory and rejects when that fails. */
+  readonly syncDir: (dir: string) => Promise<void>;
+  /** Deletes a finalized transaction directory. */
+  readonly removeDir: (dir: string) => Promise<void>;
+}
+
+const defaultIo: JournalIo = {
+  syncDir: syncDirStrict,
+  removeDir: (dir) => fs.rm(dir, { recursive: true, force: true }),
+};
+
 /** Ids of transactions this process still has open; a recovery pass leaves them alone. */
 const openTransactions = new Set<string>();
 
@@ -93,8 +113,10 @@ export class FileTransaction implements Transaction {
   #created = false;
   #closed = false;
   #queue: Promise<unknown> = Promise.resolve();
+  readonly #io: JournalIo;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, io: JournalIo = defaultIo) {
+    this.#io = io;
     this.id = `${this.#startedAt.toString(36)}-${process.pid}-${randomBytes(4).toString('hex')}`;
     this.dir = path.join(journalRoot(stateDir), this.id);
     openTransactions.add(this.id);
@@ -223,11 +245,41 @@ export class FileTransaction implements Transaction {
     });
   }
 
+  /**
+   * Commits the journal: renames its directory to `<id>.committed`, which
+   * recovery never undoes, then fsyncs the journal root so the rename is
+   * durable. The recursive delete of the renamed directory runs afterwards
+   * and is not awaited. Rejects with `TransactionFinalizeError`: not
+   * committed when the rename failed (the journal stays open for a
+   * rollback), committed when only the fsync failed.
+   */
   dispose(): Promise<void> {
     return this.#serial(async () => {
+      if (this.#closed) return;
+      if (!this.#created) {
+        this.#closed = true;
+        openTransactions.delete(this.id);
+        return;
+      }
+      const committed = `${this.dir}${COMMITTED}`;
+      try {
+        await fs.rename(this.dir, committed);
+      } catch (err) {
+        throw new TransactionFinalizeError(false, `could not finalize the transaction journal: ${errorMessage(err)}`);
+      }
       this.#closed = true;
+      this.#created = false;
       openTransactions.delete(this.id);
-      await this.#removeRecord();
+      try {
+        await this.#io.syncDir(path.dirname(this.dir));
+      } catch (err) {
+        throw new TransactionFinalizeError(
+          true,
+          `the transaction journal was finalized, but flushing it to disk failed (${errorMessage(err)}); the changes are on disk, but their durability is not guaranteed`,
+        );
+      } finally {
+        void this.#io.removeDir(committed).catch(() => undefined);
+      }
     });
   }
 
@@ -343,6 +395,10 @@ async function undoRecord(manifest: Manifest, dir: string, roots: readonly strin
   return { restored, skipped };
 }
 
+function isCommitted(name: string): boolean {
+  return name.endsWith(COMMITTED);
+}
+
 /**
  * Restores every journal left by a server process that is gone and that
  * touched one of `roots` (newest first, so two cut-off runs that changed the
@@ -358,6 +414,11 @@ export async function recoverStaleJournals(stateDir: string, roots: readonly str
     return [];
   }
   const realRoots = await Promise.all(roots.filter((r) => path.isAbsolute(r)).map(realOrSelf));
+  // A finalized run is never undone, whatever its directory still holds; it is only deleted.
+  for (const name of names.filter(isCommitted)) {
+    await fs.rm(path.join(base, name), { recursive: true, force: true }).catch(() => undefined);
+  }
+  // The id pattern below also rejects `<txid>.committed`, so a finalized run is never read as pending.
   const records = names
     .map((name) => ({ name, id: name.includes(RECOVERING) ? name.slice(0, name.indexOf(RECOVERING)) : name }))
     .filter((r) => /^[0-9a-z]+-\d+-[0-9a-f]+$/.test(r.id))

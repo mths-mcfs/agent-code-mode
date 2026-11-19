@@ -3,6 +3,7 @@ import { makeContext } from '../testing/context.js';
 import { FakeSandbox, type FakeStep } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter, type StaticHostAdapterOptions } from '../testing/static-host-adapter.js';
+import { TransactionFinalizeError } from './errors.js';
 import { resolveTimeoutMs, runScript, toRunRequest } from './run.js';
 import type { Sandbox } from './types.js';
 
@@ -279,6 +280,109 @@ describe('runScript', () => {
     expect(events).toEqual([]);
     finishRollback();
     await vi.waitFor(() => expect(events).toEqual(['rollback', 'dispose']));
+  });
+
+  it('reports success only after the journal is finalized', async () => {
+    const d = deps();
+    let finalize = (): void => undefined;
+    const gate = new Promise<void>((r) => (finalize = r));
+    let disposeCalls = 0;
+    const begin = d.tools.beginTransaction.bind(d.tools);
+    d.tools.beginTransaction = () => {
+      const tx = begin();
+      const dispose = tx.dispose.bind(tx);
+      tx.dispose = async () => {
+        disposeCalls++;
+        await gate;
+        await dispose();
+      };
+      return tx;
+    };
+    let settled = false;
+    const running = runScript(
+      { code: script([{ tool: 'write', args: { path: 'a.txt', content: 'x' } }]), transaction: true, timeoutMs: 5_000 },
+      d,
+    ).then((r) => ((settled = true), r));
+    await vi.waitFor(() => expect(disposeCalls).toBe(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled).toBe(false);
+    finalize();
+    const result = await running;
+    expect(result.ok).toBe(true);
+    expect(d.tools.read('a.txt')).toBe('x');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(disposeCalls).toBe(1);
+  });
+
+  it('fails and rolls back a successful script when the journal cannot be finalized', async () => {
+    const d = deps({}, { 'a.txt': 'original' });
+    const begin = d.tools.beginTransaction.bind(d.tools);
+    const rollbacks = vi.fn();
+    d.tools.beginTransaction = () => {
+      const tx = begin();
+      const rollback = tx.rollback.bind(tx);
+      tx.dispose = async () => {
+        throw new TransactionFinalizeError(false, 'rename failed');
+      };
+      tx.rollback = () => (rollbacks(), rollback());
+      return tx;
+    };
+    const result = await runScript(
+      { code: script([{ tool: 'write', args: { path: 'a.txt', content: 'changed' } }]), transaction: true, timeoutMs: 5_000 },
+      d,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ kind: 'internal', name: 'TransactionNotFinalized' });
+    expect(result.error?.message).toContain('rename failed');
+    expect(rollbacks).toHaveBeenCalledTimes(1);
+    expect(result.rolledBack?.restored).toEqual(['/ws/a.txt']);
+    expect(d.tools.read('a.txt')).toBe('original');
+  });
+
+  it('reports an indeterminate outcome when the journal was committed but not flushed, without rolling back', async () => {
+    const d = deps({}, { 'a.txt': 'original' });
+    const begin = d.tools.beginTransaction.bind(d.tools);
+    const rollbacks = vi.fn();
+    let disposeCalls = 0;
+    d.tools.beginTransaction = () => {
+      const tx = begin();
+      const rollback = tx.rollback.bind(tx);
+      tx.dispose = async () => {
+        disposeCalls++;
+        throw new TransactionFinalizeError(true, 'the transaction journal was finalized, but flushing it to disk failed');
+      };
+      tx.rollback = () => (rollbacks(), rollback());
+      return tx;
+    };
+    const result = await runScript(
+      { code: script([{ tool: 'write', args: { path: 'a.txt', content: 'changed' } }]), transaction: true, timeoutMs: 5_000 },
+      d,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ kind: 'internal', name: 'TransactionIndeterminate' });
+    expect(result.rolledBack).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('are on disk and were not rolled back');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rollbacks).not.toHaveBeenCalled();
+    expect(disposeCalls).toBe(1);
+    expect(d.tools.read('a.txt')).toBe('changed');
+  });
+
+  it('fails and rolls back a successful script whose write is still running after the grace', async () => {
+    const tools = new MemoryToolRuntime({ root: '/ws', commitDelayMs: 60, honorAbortInCommit: false });
+    const sandbox: Sandbox = {
+      run: async (_code, opts) => {
+        void opts.onCall('write', { path: 'late.txt', content: 'late' });
+        await new Promise((r) => setTimeout(r, 5));
+        return { ok: true, value: 'done' };
+      },
+    };
+    const result = await runScript({ code: 'x', transaction: true, timeoutMs: 5_000 }, { ...deps(), tools, sandbox, stopGraceMs: 10 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ kind: 'internal', name: 'TransactionNotFinalized' });
+    expect(result.warnings.join('\n')).toContain('the rollback is pending');
+    await vi.waitFor(() => expect(tools.commits).toHaveLength(1));
+    await vi.waitFor(() => expect(tools.read('late.txt')).toBeUndefined());
   });
 
   it('counts policy loading against the deadline and gives the sandbox only the time left', async () => {
