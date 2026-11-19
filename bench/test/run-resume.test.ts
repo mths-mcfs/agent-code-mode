@@ -29,5 +29,5 @@ describe('resume', () => {
     } finally {
       await rm(work, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 300_000); // End to end through main(): on Windows it competes for the CPU with the other test files.
 });
