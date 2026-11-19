@@ -1,0 +1,38 @@
+{
+  "name": "agent-code-mode",
+  "version": "0.0.0",
+  "description": "A generic Code Mode for coding agents: one sandboxed script makes many tool calls, with the host's hooks and permission rules still enforced.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "agent-code-mode": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mths-mcfs/agent-code-mode.git"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "bench": "node -e \"console.log('bench: not implemented yet')\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
