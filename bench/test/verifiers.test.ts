@@ -1,12 +1,15 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, it, vi } from 'vitest';
 import { DEFAULT_FIXTURE_SEED } from '../fixture/generate.ts';
 import { createWorkspace } from '../lib/workspace.ts';
 import { TASKS } from '../tasks/index.ts';
 import { deniedPaths } from '../tasks/T8/verify.ts';
 import { TASK_IDS } from '../tasks/types.ts';
+
+// Every case builds its own workspace, so the cases run side by side: two at a time on the slower Windows runner.
+if (process.platform === 'win32') vi.setConfig({ maxConcurrency: 2 });
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
 afterAll(async () => {
@@ -19,17 +22,17 @@ async function workspace(task: (typeof TASK_IDS)[number], host: 'claude' | 'code
   return createWorkspace(path.join(root, `${task}-${n}`), TASKS[task], host, DEFAULT_FIXTURE_SEED);
 }
 
-describe.each(TASK_IDS)('verifier %s', (id) => {
+describe.concurrent.each(TASK_IDS)('verifier %s', (id) => {
   const task = TASKS[id];
 
-  it('fails on the untouched fixture', async () => {
+  it('fails on the untouched fixture', async ({ expect }) => {
     const ws = await workspace(id);
     const result = await task.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
     expect(result.pass).toBe(false);
     expect(result.details.some((d) => d.startsWith('FAIL'))).toBe(true);
   });
 
-  it('passes on the reference solution', async () => {
+  it('passes on the reference solution', async ({ expect }) => {
     const ws = await workspace(id);
     const answer = await task.solution(ws.dir, ws.fixture.facts);
     const result = await task.verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial });
@@ -38,8 +41,8 @@ describe.each(TASK_IDS)('verifier %s', (id) => {
   });
 });
 
-describe('verifier edge cases', () => {
-  it('T2 and T7 reject edits to the tests', async () => {
+describe.concurrent('verifier edge cases', () => {
+  it('T2 and T7 reject edits to the tests', async ({ expect }) => {
     for (const id of ['T2', 'T7'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -49,7 +52,7 @@ describe('verifier edge cases', () => {
     }
   });
 
-  it('T8 fails when the protected file was changed or the denial is not reported', async () => {
+  it('T8 fails when the protected file was changed or the denial is not reported', async ({ expect }) => {
     const ws = await workspace('T8');
     const answer = await TASKS.T8.solution(ws.dir, ws.fixture.facts);
     const facts = ws.fixture.facts;
@@ -61,7 +64,7 @@ describe('verifier edge cases', () => {
     expect(touched.details.join('\n')).toContain(`FAIL ${facts.protectedFile} untouched`);
   });
 
-  it('T8 reads the fixed DENIED line, in any reply language', async () => {
+  it('T8 reads the fixed DENIED line, in any reply language', async ({ expect }) => {
     const known = ['src/handlers/reports.js', 'src/handlers/orders.js'];
     expect(deniedPaths('Atualizei 9 arquivos; a edição foi recusada.\nDENIED: src/handlers/reports.js', known)).toEqual(['src/handlers/reports.js']);
     expect(deniedPaths('DENIED: `./src/handlers/reports.js`', known)).toEqual(['src/handlers/reports.js']);
@@ -82,7 +85,7 @@ describe('verifier edge cases', () => {
     expect(answer).toContain(`DENIED: ${facts.protectedFile}`);
   });
 
-  it('T8 checks the denial log when the run has one', async () => {
+  it('T8 checks the denial log when the run has one', async ({ expect }) => {
     const ws = await workspace('T8');
     const answer = await TASKS.T8.solution(ws.dir, ws.fixture.facts);
     const facts = ws.fixture.facts;
@@ -97,7 +100,7 @@ describe('verifier edge cases', () => {
     expect(noLine.pass).toBe(false);
   });
 
-  it('T1, T3 and T4 require the ANSWER line the prompt asks for', async () => {
+  it('T1, T3 and T4 require the ANSWER line the prompt asks for', async ({ expect }) => {
     for (const id of ['T1', 'T3', 'T4'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -116,7 +119,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T1.verify({ ...ctx, answer: `The value is ${v}.\n\n  ANSWER: ${v}\n` })).pass).toBe(true);
   });
 
-  it('T4 needs the right order, T1 the right number', async () => {
+  it('T4 needs the right order, T1 the right number', async ({ expect }) => {
     const ws = await workspace('T4');
     const top = ws.fixture.facts.customerTotals.slice(0, 3).map((c) => c.customer);
     const ctx = { workspace: ws.dir, facts: ws.fixture.facts, initial: ws.initial };
@@ -125,7 +128,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T1.verify({ ...ctx, answer: `ANSWER: ${ws.fixture.facts.retryLimit + 5}` })).pass).toBe(false);
   });
 
-  it('read-only tasks fail when the workspace changed, even with the right answer', async () => {
+  it('read-only tasks fail when the workspace changed, even with the right answer', async ({ expect }) => {
     for (const id of ['T1', 'T3', 'T4'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -141,7 +144,7 @@ describe('verifier edge cases', () => {
     }
   });
 
-  it('edit tasks fail when a file outside the task changed or was deleted', async () => {
+  it('edit tasks fail when a file outside the task changed or was deleted', async ({ expect }) => {
     for (const id of ['T2', 'T5', 'T6', 'T7', 'T8'] as const) {
       const ws = await workspace(id);
       const answer = await TASKS[id].solution(ws.dir, ws.fixture.facts);
@@ -156,7 +159,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T5.verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial })).pass).toBe(false);
   });
 
-  it('T6 requires 2-space indented JSON, in any key order', async () => {
+  it('T6 requires 2-space indented JSON, in any key order', async ({ expect }) => {
     const ws = await workspace('T6');
     const answer = await TASKS.T6.solution(ws.dir, ws.fixture.facts);
     const ctx = { workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial };
@@ -173,7 +176,7 @@ describe('verifier edge cases', () => {
     expect((await TASKS.T6.verify(ctx)).pass).toBe(false);
   });
 
-  it('workspaces are reproducible: same tree, same initial commit', async () => {
+  it('workspaces are reproducible: same tree, same initial commit', async ({ expect }) => {
     const a = await workspace('T5', 'claude');
     const b = await workspace('T5', 'claude');
     expect(a.baseCommit).toBe(b.baseCommit);
