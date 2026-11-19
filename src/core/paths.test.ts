@@ -13,6 +13,7 @@ describe('matchesPathPattern', () => {
     ['/ws/src/week\n1/example.ts', '/ws/src/**/*.ts', true],
     ['/ws/src/c.ts', '/ws/src/**/*.ts', true],
     ['C:\\ws\\.codex\\config.toml', 'C:/ws/.codex/**', true],
+    ['/C:/ws/project/notes.txt', 'C:\\ws\\project\\*.txt', true],
     ['/ws/a+b.txt', '/ws/a+b.txt', true],
     ['/ws/aab.txt', '/ws/a+b.txt', false],
   ])('%s vs %s → %s', (p, pattern, expected) => {
