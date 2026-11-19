@@ -10,8 +10,8 @@ import path from 'node:path';
  *
  * Linux reads `/proc/<pid>/cmdline` (exact argv) and `/proc/<pid>/cwd`.
  * macOS reads `ps -ww -o ppid=,command=`, which joins argv with spaces, so
- * arguments containing spaces are split wrongly; a `--settings` JSON value
- * that no longer parses then fails the policy load (fail closed).
+ * argument boundaries are lost: `conservativeFlags` then drops the grants and
+ * refuses the restrictions it cannot read exactly.
  *
  * Flags that reach Claude Code any other way are invisible here: an Agent SDK
  * host passing options over its control channel, environment variables read
@@ -24,6 +24,8 @@ export interface ParentProcess {
   readonly argv: readonly string[];
   /** Working directory of that process, when known (resolves a relative `--settings` path). */
   readonly cwd?: string;
+  /** True when `argv` was split from a joined command line, so its word boundaries are guesses. */
+  readonly lossy?: boolean;
 }
 
 /** Reads the nearest ancestor process that looks like Claude Code. Undefined when none is found. */
@@ -77,7 +79,7 @@ export const readParentClaudeProcess: ParentArgsReader = async () => {
   for (let i = 0; i < MAX_ANCESTORS && pid > 1; i++) {
     const info: { argv: string[]; ppid: number; cwd?: string } | undefined = process.platform === 'linux' ? await linuxProcess(pid) : await psProcess(pid);
     if (!info) return undefined;
-    if (looksLikeClaude(info.argv)) return { argv: info.argv, ...(info.cwd === undefined ? {} : { cwd: info.cwd }) };
+    if (looksLikeClaude(info.argv)) return { argv: info.argv, ...(info.cwd === undefined ? {} : { cwd: info.cwd }), ...(process.platform === 'linux' ? {} : { lossy: true }) };
     pid = info.ppid;
   }
   return undefined;
@@ -167,4 +169,14 @@ export function parseClaudeFlags(argv: readonly string[]): ClaudeCliFlags {
     ...(settingSources === undefined ? {} : { settingSources }),
     addDirs,
   };
+}
+
+/** Flags of a command line without word boundaries (macOS `ps`): grants are dropped, unreadable restrictions fail the load. */
+export function conservativeFlags(flags: ClaudeCliFlags): ClaudeCliFlags {
+  if (flags.settings.length > 0 || flags.disallowedTools.length > 0 || flags.settingSources !== undefined) {
+    throw new Error('--settings, --disallowedTools and --setting-sources cannot be read exactly from the Claude Code command line on this platform');
+  }
+  const mode = flags.permissionMode;
+  const restrictive = mode === 'default' || mode === 'plan' || mode === 'dontAsk';
+  return { settings: [], allowedTools: [], disallowedTools: [], addDirs: [], ...(restrictive ? { permissionMode: mode } : {}) };
 }

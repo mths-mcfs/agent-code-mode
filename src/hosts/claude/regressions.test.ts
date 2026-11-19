@@ -53,9 +53,9 @@ function write(p: string): PreparedCall {
 }
 const check = (s: Setup, p: PreparedCall): string => s.adapter.checkStatic(p, s.ctx, s.policy).kind;
 
-describe('auto mode depends on whether an allow rule approved the run tool', () => {
-  it.each(['mcp__agent-code-mode__run', 'mcp__agent-code-mode', 'mcp__agent-code-mode__*'])('with allow %s the classifier never saw the script', async (rule) => {
-    const s = await setup({ permissions: { allow: [rule] } }, 'auto');
+describe('auto mode has no classifier verdict for the script', () => {
+  it('only step 2 applies, even with an allow rule for the run tool', async () => {
+    const s = await setup({ permissions: { allow: ['mcp__agent-code-mode__run'] } }, 'auto');
     expect(check(s, bash('git push --force origin main', s.project))).toBe('ask');
     expect(check(s, bash('git reset --hard', s.project))).toBe('ask');
     expect(check(s, read(path.join(s.project, 'a')))).toBe('allow');
@@ -64,14 +64,13 @@ describe('auto mode depends on whether an allow rule approved the run tool', () 
     expect(check(s, read(path.join(s.home, 'b')))).toBe('ask');
   });
 
-  it('an allow rule from the parent --allowedTools counts too', async () => {
-    const s = await setup({}, 'auto', ['--allowedTools', 'mcp__agent-code-mode__run']);
-    expect(check(s, bash('git push origin main', s.project))).toBe('ask');
-  });
-
-  it('without such a rule the script was classifier-reviewed: inner calls with no rule are allowed', async () => {
-    const s = await setup({ permissions: { allow: ['mcp__other__run'] } }, 'auto');
-    expect(check(s, bash('git push origin main', s.project))).toBe('allow');
+  it('drops broad shell allow rules and keeps exact ones', async () => {
+    const s = await setup({ permissions: { allow: ['Bash', 'Bash(git *)', 'Bash(npm test)'], deny: ['Bash(npm test --bail)'] } }, 'auto');
+    expect(check(s, bash('git status', s.project))).toBe('ask');
+    expect(check(s, bash('npm test', s.project))).toBe('allow');
+    expect(check(s, bash('npm test --bail', s.project))).toBe('deny');
+    const manual = await setup({ permissions: { allow: ['Bash(git *)'] } }, 'default');
+    expect(check(manual, bash('git status', manual.project))).toBe('allow');
   });
 });
 
@@ -100,8 +99,8 @@ describe('critical-path removals are never auto-approved', () => {
     expect(check(d, bash('rm -rf ~', d.project))).toBe('deny');
     const s = await setup({ permissions: { allow: ['Bash'] } }, 'bypassPermissions');
     expect(check(s, bash('rm -rf build', s.project))).toBe('allow');
-    expect(check(s, bash('rm *.log', s.project))).toBe('allow');
-    expect(check(s, bash('rm "$f"', s.project))).toBe('allow');
+    expect(check(s, bash('rm *.log', s.project))).toBe('ask');
+    expect(check(s, bash('rm "$f"', s.project))).toBe('ask');
   });
 });
 
@@ -178,7 +177,7 @@ describe('hook deduplication', () => {
 });
 
 describe('context records', () => {
-  it('exactly one of two concurrent lookups gets the record', async () => {
+  it.skipIf(!posix)('exactly one of two concurrent lookups gets the record', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-regress-ctx-'));
     for (let round = 0; round < 20; round++) {
       const id = `toolu_race${round}`;
@@ -231,9 +230,9 @@ describe('malformed permission rules fail the policy load', () => {
 });
 
 describe('tool-name globs (documented in "Tool name wildcards")', () => {
-  const decide = async (list: 'deny' | 'ask' | 'allow', rule: string, mode: string): Promise<{ bash: string; read: string; runApproved: boolean }> => {
+  const decide = async (list: 'deny' | 'ask' | 'allow', rule: string, mode: string): Promise<{ bash: string; read: string }> => {
     const s = await setup({ permissions: { [list]: [rule] } }, mode);
-    return { bash: check(s, bash('ls', s.project)), read: check(s, read(path.join(s.project, 'a'))), runApproved: s.policy.payload.runApprovedByAllowRule };
+    return { bash: check(s, bash('ls', s.project)), read: check(s, read(path.join(s.project, 'a'))) };
   };
 
   it.each([
@@ -254,21 +253,78 @@ describe('tool-name globs (documented in "Tool name wildcards")', () => {
 
   it.each([
     // Unanchored allow globs are skipped: they approve nothing.
-    ['*', { bash: 'ask', runApproved: false }],
-    ['B*', { bash: 'ask', runApproved: false }],
-    ['mcp__*', { bash: 'ask', runApproved: false }],
-    ['mcp__*__run', { bash: 'ask', runApproved: false }],
-    // Anchored after a literal mcp__<server>__ prefix: they match that server's tools.
-    ['mcp__agent-code-mode__*', { bash: 'ask', runApproved: true }],
-    ['mcp__agent-code-mode__r*', { bash: 'ask', runApproved: true }],
-    ['mcp__agent-code-mode__x*', { bash: 'ask', runApproved: false }],
-    ['mcp__other__*', { bash: 'ask', runApproved: false }],
+    ['*', { bash: 'ask' }],
+    ['B*', { bash: 'ask' }],
   ])('allow %j', async (rule, expected) => {
     expect(await decide('allow', rule, 'default')).toMatchObject(expected);
   });
+});
 
-  it('allow * does not approve run, so in auto mode the script counts as classifier-reviewed', async () => {
-    expect((await decide('allow', '*', 'auto')).bash).toBe('allow');
-    expect((await decide('allow', 'mcp__agent-code-mode__*', 'auto')).bash).toBe('ask');
+describe('limits no allow rule or mode lifts', () => {
+  it('denies bash writes to protected paths and asks for a write target only known at run time', async () => {
+    const s = await setup({ permissions: { allow: ['Bash'] } }, 'bypassPermissions');
+    expect(check(s, bash('echo x > .claude/settings.json', s.project))).toBe('deny');
+    expect(check(s, bash('cp a.json ~/.claude/settings.json', s.project))).toBe('deny');
+    expect(check(s, bash('echo x > "$OUT"', s.project))).toBe('ask');
+    expect(check(s, bash('echo x > out.txt', s.project))).toBe('allow');
+  });
+
+  it('applies blockReadsOutsideWorkingDirectories and blockWritesOutsideWorkingDirectories in every mode', async () => {
+    const s = await setup({ permissions: { allow: ['Bash', 'Read', 'Edit'], blockReadsOutsideWorkingDirectories: true, blockWritesOutsideWorkingDirectories: true } }, 'bypassPermissions');
+    expect(check(s, read(path.join(s.home, 'a')))).toBe('deny');
+    expect(check(s, write(path.join(s.home, 'a')))).toBe('deny');
+    expect(check(s, bash('cat ~/a', s.project))).toBe('deny');
+    expect(check(s, read(path.join(s.project, 'a')))).toBe('allow');
+  });
+
+  it('plan mode refuses changes before allow rules', async () => {
+    const s = await setup({ permissions: { allow: ['Edit', 'Bash(touch *)'] } }, 'plan');
+    expect(check(s, write(path.join(s.project, 'a')))).toBe('deny');
+    expect(check(s, bash('touch a', s.project))).toBe('deny');
+    expect(check(s, read(path.join(s.project, 'a')))).toBe('allow');
+  });
+
+  it.skipIf(!posix)('re-checks the working-directory boundary after resolving links', async () => {
+    const s = await setup({ permissions: { allow: ['Bash(cat *)'] } }, 'default');
+    await symlink(s.home, path.join(s.project, 'outside'));
+    const call = bash('cat outside/notes.txt', s.project);
+    expect(check(s, call)).toBe('allow');
+    expect((await s.adapter.authorize(call, s.ctx, s.policy, new AbortController().signal)).kind).toBe('ask');
+  });
+});
+
+describe('Bash allow rules keep word boundaries and exact approvals', () => {
+  it.each([
+    ['Bash(git push origin)', "git 'push origin'", 'ask'],
+    ['Bash(find *)', 'find . -name x -delete', 'ask'],
+    ['Bash(find . -name x -delete)', 'find . -name x -delete', 'allow'],
+    ['Bash(env *)', 'env A=1 make', 'ask'],
+  ])('%s with %j → %s', async (rule, command, expected) => {
+    const s = await setup({ permissions: { allow: [rule] } }, 'default');
+    expect(check(s, bash(command, s.project))).toBe(expected);
+  });
+});
+
+describe('permission mode provenance', () => {
+  it.each(['bypassPermissions', 'auto'])('project settings cannot start %s', async (defaultMode) => {
+    const s = await setup({}, 'default', undefined, { permissions: { defaultMode } });
+    expect(await s.adapter.loadPolicy({ ...s.ctx, sources: { cwd: 'roots' } })).toMatchObject({ payload: { mode: 'default' } });
+  });
+
+  it.each([{ disableBypassPermissionsMode: 'yes' }, { defaultMode: 'acceptAll' }])('refuses %j', async (permissions) => {
+    await expect(setup({ permissions }, 'default')).rejects.toThrow();
+  });
+
+  it('disableAutoMode turns auto into default', async () => {
+    const s = await setup({ permissions: { disableAutoMode: 'disable' } }, 'auto');
+    expect(s.policy.payload.mode).toBe('default');
+  });
+});
+
+describe('sandbox settings the containment cannot express', () => {
+  it('denies bash when filesystem exclusions are set', async () => {
+    const s = await setup({ sandbox: { enabled: true, filesystem: { denyWrite: ['~/.ssh'] } } }, 'bypassPermissions');
+    expect(s.adapter.checkStatic(bash('ls', s.project), s.ctx, s.policy)).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+    expect(check(s, read(path.join(s.project, 'a')))).toBe('allow');
   });
 });

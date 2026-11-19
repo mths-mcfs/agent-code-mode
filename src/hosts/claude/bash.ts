@@ -45,6 +45,8 @@ export interface SimpleCommand {
   readonly staticPrefixes: readonly string[];
   /** True when some word's value is only known at run time. */
   readonly dynamic: boolean;
+  /** An exec wrapper or an effectful `find` action: only an exact allow rule approves it. */
+  readonly exactOnly: boolean;
 }
 
 /** A file a command reads or writes by name (redirection or `tee`). */
@@ -113,6 +115,15 @@ const FILE_WRITERS = new Set(['tee', 'touch', 'truncate', 'rm', 'rmdir', 'unlink
 /** Commands that read some operands and write others: every operand is both. */
 const FILE_COPIERS = new Set(['cp', 'mv', 'rsync', 'install', 'scp', 'dd']);
 
+/** Readers that can also write: every operand is both. The letters are short options taking a file (`-oout`). */
+const READ_WRITERS: Readonly<Record<string, string>> = {
+  sort: 'o', uniq: '', iconv: 'o', dos2unix: '', xxd: '', base64: 'io', tar: 'fC', zip: '', unzip: 'd', gzip: '', gunzip: '', bzip2: '', xz: '',
+  curl: 'oDcK', wget: 'OoaP', openssl: '', gpg: 'o', yq: '', xmllint: '', vi: '', vim: '', nano: '', emacs: '',
+};
+
+/** `find` actions that run, write or delete: only an exact allow rule approves them. */
+const FIND_ACTIONS = new Set(['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls']);
+
 /** Wrapper levels stripped before the command is reported as uncertain. */
 const MAX_WRAPPER_LEVELS = 64;
 
@@ -120,8 +131,8 @@ const MAX_WRAPPER_LEVELS = 64;
 const NAME_REBINDERS = new Set(['alias', 'hash', 'enable']);
 
 // Redirect operators (sh-syntax RedirOperator values).
-const REDIR_OUT = new Set([63, 64, 69, 70, 74, 75, 76, 77]); // > >> >| >>| &> &>| &>> &>>|
-const REDIR_IN = new Set([65]); // <
+const REDIR_OUT = new Set([63, 64, 68, 69, 70, 74, 75, 76, 77]); // > >> >& >| >>| &> &>| &>> &>>|
+const REDIR_IN = new Set([65, 67]); // < <&
 const REDIR_INOUT = new Set([66]); // <>
 const REDIR_HDOC = new Set([71, 72]); // << <<-
 const REDIR_DUP = new Set([67, 68]); // <& >&
@@ -276,7 +287,10 @@ export class BashAnalyzer {
 
   #word(word: Word, ctx: { source: string }): WordValue {
     const { value, glob } = partsValue(word.parts, false);
-    return { value, raw: this.#text(word, ctx), glob };
+    const raw = this.#text(word, ctx);
+    // Brace expansion (`{a,b}`, `{1..3}`) can turn one word into several: only known at run time.
+    const brace = word.parts.some((p) => p.type === 'Lit' && /(^|[^\\])\{/.test(p.value)) && /\{[\s\S]*(,|\.\.)[\s\S]*\}/.test(raw);
+    return { value: brace ? undefined : value, raw, glob };
   }
 
   #declClause(decl: DeclClause, ctx: { source: string; depth: number }): void {
@@ -284,7 +298,7 @@ export class BashAnalyzer {
     // words are assignments; nested substitutions are walked generically.
     const name = decl.variant?.value ?? 'declare';
     const raw = this.#text(decl, ctx);
-    this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefixes: [name], dynamic: true });
+    this.#commands.push({ raw, denyForms: [raw, name], allowForm: undefined, staticPrefixes: [name], dynamic: true, exactOnly: false });
   }
 
   #redirect(redir: Redirect, ctx: { source: string; depth: number }): void {
@@ -295,8 +309,10 @@ export class BashAnalyzer {
       }
       return;
     }
-    if (REDIR_DUP.has(redir.op) || redir.word === null) return;
+    if (redir.word === null) return;
     const target = this.#word(redir.word, ctx);
+    // `>&2`, `<&0`, `>&-` duplicate or close descriptors; `>& file` opens a file.
+    if (REDIR_DUP.has(redir.op) && target.value !== undefined && /^(\d+-?|-)$/.test(target.value)) return;
     const path = target.value !== undefined && !target.glob ? target.value : undefined;
     if (path === '/dev/null' || path === '/dev/stdout' || path === '/dev/stderr') return;
     if (REDIR_OUT.has(redir.op)) this.#files.push({ access: 'write', path });
@@ -316,25 +332,37 @@ export class BashAnalyzer {
   }
 
   #fileOperands(base: string, operands: readonly WordValue[]): void {
-    const reads = FILE_READERS.has(base) || FILE_COPIERS.has(base);
-    let writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base);
+    const fileLetters = READ_WRITERS[base];
+    const reads = FILE_READERS.has(base) || FILE_COPIERS.has(base) || fileLetters !== undefined;
+    let writes = FILE_WRITERS.has(base) || FILE_COPIERS.has(base) || fileLetters !== undefined;
     if (base === 'sed' && operands.some((o) => o.value !== undefined && (o.value === '-i' || o.value.startsWith('--in-place') || /^-[a-zA-Z]*i/.test(o.value)))) writes = true;
     if (!reads && !writes) return;
-    for (let k = 0; k < operands.length; k++) {
-      const operand = operands[k];
-      if (!operand) continue;
+    // `wget url`, `curl -O url`: the file name comes from the server.
+    if (base === 'wget' || (base === 'curl' && operands.some((o) => o.value === undefined || /^-[a-zA-Z]*[OJ]|^--remote-name/.test(o.value)))) {
+      this.#files.push({ access: 'write', path: undefined });
+    }
+    let options = true;
+    for (const operand of operands) {
       if (operand.raw.startsWith('<(') || operand.raw.startsWith('>(')) continue;
       let value = operand.value;
-      if (value !== undefined && value.startsWith('-')) {
-        // `-n 5`: skip a numeric option value; `--file=x`, `-fX`: the value may be a file.
-        const next = operands[k + 1]?.value;
-        if (next !== undefined && /^\d+$/.test(next)) k++;
+      if (value === '-') continue;
+      if (options && value === '--') {
+        options = false;
+        continue;
+      }
+      if (options && value !== undefined && value.startsWith('-')) {
+        // `--file=x`, `-oX`: the attached value may be a file; a separate value is the next operand.
         const eq = value.indexOf('=');
-        if (eq === -1) continue;
-        value = value.slice(eq + 1);
+        if (eq !== -1) {
+          value = value.slice(eq + 1);
+        } else {
+          const at = value.startsWith('--') ? -1 : [...value.slice(1)].findIndex((ch) => fileLetters?.includes(ch) === true);
+          if (at === -1 || at + 2 >= value.length) continue;
+          value = value.slice(at + 2);
+        }
       }
       if (base === 'dd' && value !== undefined) {
-        const m = /^(if|of)=(.*)$/s.exec(value);
+        const m = /^(if|of)=(.*)$/s.exec(operand.value ?? '');
         if (!m) continue;
         value = m[2];
       }
@@ -373,6 +401,7 @@ export class BashAnalyzer {
     let current = words;
     let allowStripped: readonly WordValue[] | undefined = hasAssigns ? undefined : words;
     let allowChainIntact = !hasAssigns;
+    let exactOnly = false;
     for (let level = 0; ; level++) {
       if (level >= MAX_WRAPPER_LEVELS) {
         this.#uncertain.push(`more than ${MAX_WRAPPER_LEVELS} nested command wrappers`);
@@ -388,7 +417,8 @@ export class BashAnalyzer {
       }
       const base = basename(head.value);
       const operands = current.slice(1);
-      if (base === 'cd' || base === 'pushd' || base === 'popd') this.#changesDirectory = true;
+      if (base === 'cd' || base === 'pushd' || base === 'popd' || changesChildDir(base, operands)) this.#changesDirectory = true;
+      if (base === 'find' && operands.some((o) => o.value === undefined || FIND_ACTIONS.has(o.value))) exactOnly = true;
       if (CODE_EVALUATORS.has(base)) this.#uncertain.push(`\`${base}\` runs code that is only known at run time`);
       if (NAME_REBINDERS.has(base) && operands.length > 0) this.#uncertain.push(`\`${base}\` rebinds command names, so later commands cannot be matched by name`);
       this.#fileOperands(base, operands);
@@ -422,8 +452,12 @@ export class BashAnalyzer {
       }
     }
 
-    const allowForm = allowStripped !== undefined && !dynamic ? text(allowStripped) : undefined;
-    this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefixes: [...staticPrefixes], dynamic });
+    // An exec wrapper left after stripping the documented ones runs another command.
+    const allowHead = allowStripped?.[0]?.value;
+    if (allowStripped !== undefined && allowHead !== undefined && unwrap(basename(allowHead), allowStripped) !== undefined) exactOnly = true;
+    // Allow rules see the words as written, so word boundaries survive (`a 'b c'` is not `a b c`).
+    const allowForm = allowStripped !== undefined && !dynamic ? allowStripped.map((w) => w.raw).join(' ') : undefined;
+    this.#commands.push({ raw, denyForms: [...denyForms], allowForm, staticPrefixes: [...staticPrefixes], dynamic, exactOnly });
   }
 
   /**
@@ -532,6 +566,12 @@ export class BashAnalyzer {
       }
     }
   }
+}
+
+/** `env -C dir`, `sudo -D dir`, `find -execdir`: the child runs in a directory the checker does not follow. */
+function changesChildDir(base: string, operands: readonly WordValue[]): boolean {
+  const flags = base === 'env' ? ['-C', '--chdir'] : base === 'sudo' ? ['-D', '--chdir'] : base === 'find' ? ['-execdir', '-okdir'] : [];
+  return flags.length > 0 && operands.some((o) => o.value === undefined || flags.some((f) => o.value === f || o.value?.startsWith(f.length === 2 ? f : `${f}=`) === true));
 }
 
 function basename(name: string): string {

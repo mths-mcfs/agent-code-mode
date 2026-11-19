@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { runCommandHook } from '../../core/command-hook.js';
-import { errorMessage } from '../../core/errors.js';
 import type { PreparedCall, ToolArgsMap, ToolName, ToolResult } from '../../core/types.js';
 import type { HookHandler } from './settings.js';
 import type { NativeToolName } from './rules.js';
@@ -12,8 +11,9 @@ import type { NativeToolName } from './rules.js';
  * Fail-closed differences from native Claude Code (decided for this project):
  * a hook that cannot start, crashes, exits with a code other than 0 or 2,
  * times out, or prints non-empty stdout that is not a valid output object
- * denies the call (`hook-error` / `hook-timeout`), unless the handler sets
- * `"onFailure": "continue"`. `continue: false` also denies.
+ * denies the call (`hook-error` / `hook-timeout`), even with
+ * `"onFailure": "continue"` (honored for PostToolUse warnings only).
+ * `continue: false` also denies.
  */
 
 /** Native tool name of each binding. */
@@ -109,8 +109,19 @@ export function matcherMatches(matcher: string | undefined, toolName: string): b
   try {
     return new RegExp(matcher).test(toolName);
   } catch {
-    // An invalid regex matches nothing natively; we treat it as matching (strict): the hook runs.
+    // An invalid regex selects the hook, which `invalidMatcher` marks unsupported: the call is denied.
     return true;
+  }
+}
+
+/** Why a matcher cannot be evaluated (an invalid regular expression), or undefined. */
+export function invalidMatcher(matcher: string | undefined): string | undefined {
+  if (matcher === undefined || /^[A-Za-z0-9_ ,|*-]*$/.test(matcher)) return undefined;
+  try {
+    new RegExp(matcher);
+    return undefined;
+  } catch {
+    return `hook matcher ${JSON.stringify(matcher)} is not a valid regular expression`;
   }
 }
 
@@ -136,6 +147,8 @@ export function unsupportedReason(handler: HookHandler, platform: NodeJS.Platfor
       if (handler.command === undefined || handler.command === '') return 'command hook without a command';
       if (handler.shell !== undefined && handler.shell !== 'bash') return `command hook shell ${JSON.stringify(handler.shell)} is not supported`;
       if (handler.args !== undefined && platform === 'win32') return 'exec-form command hooks (`args`) are not supported on Windows';
+      // Claude runs shell-form hooks under Git Bash or PowerShell there; the runner can only use cmd.exe.
+      if (platform === 'win32') return 'shell-form command hooks are not supported on Windows: the Claude Code hook shell cannot be selected';
       return undefined;
     case 'http':
       if (handler.url === undefined || !/^https?:\/\//i.test(handler.url)) return 'http hook without an http(s) url';
@@ -238,16 +251,24 @@ const MAX_HTTP_BODY_BYTES = 1024 * 1024;
 export interface RunHookOptions {
   readonly event: HookEvent;
   readonly input: Readonly<Record<string, unknown>>;
-  /** Hook process cwd (the project root). */
+  /** Hook process cwd (the session's current directory). */
   readonly cwd: string;
   /** Env added for every hook (`CLAUDE_PROJECT_DIR`). */
   readonly env: Readonly<Record<string, string>>;
   readonly signal: AbortSignal;
 }
 
+/** A caller-visible name: the URL host or the program name, never credentials, paths, queries or arguments. */
 function labelOf(hook: CompiledHook): string {
-  const what = hook.handler.type === 'http' ? (hook.handler.url ?? '') : [hook.handler.command ?? '', ...(hook.handler.args ?? [])].join(' ');
-  return `${hook.origin} ${hook.handler.type} hook ${JSON.stringify(what.length > 120 ? `${what.slice(0, 119)}…` : what)}`;
+  let what = hook.handler.type;
+  if (hook.handler.type === 'http') {
+    what = URL.canParse(hook.handler.url ?? '') ? new URL(hook.handler.url ?? '').host : 'http';
+  } else {
+    const program = (hook.handler.command ?? '').trim().split(/\s+/)[0]?.replace(/^["']|["']$/g, '') ?? '';
+    const name = program.split(/[\\/]/).pop() ?? '';
+    if (/^[\w.-]{1,64}$/.test(name) && !name.includes('=')) what = name;
+  }
+  return `${hook.origin} ${hook.handler.type} hook ${JSON.stringify(what)}`;
 }
 
 function timeoutMs(handler: HookHandler): number {
@@ -258,10 +279,8 @@ async function runCommand(hook: CompiledHook, opts: RunHookOptions): Promise<Hoo
   const label = labelOf(hook);
   const env = { ...opts.env, ...hook.env };
   const handler = hook.handler;
-  const command =
-    handler.args === undefined
-      ? (handler.command ?? '')
-      : `exec ${[handler.command ?? '', ...handler.args].map((w) => shQuote(substitute(w, env))).join(' ')}`;
+  const shellForm = handler.shell === 'bash' ? `exec bash -c ${shQuote(handler.command ?? '')}` : (handler.command ?? '');
+  const command = handler.args === undefined ? shellForm : `exec ${[handler.command ?? '', ...handler.args].map((w) => shQuote(substitute(w, env))).join(' ')}`;
   const r = await runCommandHook({ command, stdin: JSON.stringify(opts.input), env, cwd: opts.cwd, timeoutMs: timeoutMs(handler), signal: opts.signal });
   if (r.aborted) return { kind: 'failure', source: 'hook-error', reason: `${label} was cancelled` };
   if (r.spawnError !== null) return { kind: 'failure', source: 'hook-error', reason: `${label} could not start: ${r.spawnError}` };
@@ -291,26 +310,35 @@ async function runHttp(hook: CompiledHook, opts: RunHookOptions): Promise<HookOu
   }
   try {
     const res = await fetch(handler.url ?? '', { method: 'POST', headers, body: JSON.stringify(opts.input), signal, redirect: 'error' });
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength > MAX_HTTP_BODY_BYTES) return { kind: 'failure', source: 'hook-error', reason: `${label} returned a body larger than ${MAX_HTTP_BODY_BYTES} bytes` };
-    if (res.status < 200 || res.status > 299) return { kind: 'failure', source: 'hook-error', reason: `${label} returned HTTP ${res.status}` };
-    return interpretOutput(new TextDecoder().decode(buf), opts.event, label);
+    if (res.status < 200 || res.status > 299) {
+      await res.body?.cancel();
+      return { kind: 'failure', source: 'hook-error', reason: `${label} returned HTTP ${res.status}` };
+    }
+    // Count bytes while reading: leaving the loop over the cap cancels the body.
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const chunk of res.body ?? []) {
+      chunks.push(chunk);
+      if ((size += chunk.byteLength) > MAX_HTTP_BODY_BYTES) return { kind: 'failure', source: 'hook-error', reason: `${label} returned a body larger than ${MAX_HTTP_BODY_BYTES} bytes` };
+    }
+    return interpretOutput(Buffer.concat(chunks).toString('utf8'), opts.event, label);
   } catch (err) {
     if (timeout.aborted) return { kind: 'failure', source: 'hook-timeout', reason: `${label} did not answer within ${ms} ms` };
     if (opts.signal.aborted) return { kind: 'failure', source: 'hook-error', reason: `${label} was cancelled` };
-    return { kind: 'failure', source: 'hook-error', reason: `${label} request failed: ${errorMessage(err)}` };
+    // Transport errors can quote the URL: only the error class is reported.
+    return { kind: 'failure', source: 'hook-error', reason: `${label} request failed (${err instanceof Error ? err.name : 'error'})` };
   }
 }
 
-/** Runs one hook. Never rejects. Applies `onFailure: "continue"`. */
+/** Runs one hook. Never rejects. `onFailure: "continue"` applies to PostToolUse only: a PreToolUse failure always blocks. */
 export async function runHook(hook: CompiledHook, opts: RunHookOptions): Promise<HookOutcome> {
   let outcome: HookOutcome;
   try {
     outcome = hook.handler.type === 'http' ? await runHttp(hook, opts) : await runCommand(hook, opts);
   } catch (err) {
-    outcome = { kind: 'failure', source: 'hook-error', reason: `${labelOf(hook)} failed: ${errorMessage(err)}` };
+    outcome = { kind: 'failure', source: 'hook-error', reason: `${labelOf(hook)} failed (${err instanceof Error ? err.name : 'error'})` };
   }
-  if (outcome.kind === 'failure' && hook.handler.onFailure === 'continue' && !opts.signal.aborted) return { kind: 'none' };
+  if (outcome.kind === 'failure' && opts.event === 'PostToolUse' && hook.handler.onFailure === 'continue' && !opts.signal.aborted) return { kind: 'none' };
   return outcome;
 }
 

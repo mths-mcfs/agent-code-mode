@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
-import { open, rm } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { lstat, open, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { stateDirPath } from '../../core/state-dir.js';
@@ -49,36 +50,41 @@ export class FileHookContextStore implements HookContextStore {
     this.#dir = contextDir(stateDir);
   }
 
+  /**
+   * Trusts a record only in private directories owned by this user, as a
+   * regular file of this user nobody else can write; never on Windows.
+   */
   async lookup(toolUseId: string): Promise<HookContextRecord | undefined> {
     if (!SAFE_TOOL_USE_ID.test(toolUseId)) return undefined;
+    const uid = process.getuid?.();
+    if (uid === undefined) return undefined;
+    const privateDir = async (dir: string): Promise<boolean> => {
+      const st = await lstat(dir).catch(() => undefined);
+      return st !== undefined && st.isDirectory() && st.uid === uid && (st.mode & 0o077) === 0;
+    };
+    if (!(await privateDir(path.dirname(this.#dir))) || !(await privateDir(this.#dir))) return undefined;
+    // Claim: an atomic rename off the lookup name gives the record to one reader, even if cleanup fails.
     const file = path.join(this.#dir, `${toolUseId}.json`);
-    // Claim the record: exclusive creation (O_EXCL, atomic on every platform)
-    // of a claim file lets exactly one concurrent reader through.
-    const claim = path.join(this.#dir, `.${toolUseId}.claim`);
-    let claimHandle;
+    const claimed = path.join(this.#dir, `.${toolUseId}.${randomBytes(6).toString('hex')}.claimed`);
     try {
-      claimHandle = await open(claim, 'wx', 0o600);
+      await rename(file, claimed);
     } catch {
       return undefined;
     }
     let text: string | undefined;
     try {
-      // O_NOFOLLOW: a symlink planted under the name is not followed.
-      const flags = constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
-      const handle = await open(file, flags);
+      // O_NOFOLLOW: a symlink renamed into place is not followed.
+      const handle = await open(claimed, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const st = await handle.stat();
-        if (st.isFile() && st.size <= MAX_CONTEXT_FILE_BYTES) text = await handle.readFile('utf8');
+        if (st.isFile() && st.uid === uid && (st.mode & 0o022) === 0 && st.size <= MAX_CONTEXT_FILE_BYTES) text = await handle.readFile('utf8');
       } finally {
         await handle.close();
       }
     } catch {
       text = undefined;
     } finally {
-      // Read once: the record is consumed whatever it held, then the claim is released.
-      await rm(file, { force: true }).catch(() => undefined);
-      await claimHandle.close().catch(() => undefined);
-      await rm(claim, { force: true }).catch(() => undefined);
+      await rm(claimed, { force: true }).catch(() => undefined);
     }
     if (text === undefined) return undefined;
     let json: unknown;

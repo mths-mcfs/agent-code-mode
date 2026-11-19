@@ -27,13 +27,13 @@ async function layout(files: Record<string, unknown>, trusted = true): Promise<L
   return l;
 }
 
-function adapterFor(l: Layout, argv?: readonly string[]): ClaudeHostAdapter {
+function adapterFor(l: Layout, argv?: readonly string[], parent?: { readonly cwd?: string; readonly lossy?: boolean }): ClaudeHostAdapter {
   return new ClaudeHostAdapter({
     env: {},
     home: l.home,
     managedDir: l.managed,
     stateDir: path.join(l.base, 'state'),
-    readParent: async () => (argv ? { argv: ['claude', ...argv], cwd: l.project } : undefined),
+    readParent: async () => (argv || parent ? { argv: ['claude', ...(argv ?? [])], cwd: l.project, ...parent } : undefined),
   });
 }
 
@@ -125,6 +125,83 @@ describe('settings sources', () => {
     await writeFile(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'p', hooks: './more-hooks.json' }));
     await writeFile(path.join(l.home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: { 'p@m': [{ installPath: pluginRoot }] } }));
     expect(await decide(l, 'ls')).toMatch(/^error: .*manifest/);
+  });
+});
+
+describe('settings boundaries', () => {
+  const policyOf = async (l: Layout, argv: readonly string[] = [], parent: { readonly cwd?: string; readonly lossy?: boolean } = {}) => {
+    const [adapter, ctx] = [adapterFor(l, argv, parent), makeContext(l.project, { host: 'claude' })];
+    return { adapter, ctx, policy: await adapter.loadPolicy(ctx) };
+  };
+
+  it('rejects non-boolean plugin values, a settings path that is not a regular file, and oversized settings', async () => {
+    expect(await decide(await layout({ 'home/.claude/settings.json': { enabledPlugins: { 'p@m': 'yes' } } }), 'ls')).toMatch(/^error: .*enabledPlugins/);
+    const dir = await layout({});
+    await mkdir(path.join(dir.project, '.claude', 'settings.json'), { recursive: true });
+    expect(await decide(dir, 'ls')).toMatch(/^error: .*not a regular file/);
+    expect(await decide(await layout({ 'project/.claude/settings.json': `{"x":"${'a'.repeat(4 * 1024 * 1024)}"}` }), 'ls')).toMatch(/^error: .*larger than/);
+  });
+
+  // Claude keeps the local file in the starting directory on Windows.
+  it.skipIf(process.platform === 'win32')('reads project and local settings where Claude runs; the repository root local file wins a scalar key', async () => {
+    const l = await layout({
+      'project/.claude/settings.json': { permissions: { deny: ['Bash(ls:*)'] } },
+      'repo/.git/HEAD': 'x',
+      'repo/.claude/settings.local.json': { permissions: { defaultMode: 'default', deny: ['Bash(rm:*)'] } },
+      'repo/sub/.claude/settings.local.json': { permissions: { defaultMode: 'dontAsk', deny: ['Bash(curl:*)'] } },
+      'repo/sub/.claude/settings.json': { permissions: { deny: ['Read(/secret.txt)'] } },
+    });
+    const { adapter, ctx, policy } = await policyOf(l, [], { cwd: path.join(l.base, 'repo', 'sub') });
+    if ('error' in policy) throw new Error(policy.error);
+    const read = (p: string): PreparedCall => ({ id: 'c1', tool: 'read', args: { path: p, offset: 1, limit: 1 }, effect: { absPath: p, offset: 1, limit: 1 } });
+    const kinds = [bash('ls', l.project), bash('rm x', l.project), bash('curl x', l.project), read(path.join(l.project, 'secret.txt'))].map((c) => adapter.checkStatic(c, ctx, policy).kind);
+    expect([policy.payload.mode, ...kinds]).toEqual(['default', 'ask', 'deny', 'deny', 'allow']);
+    expect(adapter.checkStatic(read(path.join(l.base, 'repo', 'sub', 'secret.txt')), ctx, policy).kind).toBe('deny');
+  });
+
+  it('trusts a worktree through its main checkout only when git metadata points both ways', async () => {
+    const l = await layout({ 'main/.git/worktrees/wt/HEAD': 'x', 'project/.claude/settings.json': { permissions: { allow: ['Bash(make *)'] } } }, false);
+    const main = path.join(l.base, 'main');
+    await writeFile(path.join(l.home, '.claude.json'), JSON.stringify({ projects: { [main]: { hasTrustDialogAccepted: true } } }));
+    await writeFile(path.join(l.project, '.git'), `gitdir: ${path.join(main, '.git', 'worktrees', 'wt')}\n`);
+    expect(await decide(l, 'make x', undefined, 'default')).toBe('ask');
+    await writeFile(path.join(main, '.git', 'worktrees', 'wt', 'gitdir'), `${path.join(l.project, '.git')}\n`);
+    expect(await decide(l, 'make x', undefined, 'default')).toBe(process.platform === 'win32' ? 'ask' : 'allow');
+  });
+
+  it('keeps hooks of managed-enabled plugins under allowManagedHooksOnly and skips the others before reading them', async () => {
+    const l = await layout({
+      'managed/managed-settings.json': { allowManagedHooksOnly: true, enabledPlugins: { 'guard@m': true } },
+      'home/.claude/settings.json': { enabledPlugins: { 'other@m': true } },
+      'guard/hooks/hooks.json': { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'exit 2' }] }] } },
+      'other/hooks/hooks.json': '{ not json',
+      'home/.claude/plugins/installed_plugins.json': { plugins: {} },
+    });
+    const plugins = { 'guard@m': [{ installPath: path.join(l.base, 'guard') }], 'other@m': [{ installPath: path.join(l.base, 'other') }] };
+    await writeFile(path.join(l.home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins }));
+    const { policy } = await policyOf(l);
+    if ('error' in policy) throw new Error(policy.error);
+    expect(policy.payload.preHooks.map((h) => h.origin)).toEqual(['plugin guard@m']);
+  });
+
+  it('drops grants and refuses restrictions read from a joined command line', async () => {
+    const l = await layout({});
+    const granted = await policyOf(l, ['--add-dir', '/extra', '--allowedTools', 'Bash', '--permission-mode', 'bypassPermissions'], { lossy: true });
+    if ('error' in granted.policy) throw new Error(granted.policy.error);
+    expect(granted.policy.payload.workingDirs).not.toContain('/extra');
+    expect(granted.policy.payload.mode).toBe('default');
+    expect(granted.policy.payload.rules.allow).toEqual([]);
+    expect((await policyOf(l, ['--disallowedTools', 'Bash'], { lossy: true })).policy).toHaveProperty('error');
+  });
+
+  it('managed filesystem settings lock the filesystem sandbox switch', async () => {
+    const l = await layout({
+      'managed/managed-settings.json': { sandbox: { enabled: true, filesystem: { allowWrite: [] } } },
+      'home/.claude/settings.json': { sandbox: { filesystem: { disabled: true } } },
+    });
+    const { policy } = await policyOf(l);
+    if ('error' in policy) throw new Error(policy.error);
+    expect(policy.bashContainment).toMatchObject({ mode: 'sandbox', writableRoots: [l.project] });
   });
 });
 

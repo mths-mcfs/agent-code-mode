@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -26,7 +26,7 @@ function hookInput(overrides: Record<string, unknown> = {}): string {
 }
 
 describe('companion hook and context store', () => {
-  it('writes one record per tool use that is read once, then deleted', async () => {
+  it.skipIf(!posix)('writes one record per tool use that is read once, then deleted', async () => {
     const dir = await stateDir();
     expect(await runContextHook(hookInput({ agent_id: 'agent-7', agent_type: 'Explore' }), { stateDir: dir })).toBe(0);
     const store = new FileHookContextStore(dir);
@@ -43,13 +43,13 @@ describe('companion hook and context store', () => {
     expect(await readdir(path.join(dir, 'ctx'))).toEqual([]);
   });
 
-  it.skipIf(!posix)('writes and reads the record when the platform reports win32', async () => {
+  it.skipIf(!posix)('writes no record when the platform reports win32, where none could be trusted', async () => {
     const dir = await stateDir();
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
       expect(await runContextHook(hookInput(), { stateDir: dir })).toBe(0);
-      expect(await new FileHookContextStore(dir).lookup('toolu_01ABC')).toMatchObject({ sessionId: 'sess-1', toolUseId: 'toolu_01ABC' });
+      expect(await readdir(dir)).toEqual([]);
     } finally {
       if (platform) Object.defineProperty(process, 'platform', platform);
     }
@@ -108,7 +108,7 @@ describe('companion hook and context store', () => {
 });
 
 describe('Claude context provider', () => {
-  it('joins the record by _meta toolUseId and never reads model-supplied _ctx', async () => {
+  it.skipIf(!posix)('joins the record by _meta toolUseId and never reads model-supplied _ctx', async () => {
     const dir = await stateDir();
     await runContextHook(hookInput(), { stateDir: dir });
     const provider = createClaudeContextProvider({ stateDir: dir });
@@ -141,5 +141,17 @@ describe('Claude context provider', () => {
     expect(ctx.permissionMode).toBe('default');
     const traversal = await provider.resolve({ env: {}, meta: { 'claudecode/toolUseId': '../ctx/toolu_01ABC' }, roots: [], serverCwd: '/srv' });
     expect(traversal).toMatchObject({ permissionMode: 'default', cwd: '/srv' });
+  });
+});
+
+describe.skipIf(!posix)('context record provenance', () => {
+  it('trusts no record in a context directory or file others can write', async () => {
+    const dir = await stateDir();
+    await runContextHook(hookInput(), { stateDir: dir });
+    await chmod(path.join(dir, 'ctx', 'toolu_01ABC.json'), 0o666);
+    expect(await new FileHookContextStore(dir).lookup('toolu_01ABC')).toBeUndefined();
+    await runContextHook(hookInput(), { stateDir: dir });
+    await chmod(path.join(dir, 'ctx'), 0o755);
+    expect(await new FileHookContextStore(dir).lookup('toolu_01ABC')).toBeUndefined();
   });
 });
