@@ -70,6 +70,7 @@ describe('BashAnalyzer', () => {
       { access: 'write', path: 'c.txt' },
       { access: 'write', path: 'd.log' },
       { access: 'write', path: 'e.txt' },
+      { access: 'read', path: '2' },
       { access: 'read', path: 'f.txt' },
     ]);
   });
@@ -79,8 +80,8 @@ describe('path rules', () => {
   const anchors = { cwd: '/ws/proj', sourceDir: '/ws/proj', home: '/home/u' };
   const matches = (spec: string, p: string, kind: 'deny' | 'allow' = 'deny'): boolean => {
     const m = compilePathSpec(spec, kind, anchors);
-    if (m.type === 'all') return true;
-    if (m.type !== 'path') return false;
+    if (m?.type === 'all') return true;
+    if (m?.type !== 'path') return false;
     return matchesPath(p, m.patterns, false);
   };
 
@@ -113,7 +114,20 @@ describe('path rules', () => {
   it('normalizes Windows paths to POSIX form', () => {
     expect(toPosixPath('C:\\Users\\a\\.env')).toBe('/c/Users/a/.env');
     const m = compilePathSpec('//c/**/.env', 'deny', anchors);
-    expect(m.type === 'path' && matchesPath('C:\\Users\\a\\.env', m.patterns, true)).toBe(true);
+    expect(m?.type === 'path' && matchesPath('C:\\Users\\a\\.env', m.patterns, true)).toBe(true);
+  });
+
+  it('keeps names that start with two dots inside the anchor and folds case when asked', () => {
+    expect(matches('/..cache/**', '/ws/proj/..cache/a')).toBe(true);
+    const m = compilePathSpec('./secret/**', 'deny', anchors);
+    expect(m?.type === 'path' && matchesPath('/WS/Proj/Secret/k', m.patterns, true)).toBe(true);
+    expect(m?.type === 'path' && matchesPath('/WS/Proj/Secret/k', m.patterns, false)).toBe(false);
+  });
+
+  it('refuses restrictive escapes and bracket ranges, and lets such allow rules match nothing', () => {
+    expect(compilePathSpec('./a\\*b', 'deny', anchors)).toBeUndefined();
+    expect(compilePathSpec('./file[0-9].txt', 'ask', anchors)).toBeUndefined();
+    expect(compilePathSpec('./file[0-9].txt', 'allow', anchors)).toEqual({ type: 'never' });
   });
 });
 
@@ -136,5 +150,22 @@ describe('rule parsing', () => {
     expect(parseRule('Write', 'deny', 'user', anchors)?.matcher).toEqual({ type: 'all' });
     expect(parseRule('mcp__x__y(a)', 'deny', 'user', anchors)?.matcher).toEqual({ type: 'never' });
     expect(parseRule('Bash(*)', 'deny', 'user', anchors)?.matcher).toEqual({ type: 'all' });
+  });
+});
+
+describe('BashAnalyzer file targets and directories', () => {
+  const files = (command: string): unknown => BashAnalyzer.analyze(command).files;
+  it.each([
+    ['echo hi >& out.txt', [{ access: 'write', path: 'out.txt' }]],
+    ['echo hi >&2 2>&-', []],
+    ['sort -oout.txt', [{ access: 'read', path: 'out.txt' }, { access: 'write', path: 'out.txt' }]],
+    ['cat -- -n', [{ access: 'read', path: '-n' }]],
+    ['cat {a,b}.txt', [{ access: 'read', path: undefined }]],
+  ])('%j', (command, expected) => {
+    expect(files(command)).toEqual(expected);
+  });
+
+  it.each(['env -C /tmp cat a', 'sudo -D /tmp cat a', 'find . -execdir cat {} \\;'])('%j changes the directory of what it runs', (command) => {
+    expect(BashAnalyzer.analyze(command).changesDirectory).toBe(true);
   });
 });

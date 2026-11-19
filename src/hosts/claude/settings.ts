@@ -1,4 +1,5 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { errorMessage } from '../../core/errors.js';
@@ -58,21 +59,29 @@ export const SettingsSchema = z.looseObject({
       ask: stringList.optional(),
       deny: stringList.optional(),
       additionalDirectories: stringList.optional(),
-      defaultMode: z.string().optional(),
-      disableBypassPermissionsMode: z.string().optional(),
+      defaultMode: z.enum(['default', 'manual', 'acceptEdits', 'plan', 'dontAsk', 'auto', 'bypassPermissions']).optional(),
+      disableBypassPermissionsMode: z.literal('disable').optional(),
+      disableAutoMode: z.literal('disable').optional(),
+      blockReadsOutsideWorkingDirectories: z.boolean().optional(),
+      blockWritesOutsideWorkingDirectories: z.boolean().optional(),
     })
     .optional(),
   hooks: HooksSchema.optional(),
   disableAllHooks: z.boolean().optional(),
   allowManagedHooksOnly: z.boolean().optional(),
   allowManagedPermissionRulesOnly: z.boolean().optional(),
-  enabledPlugins: z.record(z.string(), z.unknown()).optional(),
+  allowedHttpHookUrls: stringList.optional(),
+  httpHookAllowedEnvVars: stringList.optional(),
+  enabledPlugins: z.record(z.string(), z.boolean()).optional(),
   sandbox: z
     .looseObject({
       enabled: z.boolean().optional(),
       filesystem: z
         .looseObject({
           allowWrite: stringList.optional(),
+          denyWrite: stringList.optional(),
+          denyRead: stringList.optional(),
+          allowRead: stringList.optional(),
           disabled: z.boolean().optional(),
         })
         .optional(),
@@ -107,6 +116,7 @@ export interface LoadedSettings {
 }
 
 export interface SettingsLocations {
+  /** The session's primary directory: holds project and local settings and anchors their `/path` rules. */
   readonly projectRoot: string;
   readonly home: string;
   /** `$CLAUDE_CONFIG_DIR` or `~/.claude`. */
@@ -137,12 +147,36 @@ export function claudeConfigDir(env: Readonly<Record<string, string | undefined>
 
 class SettingsError extends Error {}
 
+/** Largest settings, plugin or git metadata file read. */
+const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
+
+/** Reads a regular file of at most `MAX_SETTINGS_BYTES`; undefined when it does not exist. */
 async function readOptional(file: string): Promise<string | undefined> {
+  let handle;
   try {
-    return await readFile(file, 'utf8');
+    // Non-blocking open: a FIFO under the name cannot stall the load.
+    handle = await open(file, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK));
   } catch (err) {
     if (err !== null && typeof err === 'object' && 'code' in err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return undefined;
     throw new SettingsError(`cannot read ${file}: ${errorMessage(err)}`);
+  }
+  try {
+    if (!(await handle.stat()).isFile()) throw new SettingsError(`${file} is not a regular file`);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      if (size > MAX_SETTINGS_BYTES) throw new SettingsError(`${file} is larger than ${MAX_SETTINGS_BYTES} bytes`);
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  } catch (err) {
+    throw err instanceof SettingsError ? err : new SettingsError(`cannot read ${file}: ${errorMessage(err)}`);
+  } finally {
+    await handle.close();
   }
 }
 
@@ -230,37 +264,57 @@ const TrustFileSchema = z.looseObject({
   projects: z.record(z.string(), z.looseObject({ hasTrustDialogAccepted: z.boolean().optional() }).catch({})).optional().catch(undefined),
 });
 
-/** Directories whose trust covers the project: the project root, its git root and the main checkout of a worktree. */
-async function trustKeys(projectRoot: string): Promise<string[]> {
-  const keys = new Set<string>([projectRoot]);
-  let dir = projectRoot;
+/** The git checkout holding `dir` and its main checkout: itself, or for a linked worktree the verified one. */
+async function gitLayout(dir: string): Promise<{ readonly root: string | undefined; readonly main: string | undefined }> {
   for (let i = 0; i < 64; i++) {
     const dotGit = path.join(dir, '.git');
-    try {
-      const st = await stat(dotGit);
-      keys.add(dir);
-      if (st.isFile()) {
-        const text = await readFile(dotGit, 'utf8');
-        const m = /^gitdir:\s*(.+)$/m.exec(text);
-        if (m?.[1]) {
-          const gitdir = path.resolve(dir, m[1].trim());
-          const marker = `${path.sep}.git${path.sep}worktrees${path.sep}`;
-          const at = gitdir.lastIndexOf(marker);
-          if (at !== -1) keys.add(gitdir.slice(0, at));
-        }
-      }
-      break;
-    } catch {
-      // keep walking up
-    }
+    const st = await stat(dotGit).catch(() => undefined);
+    if (st) return { root: dir, main: st.isFile() ? await verifiedMainCheckout(dotGit) : dir };
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return [...keys];
+  return { root: undefined, main: undefined };
 }
 
-async function isProjectTrusted(projectRoot: string, home: string, env: Readonly<Record<string, string | undefined>>): Promise<boolean> {
+/**
+ * The main checkout, where Claude keeps a subdirectory or worktree session's local file; undefined
+ * at home, on Windows, or when the checkout, its `.git` or `.claude` is not owned by this user.
+ */
+async function localSettingsRoot(main: string | undefined, home: string): Promise<string | undefined> {
+  const uid = process.getuid?.();
+  if (main === undefined || uid === undefined || path.resolve(main) === path.resolve(home)) return undefined;
+  for (const p of [main, path.join(main, '.git'), path.join(main, '.claude')]) {
+    const st = await lstat(p).catch(() => undefined);
+    if (st !== undefined && st.uid !== uid) return undefined;
+  }
+  return main;
+}
+
+/**
+ * A linked worktree's main checkout, only when git metadata agrees both ways: the `.git` file names
+ * `<main>/.git/worktrees/<name>`, owned by this user, whose `gitdir` points back. Never on Windows.
+ */
+async function verifiedMainCheckout(dotGit: string): Promise<string | undefined> {
+  const uid = process.getuid?.();
+  if (uid === undefined) return undefined;
+  try {
+    const m = /^gitdir:\s*(.+)$/m.exec((await readOptional(dotGit)) ?? '');
+    if (!m?.[1]) return undefined;
+    const gitdir = await realpath(path.resolve(path.dirname(dotGit), m[1].trim()));
+    const at = gitdir.lastIndexOf(`${path.sep}.git${path.sep}worktrees${path.sep}`);
+    const st = await lstat(gitdir);
+    if (at === -1 || !st.isDirectory() || st.uid !== uid) return undefined;
+    const back = ((await readOptional(path.join(gitdir, 'gitdir'))) ?? '').trim();
+    if (back === '' || (await realpath(path.resolve(gitdir, back))) !== (await realpath(dotGit))) return undefined;
+    const main = gitdir.slice(0, at);
+    return (await lstat(path.join(main, '.git'))).isDirectory() ? main : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function isProjectTrusted(trustKeys: readonly string[], home: string, env: Readonly<Record<string, string | undefined>>): Promise<boolean> {
   const configDir = env['CLAUDE_CONFIG_DIR'];
   const trustFile = configDir !== undefined && configDir !== '' && path.isAbsolute(configDir) ? path.join(configDir, '.claude.json') : path.join(home, '.claude.json');
   let text: string | undefined;
@@ -279,7 +333,7 @@ async function isProjectTrusted(projectRoot: string, home: string, env: Readonly
   const parsed = TrustFileSchema.safeParse(json);
   if (!parsed.success || !parsed.data.projects) return false;
   const projects = parsed.data.projects;
-  for (const key of await trustKeys(projectRoot)) {
+  for (const key of trustKeys) {
     if (projects[key]?.hasTrustDialogAccepted === true) return true;
   }
   return false;
@@ -346,22 +400,29 @@ export async function loadSettings(opts: LoadSettingsOptions): Promise<LoadedSet
     const { projectRoot, configDir } = opts;
     const sources = opts.flags.settingSources;
     const wants = (s: string): boolean => sources === undefined || sources.includes(s);
+    const git = await gitLayout(projectRoot);
     const managed = opts.managedDir === undefined ? [] : await readManaged(opts.managedDir, projectRoot);
     const flagDocs = await readFlagSettings(opts.flags, opts.parentCwd, projectRoot);
-    const local = wants('local') ? await readSettingsFile(path.join(projectRoot, '.claude', 'settings.local.json'), 'local', projectRoot) : undefined;
+    // Both local files apply; the main checkout's wins a scalar key.
+    const localRoots = [...new Set([(await localSettingsRoot(git.main, opts.home)) ?? projectRoot, projectRoot])];
+    const local = wants('local') ? await Promise.all(localRoots.map((root) => readSettingsFile(path.join(root, '.claude', 'settings.local.json'), 'local', projectRoot))) : [];
     const project = wants('project') ? await readSettingsFile(path.join(projectRoot, '.claude', 'settings.json'), 'project', projectRoot) : undefined;
     const user = wants('user') ? await readSettingsFile(path.join(configDir, 'settings.json'), 'user', configDir) : undefined;
-    const docs = [...managed, ...flagDocs, ...(local ? [local] : []), ...(project ? [project] : []), ...(user ? [user] : [])];
-    const projectTrusted = await isProjectTrusted(projectRoot, opts.home, opts.env);
+    const docs = [...managed, ...flagDocs, ...local.filter((d) => d !== undefined), ...(project ? [project] : []), ...(user ? [user] : [])];
+    const projectTrusted = await isProjectTrusted([projectRoot, ...[git.root, git.main].filter((k) => k !== undefined)], opts.home, opts.env);
 
-    // enabledPlugins: highest source that names a plugin decides it.
-    const decided = new Map<string, boolean>();
+    // enabledPlugins: highest source that names a plugin decides it. Hook controls apply before hook files
+    // are read; managed-enabled plugins survive `allowManagedHooksOnly` and a lower `disableAllHooks`.
+    const decided = new Map<string, { readonly on: boolean; readonly managed: boolean }>();
     for (const doc of docs) {
-      for (const [name, value] of Object.entries(doc.data.enabledPlugins ?? {})) {
-        if (!decided.has(name)) decided.set(name, value === true);
+      for (const [name, on] of Object.entries(doc.data.enabledPlugins ?? {})) {
+        if (!decided.has(name)) decided.set(name, { on, managed: doc.source === 'managed' });
       }
     }
-    const enabled = [...decided].filter(([, on]) => on).map(([name]) => name);
+    const managedDocs = docs.filter((d) => d.source === 'managed');
+    const allHooksOff = firstSetting(managedDocs, (s) => s.disableAllHooks) === true;
+    const managedOnly = firstSetting(managedDocs, (s) => s.allowManagedHooksOnly) === true || firstSetting(docs.filter((d) => d.source !== 'managed'), (s) => s.disableAllHooks) === true;
+    const enabled = allHooksOff ? [] : [...decided].filter(([, d]) => d.on && (d.managed || !managedOnly)).map(([name]) => name);
     const plugins = await readPluginHooks(enabled, configDir);
     return { docs, plugins, projectTrusted };
   } catch (err) {

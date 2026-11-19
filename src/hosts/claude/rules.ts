@@ -120,9 +120,13 @@ export function isValidRuleSyntax(raw: string): boolean {
   return TOOL_NAME.test(tool);
 }
 
-/** Compiles a gitignore-style Read/Edit specifier into absolute patterns. */
-export function compilePathSpec(spec: string, kind: RuleKind, anchors: RuleAnchors): RuleMatcher {
+/**
+ * Compiles a gitignore-style Read/Edit specifier into absolute patterns. Escapes and bracket
+ * ranges cannot be expressed: undefined (the load refuses) for deny/ask, matches nothing for allow.
+ */
+export function compilePathSpec(spec: string, kind: RuleKind, anchors: RuleAnchors): RuleMatcher | undefined {
   const s = spec.trim();
+  if (/[\\[\]]/.test(s)) return kind === 'allow' ? { type: 'never' } : undefined;
   if (s === '' || s === '*' || s === '**') return { type: 'all' };
   // `!negation` carves paths out of earlier rules in Claude. We never carve
   // anything out (strictness): the negation itself matches nothing.
@@ -152,7 +156,6 @@ export function compilePathSpec(spec: string, kind: RuleKind, anchors: RuleAncho
     rest = s;
     anchored = false;
   }
-  rest = rest.replace(/\\/g, '/');
   let dirOnly = false;
   while (rest.endsWith('/') && rest.length > 1) {
     rest = rest.slice(0, -1);
@@ -201,8 +204,10 @@ export function parseRule(raw: string, kind: RuleKind, source: RuleSourceName, a
     case 'Bash':
       return { ...base, matcher: spec.trim() === '*' || spec.trim() === '' ? { type: 'all' } : { type: 'bash', spec } };
     case 'Read':
-    case 'Edit':
-      return { ...base, matcher: compilePathSpec(spec, kind, anchors) };
+    case 'Edit': {
+      const matcher = compilePathSpec(spec, kind, anchors);
+      return matcher === undefined ? undefined : { ...base, matcher };
+    }
     case 'Write':
     case 'Grep':
     case 'Glob':
@@ -269,10 +274,9 @@ export function matchesToolName(pattern: string, tool: string): boolean {
  * a pattern that matches a directory also matches everything under it.
  */
 export function matchesPath(absPath: string, patterns: readonly PathPattern[], caseInsensitive = DEFAULT_CASE_INSENSITIVE): boolean {
-  const target = path.posix.normalize(toPosixPath(absPath));
   for (const { anchor, pattern } of patterns) {
-    const rel = path.posix.relative(anchor, target);
-    if (rel.startsWith('..') || path.posix.isAbsolute(rel)) continue;
+    const rel = relativeInside(absPath, anchor, caseInsensitive);
+    if (rel === undefined) continue;
     if (rel === '') {
       if (pattern === '**') return true;
       continue;
@@ -296,14 +300,20 @@ export function resolveCommandPath(p: string, cwd: string, home: string): string
   return posixJoin(toPosixPath(cwd), posix);
 }
 
+/** `child` relative to `parent` (POSIX forms, `''` for the same path), or undefined when it is not inside. */
+function relativeInside(child: string, parent: string, caseInsensitive: boolean): string | undefined {
+  const fold = (p: string): string => {
+    const n = path.posix.normalize(toPosixPath(p));
+    return caseInsensitive ? n.toLowerCase() : n;
+  };
+  const rel = path.posix.relative(fold(parent), fold(child));
+  // A component named `..x` is inside; only the parent component itself is not.
+  return rel === '..' || rel.startsWith('../') || path.posix.isAbsolute(rel) ? undefined : rel;
+}
+
 /** Whether `child` is `parent` or inside it (POSIX forms). */
 export function isInsidePath(child: string, parent: string, caseInsensitive = DEFAULT_CASE_INSENSITIVE): boolean {
-  const c = path.posix.normalize(toPosixPath(child));
-  const p = path.posix.normalize(toPosixPath(parent));
-  const a = caseInsensitive ? c.toLowerCase() : c;
-  const b = caseInsensitive ? p.toLowerCase() : p;
-  const rel = path.posix.relative(b, a);
-  return rel === '' || (!rel.startsWith('..') && !path.posix.isAbsolute(rel));
+  return relativeInside(child, parent, caseInsensitive) !== undefined;
 }
 
 /** Splits a CLI tool list (`"Bash(git log:*) Read,Edit"`) into rules, respecting parentheses. */

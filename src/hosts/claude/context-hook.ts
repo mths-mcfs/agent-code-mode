@@ -62,14 +62,12 @@ export async function runContextHook(stdin: string, opts: ContextHookOptions = {
     if (!parsed.success) return 0;
     const input = parsed.data;
     if (input.hook_event_name !== undefined && input.hook_event_name !== 'PreToolUse') return 0;
-    const stateDir = opts.stateDir ?? stateDirPath();
-    // ensureStateDir verifies owner and mode bits, which Windows does not
-    // have, so it refuses that platform outright. There the context
-    // directory is created below without that check.
-    if (process.platform !== 'win32') await ensureStateDir(stateDir);
+    // Windows has no owner and mode bits, so no reader could trust a record: none is written.
+    if (process.platform === 'win32') return 0;
+    const stateDir = await ensureStateDir(opts.stateDir ?? stateDirPath());
     const dir = contextDir(stateDir);
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    if (process.platform !== 'win32') await chmod(dir, 0o700);
+    await chmod(dir, 0o700);
     const record: ContextFile = {
       tool_use_id: input.tool_use_id,
       session_id: input.session_id,

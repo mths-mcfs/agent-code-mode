@@ -244,7 +244,7 @@ describe('permission modes (no rule matches)', () => {
     acceptEdits: { readIn: 'allow', readOut: 'ask', writeIn: 'allow', writeOut: 'ask', editIn: 'allow', bash: 'ask', grepIn: 'allow', globIn: 'allow' },
     plan: { readIn: 'allow', readOut: 'ask', writeIn: 'deny', writeOut: 'deny', editIn: 'deny', bash: 'deny', grepIn: 'allow', globIn: 'allow' },
     dontAsk: { readIn: 'allow', readOut: 'deny', writeIn: 'deny', writeOut: 'deny', editIn: 'deny', bash: 'deny', grepIn: 'allow', globIn: 'allow' },
-    auto: { readIn: 'allow', readOut: 'allow', writeIn: 'allow', writeOut: 'allow', editIn: 'allow', bash: 'allow', grepIn: 'allow', globIn: 'allow' },
+    auto: { readIn: 'allow', readOut: 'ask', writeIn: 'allow', writeOut: 'ask', editIn: 'allow', bash: 'ask', grepIn: 'allow', globIn: 'allow' },
     bypassPermissions: { readIn: 'allow', readOut: 'allow', writeIn: 'allow', writeOut: 'allow', editIn: 'allow', bash: 'allow', grepIn: 'allow', globIn: 'allow' },
     'not-a-mode': { readIn: 'allow', readOut: 'ask', writeIn: 'ask', writeOut: 'ask', editIn: 'ask', bash: 'ask', grepIn: 'allow', globIn: 'allow' },
   };
@@ -328,9 +328,9 @@ describe.skipIf(!posix)('PreToolUse hooks', () => {
     expect(await authorize(s, anyBash(s))).toMatchObject({ kind: 'deny', source: 'hook-error' });
   });
 
-  it('honors onFailure: continue', async () => {
+  it('a PreToolUse failure still denies with onFailure: continue', async () => {
     const s = await setup({ user: preHooks('Bash', exampleHook('crash', undefined, { onFailure: 'continue' })) });
-    expect(await authorize(s, anyBash(s))).toEqual({ kind: 'allow' });
+    expect(await authorize(s, anyBash(s))).toMatchObject({ kind: 'deny', source: 'hook-error' });
   });
 
   it('times out, kills the hook and denies with hook-timeout', async () => {
@@ -523,7 +523,7 @@ describe('HTTP hooks', () => {
     expect(lastAuth).toBe('Bearer tok');
   });
 
-  it('treats a non-2xx status or a non-JSON body as a failure (deny) unless onFailure is continue', async () => {
+  it('treats a non-2xx status or a non-JSON body as a failure (deny), even with onFailure: continue', async () => {
     await start();
     reply = { status: 500, body: 'oops' };
     const s = await setup({ user: preHooks('Bash', { type: 'http', url }) });
@@ -533,8 +533,33 @@ describe('HTTP hooks', () => {
     reply = { status: 200, body: '' };
     expect(await authorize(s, bash('ls', s.project))).toEqual({ kind: 'allow' });
     reply = { status: 503, body: '' };
-    const lenient = await setup({ user: preHooks('Bash', { type: 'http', url, onFailure: 'continue' }) });
-    expect(await authorize(lenient, bash('ls', lenient.project))).toEqual({ kind: 'allow' });
+    const lenient = await setup({ user: preHooks('Bash', { type: 'http', url, onFailure: 'continue', async: true }) });
+    expect(await authorize(lenient, bash('ls', lenient.project))).toMatchObject({ kind: 'deny', source: 'hook-error' });
+  });
+
+  it('enforces allowedHttpHookUrls before sending and limits header variables to httpHookAllowedEnvVars', async () => {
+    await start();
+    reply = { status: 200, body: '' };
+    lastBody = '';
+    const blocked = await setup({ user: { allowedHttpHookUrls: ['https://hooks.example.com/*'], ...preHooks('Bash', { type: 'http', url }) } });
+    expect(await authorize(blocked, bash('ls', blocked.project))).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+    expect(lastBody).toBe('');
+    const hook = { type: 'http', url, headers: { Authorization: 'Bearer $HOOK_TOKEN' }, allowedEnvVars: ['HOOK_TOKEN'] };
+    const s = await setup({ user: { allowedHttpHookUrls: ['http://127.0.0.1:*'], httpHookAllowedEnvVars: [], ...preHooks('Bash', hook) } });
+    process.env['HOOK_TOKEN'] = 'tok';
+    try {
+      expect(await authorize(s, bash('ls', s.project))).toEqual({ kind: 'allow' });
+    } finally {
+      delete process.env['HOOK_TOKEN'];
+    }
+    expect(lastAuth).toBe('Bearer');
+  });
+
+  it('names an http hook by its host only in caller-visible errors', async () => {
+    const s = await setup({ user: preHooks('Bash', { type: 'http', url: 'http://127.0.0.1:9/hook?label=hidden-value', timeout: 5 }) });
+    const decision = await authorize(s, bash('ls', s.project));
+    expect(decision.kind).toBe('deny');
+    expect(JSON.stringify(decision)).not.toContain('hidden-value');
   });
 
   it('times out', async () => {
@@ -553,9 +578,25 @@ describe.skipIf(!posix)('PostToolUse hooks', () => {
   it('reports a block as an error the dispatcher turns into a warning', async () => {
     const s = await setup({ user: { hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [exampleHook('exit2')] }] } } });
     const result = { exitCode: 0, signal: null, stdout: 'ok', stderr: '', truncated: false, timedOut: false };
-    await expect(s.adapter.postToolUse(bash('ls', s.project), result, s.ctx, s.policy)).rejects.toThrow(/blocked after the call ran.*blocked by example hook/);
+    const signal = new AbortController().signal;
+    await expect(s.adapter.postToolUse(bash('ls', s.project), result, s.ctx, s.policy, signal)).rejects.toThrow(/blocked after the call ran.*blocked by example hook/);
     const quiet = await setup({ user: { hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [exampleHook('empty')] }] } } });
-    await expect(quiet.adapter.postToolUse(bash('ls', quiet.project), result, quiet.ctx, quiet.policy)).resolves.toBeUndefined();
+    await expect(quiet.adapter.postToolUse(bash('ls', quiet.project), result, quiet.ctx, quiet.policy, signal)).resolves.toBeUndefined();
+  });
+
+  it('cancelling the run through the dispatcher kills a running PostToolUse hook', async () => {
+    const s0 = await setup();
+    const pidFile = path.join(s0.base, 'post.pid');
+    const s = await setup({ user: { hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `echo $$ > "${pidFile}"; exec sleep 30` }] }] } }, mode: 'bypassPermissions' });
+    const tools = new MemoryToolRuntime({ root: '/workspace' });
+    const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: { ...s.ctx, cwd: '/workspace', roots: ['/workspace'] }, policy: s.policy });
+    const call = dispatcher.dispatch('bash', { command: 'echo hi' });
+    for (let i = 0; i < 100 && !(await readFile(pidFile, 'utf8').catch(() => '')); i++) await new Promise((r) => setTimeout(r, 50));
+    const pid = Number(await readFile(pidFile, 'utf8'));
+    await dispatcher.stop('cancelled');
+    await call;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 });
 
@@ -608,5 +649,23 @@ describe.skipIf(!posix)('with the dispatcher', () => {
     expect(tools.read('a.txt')).toBe('sanitized');
     const ran = await dispatcher.dispatch('bash', { command: 'echo hi' });
     expect(ran).toMatchObject({ ok: false, error: { name: 'PermissionDenied', source: 'rule' } });
+  });
+});
+
+describe('hook selection and execution context', () => {
+  it('denies with unsupported-config when a hook matcher is not a valid regular expression', async () => {
+    const s = await setup({ user: preHooks('(Bash', exampleHook('allow')) });
+    expect(await authorize(s, bash('ls', s.project))).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+  });
+
+  it.skipIf(!posix)('runs `shell: bash` hooks under bash in the session directory, with CLAUDE_PROJECT_DIR at the project', async () => {
+    const command = '[ -n "$BASH_VERSION" ] && [ "$(pwd -P)" = "$CLAUDE_PROJECT_DIR/sub" ] || exit 2';
+    const s = await setup({ user: preHooks('Bash', { type: 'command', command, shell: 'bash' }) });
+    const sub = path.join(s.project, 'sub');
+    await mkdir(sub);
+    const ctx: SessionContext = { ...s.ctx, cwd: sub };
+    const policy = await s.adapter.loadPolicy(ctx);
+    if ('error' in policy) throw new Error(policy.error);
+    expect(await s.adapter.authorize(bash('ls', sub), ctx, policy, new AbortController().signal)).toEqual({ kind: 'allow' });
   });
 });
