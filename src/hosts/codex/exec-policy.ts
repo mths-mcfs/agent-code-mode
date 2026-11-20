@@ -13,6 +13,7 @@
  * subset and fails the load, so every call is then denied.
  */
 
+import path from 'node:path';
 import { shlexSplit } from './shell.js';
 
 export type RuleDecision = 'allow' | 'prompt' | 'forbidden';
@@ -326,14 +327,10 @@ function matchesPrefix(rule: PrefixRule, argv: readonly string[]): boolean {
   return rule.rest.every((alts, i) => alts.includes(argv[i + 1] ?? ''));
 }
 
-function isAbsolutePath(p: string): boolean {
-  return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
-}
-
-function basename(p: string): string {
-  const parts = p.split(/[\\/]/);
-  return parts[parts.length - 1] ?? p;
-}
+// Executable paths use the host platform's syntax: on POSIX a backslash is a
+// literal file-name character, not a separator.
+const isAbsolutePath = (p: string): boolean => path.isAbsolute(p);
+const basename = (p: string): string => path.basename(p);
 
 /**
  * Rules matching `argv`: exact program first; when none match and the

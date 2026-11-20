@@ -13,6 +13,16 @@ function roundTrip(before: string | null, after: string): { patch: string; resul
 
 const lines = (n: number, f: (i: number) => string): string => Array.from({ length: n }, (_, i) => `${f(i)}\n`).join('');
 
+describe('apply_patch exactness', () => {
+  it('refuses a patch whose reparsed path is not the prepared file', () => {
+    expect(() => generatePatch('a.txt ', null, 'x\n')).toThrow(PatchError);
+  });
+
+  it('refuses a trailing update chunk without lines', () => {
+    expect(() => parsePatch('*** Begin Patch\n*** Update File: a\n@@\n x\n+y\n@@\n*** End Patch')).toThrow(/does not contain any lines/);
+  });
+});
+
 describe('apply_patch generation round-trip', () => {
   it('adds a file', () => {
     const { patch, result, exact } = roundTrip(null, 'one\ntwo\n');

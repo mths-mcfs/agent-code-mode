@@ -41,6 +41,7 @@ export function memoryIo(opts: {
       }
       return [...out];
     },
+    listFiles: (d) => [...files.keys()].filter((p) => path.posix.dirname(p) === d).map((p) => path.posix.basename(p)),
     parentArgv: () => opts.argv,
   };
 }

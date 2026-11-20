@@ -27,20 +27,25 @@ export function shellCommandFor(prepared: PreparedCall): string | undefined {
     case 'bash':
       return prepared.effect.command;
     case 'read': {
+      // The effective range, also when the args left offset and limit to their defaults.
       const e = prepared.effect;
-      if (prepared.args.offset === undefined && prepared.args.limit === undefined) return `cat -- ${shellQuote(e.absPath)}`;
       return `sed -n ${shellQuote(`${e.offset},${e.offset + e.limit - 1}p`)} -- ${shellQuote(e.absPath)}`;
     }
     case 'grep': {
+      // Searches every file (hidden and ignored ones too) and caps the matches like the effect.
       const e = prepared.effect;
-      const parts = ['rg', '-n'];
+      if (e.glob?.startsWith('!')) return undefined; // rg would read it as an exclusion.
+      const parts = ['rg', '-n', '--hidden', '--no-ignore'];
       if (e.ignoreCase) parts.push('-i');
       if (e.glob !== null) parts.push('-g', shellQuote(e.glob));
-      parts.push('-e', shellQuote(e.pattern), '--', shellQuote(e.absRoot));
+      parts.push('-e', shellQuote(e.pattern), '--', shellQuote(e.absRoot), '|', 'head', '-n', String(e.maxResults));
       return parts.join(' ');
     }
-    case 'glob':
-      return `rg --files -g ${shellQuote(prepared.effect.pattern)} -- ${shellQuote(prepared.effect.absRoot)}`;
+    case 'glob': {
+      const e = prepared.effect;
+      if (e.pattern.startsWith('!')) return undefined;
+      return `rg --files --hidden --no-ignore -g ${shellQuote(e.pattern)} -- ${shellQuote(e.absRoot)} | head -n ${String(e.maxResults)}`;
+    }
     case 'write':
     case 'edit':
       return undefined;
@@ -72,7 +77,7 @@ function sha256(buf: Buffer): string {
 /** Path written in the patch: relative to the session cwd when inside it, else absolute. */
 export function patchPath(absPath: string, cwd: string): string {
   const rel = path.relative(cwd, absPath);
-  if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+  if (rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
   return absPath;
 }
 
@@ -117,7 +122,8 @@ export async function nativeCall(prepared: PreparedCall, ctx: SessionContext, re
   return { toolName: 'Bash', toolInput: { command }, names: BASH_NAMES, cwd: prepared.tool === 'bash' ? prepared.effect.cwd : ctx.cwd };
 }
 
-const UpdatedCommandSchema = z.looseObject({ command: z.string() });
+/** Codex's `updatedInput` for Bash and apply_patch: exactly `{command}`. */
+const UpdatedCommandSchema = z.strictObject({ command: z.string() });
 
 /** Result of mapping a hook rewrite back to binding args. */
 export type MappedUpdate =
@@ -164,7 +170,7 @@ function mapPatch(prepared: PreparedCallOf<'write'> | PreparedCallOf<'edit'>, na
 /** Maps a hook's `updatedInput` (untrusted) back to binding args for the same tool. */
 export function mapUpdatedInput(prepared: PreparedCall, native: NativeCall, updatedInput: unknown, ctx: SessionContext): MappedUpdate {
   const parsed = UpdatedCommandSchema.safeParse(updatedInput);
-  if (!parsed.success) return { kind: 'invalid', reason: 'hook returned updatedInput without string field `command`' };
+  if (!parsed.success) return { kind: 'invalid', reason: 'hook returned updatedInput that is not exactly {command: string}' };
   const command = parsed.data.command;
   if (command === native.toolInput.command) return { kind: 'unchanged' };
   switch (prepared.tool) {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -10,6 +10,7 @@ import { CodexHostAdapter, type CodexPolicy } from './adapter.js';
 import { applyHunk, parsePatch } from './apply-patch.js';
 import { CodexContextProvider } from './context.js';
 import { commandHookHash } from './hooks.js';
+import { shellCommandFor } from './native.js';
 import { memoryIo } from './test-io.js';
 
 const posix = process.platform !== 'win32';
@@ -39,7 +40,9 @@ const hooks = {
   ask: hook('ask', `console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', permissionDecisionReason: 'confirm' } }));`),
   allowOnly: hook('allow-only', `console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } }));`),
   text: hook('plain-text', `console.log('looks fine to me');`),
-  record: hook('record', `writeFileSync(${JSON.stringify(path.join(tmp, 'stdin.json'))}, JSON.stringify(input));`),
+  record: hook('record', `writeFileSync(${JSON.stringify(path.join(tmp, 'stdin.json'))}, JSON.stringify(input)); writeFileSync(${JSON.stringify(path.join(tmp, 'cwd.txt'))}, process.cwd());`),
+  wrongEvent: hook('wrong-event', `console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', permissionDecision: 'allow', updatedInput: { command: 'echo x' } } }));`),
+  extraField: hook('extra-field', `console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { command: 'echo x', extra: 1 } } }));`),
   patchRewrite: hook(
     'patch-rewrite',
     `console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { command: String(input.tool_input.command).replace('+world', '+WORLD') } } }));`,
@@ -130,7 +133,7 @@ describe.runIf(posix)('Codex hooks', () => {
   });
 
   it('fails closed where Codex is non-blocking: crash, invalid JSON, exit 2 without stderr, ask, allow alone', async () => {
-    for (const cmd of [hooks.crash, hooks.badJson, hooks.silent2, hooks.ask, hooks.allowOnly]) {
+    for (const cmd of [hooks.crash, hooks.badJson, hooks.silent2, hooks.ask, hooks.allowOnly, hooks.wrongEvent, hooks.extraField]) {
       const a = adapter(managed([{ hooks: [{ type: 'command', command: cmd }] }]));
       expect(await authorize(a, bash('ls')), cmd).toMatchObject({ kind: 'deny', source: 'hook-error' });
     }
@@ -146,9 +149,13 @@ describe.runIf(posix)('Codex hooks', () => {
       const a = adapter(managed([{ matcher, hooks: [{ type: 'command', command: hooks.denyJson }] }]));
       expect(await authorize(a, bash('ls')), matcher).toMatchObject({ kind: 'deny', source: 'hook' });
     }
-    // A matcher that cannot be translated exactly matches every call.
-    const odd = adapter(managed([{ matcher: '(?x) ^ Write $', hooks: [{ type: 'command', command: hooks.denyJson }] }]));
-    expect(await authorize(odd, bash('ls'))).toMatchObject({ kind: 'deny', source: 'hook' });
+    // A matcher that cannot be translated exactly is refused before any hook runs.
+    for (const matcher of ['(?x) ^ Write $', '(?i)\\P{Lu}ash']) {
+      const odd = adapter(managed([{ matcher, hooks: [{ type: 'command', command: hooks.record }] }]));
+      rmSync(path.join(tmp, 'stdin.json'), { force: true });
+      expect(await authorize(odd, bash('ls')), matcher).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+      expect(existsSync(path.join(tmp, 'stdin.json'))).toBe(false);
+    }
     // A translated matcher still does not match other tools.
     const other = adapter(managed([{ matcher: '\\Aapply_patch\\z', hooks: [{ type: 'command', command: hooks.denyJson }] }]));
     expect(await authorize(other, bash('ls'))).toEqual({ kind: 'allow' });
@@ -177,14 +184,28 @@ describe.runIf(posix)('Codex hooks', () => {
     expect(await authorize(adapter(files(''), { argv: ['codex', '--dangerously-bypass-hook-trust'] }), bash('ls'))).toMatchObject({ kind: 'deny' });
   });
 
-  it('falls back to deny-only when the trust store cannot be parsed', async () => {
+  it('denies calls matched by a hook whose trust cannot be verified, without running it', async () => {
     const files = (cmd: string) => ({
       '/home/u/.codex/hooks.json': hooksJson([{ hooks: [{ type: 'command', command: cmd }] }]),
       '/home/u/.codex/config.toml': '[hooks]\nstate = "corrupted"\n',
     });
-    expect(await authorize(adapter(files(hooks.denyJson)), bash('ls'))).toMatchObject({ kind: 'deny', source: 'hook' });
-    expect(await authorize(adapter(files(hooks.crash)), bash('ls'))).toEqual({ kind: 'allow' });
-    expect(await authorize(adapter(files(hooks.rewrite)), bash('ls'))).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+    for (const cmd of [hooks.denyJson, hooks.crash, hooks.rewrite]) {
+      expect(await authorize(adapter(files(cmd)), bash('ls'))).toMatchObject({ kind: 'deny', source: 'unsupported-config', reason: expect.stringContaining('trust') });
+    }
+  });
+
+  it('reads hook trust from the --profile layer', async () => {
+    const key = '/home/u/.codex/hooks.json:pre_tool_use:0:0';
+    const hash = commandHookHash({ matcher: undefined, command: hooks.denyJson, timeoutSec: 600, async: false });
+    const files = { '/home/u/.codex/hooks.json': hooksJson([{ hooks: [{ type: 'command', command: hooks.denyJson }] }]), '/home/u/.codex/work.config.toml': `[hooks.state."${key}"]\ntrusted_hash = "${hash}"\n` };
+    expect(await authorize(adapter(files, { argv: ['codex', '-p', 'work'] }), bash('ls'))).toMatchObject({ kind: 'deny', source: 'hook' });
+  });
+
+  it('refuses required hooks it cannot load and plugin hooks of an unverifiable installation', async () => {
+    const required = adapter({ '/etc/codex/requirements.toml': '[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = "prompt"\n' });
+    expect(await required.loadPolicy(ctx())).toMatchObject({ error: expect.stringContaining('required hook') });
+    const plugin = adapter({ '/home/u/.codex/config.toml': '[plugins."tool@market"]\nenabled = true\n', '/home/u/.codex/plugins/cache/market/tool/1.0.0/hooks/hooks.json': '{}' });
+    expect(await plugin.loadPolicy(ctx())).toMatchObject({ error: expect.stringContaining('active installation') });
   });
 
   it('respects features.hooks and allow_managed_hooks_only', async () => {
@@ -226,6 +247,23 @@ describe.runIf(posix)('exactness: what the hook sees is what will be applied', (
       tool_input: { command: call.tool === 'bash' ? call.effect.command : '' },
       tool_use_id: 'call-9/c1',
     });
+    // The hook process runs in the session cwd; the tool's cwd is only reported.
+    expect(readFileSync(path.join(tmp, 'cwd.txt'), 'utf8')).toBe(realpathSync(WS));
+  });
+
+  it('builds no native input for a call no hook matches', async () => {
+    const a = new CodexHostAdapter({
+      io: () => memoryIo({ files: managed([{ matcher: 'Bash', hooks: [{ type: 'command', command: hooks.record }] }]), argv: ['codex'] }),
+      readCurrent: () => Promise.reject(new Error('must not read')),
+    });
+    expect(await authorize(a, write(`${WS}/a.txt`, 'a\n', 'b\n'))).toEqual({ kind: 'allow' });
+  });
+
+  it('shows the effective read range and the search caps', () => {
+    expect(shellCommandFor({ id: 'r', tool: 'read', args: { path: 'a' }, effect: { absPath: '/w/a', offset: 1, limit: 2000 } })).toBe("sed -n '1,2000p' -- '/w/a'");
+    const grep = shellCommandFor({ id: 'g', tool: 'grep', args: { pattern: 'x' }, effect: { absRoot: '/w', pattern: 'x', glob: '*.ts', ignoreCase: false, maxResults: 5 } });
+    expect(grep).toBe("rg -n --hidden --no-ignore -g '*.ts' -e 'x' -- '/w' | head -n 5");
+    expect(shellCommandFor({ id: 'h', tool: 'glob', args: { pattern: '!x' }, effect: { absRoot: '/w', pattern: '!x', maxResults: 5 } })).toBeUndefined();
   });
 
   it('shows write and edit as an apply_patch that reproduces the after content', async () => {
@@ -295,7 +333,8 @@ describe.runIf(posix)('sandbox mode × tool', () => {
   const rules = { '/home/u/.codex/rules/default.rules': 'prefix_rule(pattern=["rm"], decision="forbidden")\nprefix_rule(pattern=["git", "push"], decision="prompt")\n' };
 
   async function decide(mode: string, prepared: PreparedCall, files: Record<string, string> = {}, argv: string[] = ['codex']) {
-    const a = adapter(files, { argv });
+    // The session runs in `mode`; the turn metadata reports the same mode.
+    const a = adapter(files, { argv: [...argv, '-s', mode] });
     const c = ctx({ sandboxMode: mode });
     const p = await policyOf(a, c);
     return { decision: a.checkStatic(prepared, c, p), containment: p.bashContainment };
@@ -322,6 +361,8 @@ describe.runIf(posix)('sandbox mode × tool', () => {
     expect((await decide('workspace-write', outside)).decision.kind).toBe('ask');
     expect((await decide('workspace-write', git)).decision.kind).toBe('ask');
     expect((await decide('danger-full-access', outside)).decision.kind).toBe('allow');
+    // Whole path segments: a child named `..name` is inside the workspace.
+    expect((await decide('workspace-write', write(`${WS}/..name/a.txt`, null, 'x'))).decision.kind).toBe('allow');
     // With approval never, what Codex would ask is rejected.
     expect((await decide('read-only', inside, {}, ['codex', 'exec'])).decision).toMatchObject({ kind: 'deny', source: 'rule' });
   });
@@ -378,6 +419,18 @@ describe.runIf(posix)('sandbox mode × tool', () => {
     // Unknown wrapper options: cannot tell what runs, so ask.
     expect((await decide('danger-full-access', bash('env --mystery blocked'), blocked)).decision.kind).toBe('ask');
     expect((await decide('danger-full-access', bash('timeout 5 echo blocked'), blocked)).decision).toEqual({ kind: 'allow' });
+    // `command -v` only looks the name up.
+    expect((await decide('danger-full-access', bash('command -v blocked'), blocked)).decision).toEqual({ kind: 'allow' });
+    // env -S splits only its value; later words stay separate argv words.
+    expect((await decide('danger-full-access', bash("env -S rm '#' -rf x"))).decision.kind).toBe('ask');
+    expect((await decide('danger-full-access', bash("env -S 'ls $X'"), blocked)).decision.kind).toBe('ask');
+  });
+
+  it('asks when run-time expansion could reach a rule or the forced-rm check', async () => {
+    for (const cmd of ['rm $FLAGS x', 'rm -* x', '$CMD -rf x', 'git $SUB']) {
+      expect((await decide('danger-full-access', bash(cmd), { '/home/u/.codex/rules/default.rules': 'prefix_rule(pattern=["git", "push"], decision="prompt")\n' })).decision.kind, cmd).toBe('ask');
+    }
+    expect((await decide('danger-full-access', bash('echo $HOME'))).decision).toEqual({ kind: 'allow' });
   });
 
   it('fails the load on bad rules and unknown sandbox modes', async () => {
@@ -389,13 +442,26 @@ describe.runIf(posix)('sandbox mode × tool', () => {
   it('protects Codex policy files and the state dir', async () => {
     const p = await policyOf(adapter({}));
     expect(p.protectedPaths).toEqual(expect.arrayContaining(['**/.codex/**', '/home/u/.codex/**', '/etc/codex/**', '/state/**', `${WS}/.mcp.json`]));
+    // Also by canonical destination, for a state dir not created yet under a linked parent.
+    const linked = new CodexHostAdapter({ io: () => ({ ...memoryIo({ dirs: ['/link'], argv: ['codex'] }), realpath: (x: string) => (x === '/link' ? '/real' : x) }), stateDir: '/link/state' });
+    expect((await policyOf(linked)).protectedPaths).toEqual(expect.arrayContaining(['/link/state/**', '/real/state/**']));
+  });
+
+  it('lets the turn metadata narrow the sandbox mode, never widen it', async () => {
+    expect((await policyOf(adapter({}), ctx({ sandboxMode: 'danger-full-access' }))).bashContainment).toMatchObject({ mode: 'sandbox', readOnly: true });
+    expect((await policyOf(adapter({}, { argv: ['codex', '-s', 'danger-full-access'] }), ctx({ sandboxMode: 'read-only' }))).bashContainment).toMatchObject({ readOnly: true });
+  });
+
+  it('fails the load when a listed rule file disappears', async () => {
+    const a = new CodexHostAdapter({ io: () => ({ ...memoryIo({ argv: ['codex'] }), listFiles: (d: string) => (d === '/home/u/.codex/rules' ? ['gone.rules'] : []) }), stateDir: '/state' });
+    expect(await a.loadPolicy(ctx())).toMatchObject({ error: expect.stringContaining('disappeared') });
   });
 });
 
 describe.runIf(posix)('dispatcher integration', () => {
   it('re-prepares a hook rewrite and commits exactly the rewritten command', async () => {
     const tools = new MemoryToolRuntime({ root: WS });
-    const a = adapter(managed([{ matcher: 'Bash', hooks: [{ type: 'command', command: hooks.rewrite }] }]));
+    const a = adapter(managed([{ matcher: 'Bash', hooks: [{ type: 'command', command: hooks.rewrite }] }]), { argv: ['codex', '-s', 'danger-full-access'] });
     const c = ctx({ sandboxMode: 'danger-full-access' });
     const policy = await a.loadPolicy(c);
     const d = new Dispatcher({ adapter: a, tools, ctx: c, policy });
@@ -415,7 +481,7 @@ describe.runIf(posix)('dispatcher integration', () => {
       }
     }
     const a = new Racing({
-      io: () => memoryIo({ files: managed([{ hooks: [{ type: 'command', command: hooks.patchRewrite }] }]), argv: ['codex'] }),
+      io: () => memoryIo({ files: managed([{ hooks: [{ type: 'command', command: hooks.patchRewrite }] }]), argv: ['codex', '-s', 'danger-full-access'] }),
       hookEnv: { ...process.env, SHELL: '/bin/sh' },
       stateDir: '/state',
       tmpDirs: { slashTmp: '/tmp', tmpdir: null },
@@ -468,8 +534,11 @@ describe('CodexContextProvider', () => {
       },
     });
     expect(c).toMatchObject({ host: 'codex', cwd, sessionId: 'ses', turnId: 'turn', model: 'gpt', sandboxMode: 'workspace-write', toolUseId: 'exec-1' });
-    const junk = await new CodexContextProvider().resolve({ env: {}, roots: [], serverCwd: cwd, meta: { 'x-codex-turn-metadata': 'nope', callId: 5 } });
-    expect(junk.sandboxMode).toBeUndefined();
+    const junk = await new CodexContextProvider().resolve({ env: {}, roots: [], serverCwd: cwd, meta: { callId: 5 } });
     expect(junk.toolUseId).toBeUndefined();
+    // Turn metadata or a sandbox mode that is present but invalid is an error.
+    for (const turn of ['nope', { sandbox_mode: 'mystery' }]) {
+      await expect(new CodexContextProvider().resolve({ env: {}, roots: [], serverCwd: cwd, meta: { 'x-codex-turn-metadata': turn } })).rejects.toThrow(/turn metadata/);
+    }
   });
 });
