@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ToolError } from './errors.js';
-import { parseRunArgs, parseToolCall } from './schemas.js';
+import { DecisionSchema, parseRunArgs, parseToolCall } from './schemas.js';
 
 describe('parseToolCall', () => {
   it('returns a typed call for valid args', () => {
@@ -39,5 +39,15 @@ describe('parseRunArgs', () => {
     expect(parseRunArgs(undefined).ok).toBe(false);
     expect(parseRunArgs({ code: 1 }).ok).toBe(false);
     expect(parseRunArgs({ code: 'x', timeoutMs: -1 }).ok).toBe(false);
+  });
+});
+
+describe('DecisionSchema', () => {
+  it('accepts an allow bound to the prepared file', () => {
+    expect(DecisionSchema.safeParse({ kind: 'allow', updatedArgs: { path: 'a', content: 'x' }, bindsPreparedFile: true }).success).toBe(true);
+  });
+
+  it.each([false, 'true', 1, null])('rejects bindsPreparedFile %j', (value) => {
+    expect(DecisionSchema.safeParse({ kind: 'allow', updatedArgs: { path: 'a', content: 'x' }, bindsPreparedFile: value }).success).toBe(false);
   });
 });
