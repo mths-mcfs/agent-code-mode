@@ -1,5 +1,5 @@
 import { Dispatcher, type StopReason } from './dispatcher.js';
-import { errorMessage } from './errors.js';
+import { TransactionFinalizeError, errorMessage } from './errors.js';
 import { DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS, type RunArgs } from './schemas.js';
 import type {
   CallLogEntry,
@@ -216,6 +216,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
   let tx: Transaction | undefined;
   /** What must end before the journal is disposed: running writes, then the rollback. */
   let journalBusy: Promise<unknown> | undefined;
+  /** Set once the journal was committed (durably or not); nothing after may roll back or finalize again. */
+  let finalized = false;
 
   const stop = (reason: StopReason): void => {
     if (stopReason !== undefined) return;
@@ -282,10 +284,50 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     await active.stop(stopReason ?? 'finished', graceMs);
     journalBusy = active.pendingWrites;
 
-    const error = runError(stopReason, outcome, denied, timeoutMs);
+    let error = runError(stopReason, outcome, denied, timeoutMs);
     const warnings = [...active.warnings];
     let rolledBack: RollbackReport | undefined;
-    if (tx && error) {
+    if (tx && !error) {
+      // Success is reported only once recovery can no longer undo the run.
+      if (journalBusy) {
+        error = {
+          kind: 'internal',
+          name: 'TransactionNotFinalized',
+          message: 'the transaction could not be finalized because some writes were still running after the script ended',
+        };
+      } else {
+        const journal = tx;
+        const finalizing = Promise.resolve().then(() => journal.dispose());
+        try {
+          // Bounded like the rest of the run: the script's deadline plus the stop grace, and cancellation.
+          const r = await bounded(() => finalizing, { signal: controller.signal, ms: deadline + graceMs - now() });
+          finalized = true;
+          if (!r.done) {
+            const why = r.why === 'aborted' ? 'the run was cancelled' : 'the run reached its time limit';
+            error = {
+              kind: 'internal',
+              name: 'TransactionIndeterminate',
+              message: `${why} while the transaction was being finalized; the outcome is not known yet`,
+            };
+            warnings.push('the writes of this run are kept if the finalization still completes, and rolled back if it fails.');
+            // Not a rollback: the finalization is left to end, and only a failed commit is undone.
+            void finalizing.catch((err: unknown) => {
+              if (err instanceof TransactionFinalizeError && err.committed) return undefined;
+              return journal.rollback();
+            }).catch(() => undefined);
+          }
+        } catch (err) {
+          if (err instanceof TransactionFinalizeError && err.committed) {
+            finalized = true;
+            error = { kind: 'internal', name: 'TransactionIndeterminate', message: err.message };
+            warnings.push('the writes of this run are on disk and were not rolled back, but they may not survive a power loss or crash.');
+          } else {
+            error = { kind: 'internal', name: 'TransactionNotFinalized', message: `the transaction could not be finalized: ${errorMessage(err)}` };
+          }
+        }
+      }
+    }
+    if (tx && error && !finalized) {
       const rollback = await rollbackBounded(tx, journalBusy, rollbackMs, warnings);
       journalBusy = rollback.done;
       rolledBack = rollback.report;
@@ -309,7 +351,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     journalBusy = dispatcher?.pendingWrites;
     const warnings = dispatcher ? [...dispatcher.warnings] : [];
     let rolledBack: RollbackReport | undefined;
-    if (tx) {
+    if (tx && !finalized) {
       const rollback = await rollbackBounded(tx, journalBusy, rollbackMs, warnings);
       journalBusy = rollback.done;
       rolledBack = rollback.report;
@@ -327,7 +369,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
   } finally {
     if (timer) clearTimeout(timer);
     deps.signal?.removeEventListener('abort', onExternalAbort);
-    if (tx) {
+    if (tx && !finalized) {
       const journal = tx;
       // Released only after every commit and the rollback have ended; it never holds the result.
       void Promise.resolve(journalBusy).catch(() => undefined).then(() => journal.dispose()).catch(() => undefined);
