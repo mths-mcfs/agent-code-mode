@@ -137,6 +137,13 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       if (turn === undefined) throw new ConfigError(`unknown Codex sandbox mode ${JSON.stringify(ctx.sandboxMode)}`);
       if (SANDBOX_MODES.indexOf(turn) < SANDBOX_MODES.indexOf(sandboxMode)) sandboxMode = turn;
     }
+    // The narrowed mode must also be one the requirements allow: else the most permissive allowed mode below it.
+    const allowed = config.requirements?.allowedSandboxModes;
+    if (allowed !== undefined && !allowed.includes(sandboxMode)) {
+      const below = SANDBOX_MODES.slice(0, SANDBOX_MODES.indexOf(sandboxMode)).reverse().find((m) => allowed.includes(m));
+      if (below === undefined) throw new ConfigError(`the requirements allow no sandbox mode at most ${sandboxMode}`);
+      sandboxMode = below;
+    }
 
     const tmp = this.#opts.tmpDirs ?? { slashTmp: process.platform === 'win32' ? null : '/tmp', tmpdir: io.env['TMPDIR'] ?? null };
     const tmpRoots = [
@@ -271,7 +278,7 @@ export function checkShellCommand(command: string, p: CodexPolicy): Decision {
   for (const argv of split.dynamic) {
     const program = argv[0] ?? '';
     const base = path.basename(program);
-    const relevant = /[$`*?[{]/.test(program) || ['rm', 'sudo', 'env'].includes(base) || p.rules.rules.some((r) => r.program === program || r.program === base);
+    const relevant = /[$`*?[{~]/.test(program) || ['rm', 'sudo', 'env'].includes(base) || p.rules.rules.some((r) => r.program === program || r.program === base);
     if (relevant) unmatchedAsk ??= `${argv.join(' ')} has words expanded at run time, so its exact command cannot be checked`;
   }
   const top = strictest(matched);

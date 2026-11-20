@@ -98,6 +98,11 @@ describe('rule evaluation', () => {
     expect(isDangerousCommand(['/opt/x\\rm', '-rf', 'x'])).toBe(false);
   });
 
+  it('resolves Windows executable paths like Codex: ASCII case folded, executable suffix removed', () => {
+    expect(matchRules(policy, ['C:\\Tools\\RM.EXE', 'x'], 'win32').map((r) => r.program)).toEqual(['rm']);
+    expect(matchRules(policy, ['/opt/RM.EXE', 'x'], 'linux')).toEqual([]);
+  });
+
   it('flags forced rm like Codex', () => {
     expect(isDangerousCommand(['rm', '-rf', 'x'])).toBe(true);
     expect(isDangerousCommand(['sudo', 'env', 'A=1', 'rm', '--force', 'x'])).toBe(true);

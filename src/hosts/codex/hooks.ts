@@ -10,8 +10,8 @@
  *
  * Discovery: each active config layer contributes `<folder>/hooks.json` and
  * the inline `[hooks]` table of its config.toml; `/etc/codex/requirements.toml`
- * contributes managed inline hooks. Enabled plugins whose cached versions
- * declare hooks fail the load: the active installation cannot be verified.
+ * contributes managed inline hooks. An enabled plugin fails the load: the
+ * hooks of its active installation cannot be verified.
  *
  * Trust: Codex runs a non-managed hook only when the user config has
  * `[hooks.state."<source path>:pre_tool_use:<group>:<handler>"]` with
@@ -49,7 +49,7 @@ export interface HookHandler {
   readonly sourcePath: string;
   readonly origin: 'layer' | 'requirements' | 'session-flags';
   readonly matcher: HookMatcher;
-  readonly handler: { readonly type: 'command'; readonly command: string; readonly env: Readonly<Record<string, string>> } | { readonly type: 'mcp_tool'; readonly server: string; readonly tool: string };
+  readonly handler: { readonly type: 'command'; readonly command: string } | { readonly type: 'mcp_tool'; readonly server: string; readonly tool: string };
   readonly timeoutSec: number;
   readonly mode: HookTrustMode;
   /** Codex hash of the handler (for trust and for diagnostics). */
@@ -231,10 +231,8 @@ function readHookStates(config: CodexConfig): HookStates {
 
 interface Source {
   readonly path: string;
-  readonly keySource: string;
   readonly origin: HookHandler['origin'];
   readonly managed: boolean;
-  readonly env: Readonly<Record<string, string>>;
 }
 
 function parseGroups(raw: unknown, where: string): MatcherGroup[] {
@@ -248,7 +246,7 @@ function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], sourc
     const matcherRaw = group.matcher;
     const matcher = compileMatcher(matcherRaw);
     group.hooks.forEach((h, handlerIndex) => {
-      const key = hookKey(source.keySource, groupIndex, handlerIndex);
+      const key = hookKey(source.path, groupIndex, handlerIndex);
       // Codex skips these with a warning; a handler required by requirements.toml must load.
       const skip = (why: string): void => {
         if (source.origin === 'requirements') throw new ConfigError(`required hook ${key} cannot be loaded: ${why}`);
@@ -263,9 +261,7 @@ function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], sourc
         hash = commandHookHash({ matcher: matcherRaw, command: cmd, timeoutSec, async: h.async ?? false, statusMessage: h.statusMessage, additionalContextLimit: h.additionalContextLimit });
         // Async hooks never change the decision in Codex; nothing to run here.
         if (h.async === true) return;
-        let command = cmd;
-        for (const [k, v] of Object.entries(source.env)) command = command.split(`\${${k}}`).join(v);
-        handler = { type: 'command', command, env: source.env };
+        handler = { type: 'command', command: cmd };
       } else {
         if (h.server.trim() === '' || h.tool.trim() === '') return skip('empty MCP server or tool');
         hash = mcpHookHash(matcherRaw, h, timeoutSec);
@@ -287,31 +283,18 @@ function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], sourc
 const PluginEnabledSchema = z.record(z.string(), z.looseObject({ enabled: z.boolean().optional() }).catch({}));
 
 /**
- * Codex runs the hooks of a plugin's active installation, which is not
- * recorded where this server can verify it. Rather than pick a cached
- * version, an enabled plugin whose cache may hold hooks fails the load.
+ * Codex runs the hooks of each enabled plugin's active installation, which
+ * is not recorded where this server can verify it; cached versions prove
+ * neither that the active one has hooks nor that it has none. An enabled
+ * plugin therefore fails the load: with plugins enabled every call is denied
+ * until they are disabled (or `allow_managed_hooks_only` is required).
  */
-function checkPluginHooks(config: CodexConfig, io: ConfigIo): void {
+function checkPluginHooks(config: CodexConfig): void {
   const plugins = PluginEnabledSchema.safeParse(config.merged['plugins'] ?? {});
   if (!plugins.success) throw new ConfigError('[plugins] must be a table of plugin tables');
   for (const [id, entry] of Object.entries(plugins.data)) {
     if (entry.enabled === false) continue;
-    const at = id.lastIndexOf('@');
-    const [name, marketplace] = [id.slice(0, at), id.slice(at + 1)];
-    if (at <= 0 || !/^[A-Za-z0-9._-]+$/.test(name) || !/^[A-Za-z0-9._-]+$/.test(marketplace)) throw new ConfigError(`unsupported plugin id ${JSON.stringify(id)}`);
-    const base = path.join(config.codexHome, 'plugins', 'cache', marketplace, name);
-    for (const version of io.listDir(base)) {
-      const root = path.join(base, version);
-      const manifest = io.readFile(path.join(root, '.codex-plugin', 'plugin.json'));
-      let declares = io.exists(path.join(root, 'hooks', 'hooks.json'));
-      try {
-        const json: unknown = manifest === undefined ? {} : JSON.parse(manifest);
-        declares ||= !isTable(json) || Object.hasOwn(json, 'hooks');
-      } catch {
-        declares = true;
-      }
-      if (declares) throw new ConfigError(`plugin ${id} may define hooks, but its active installation cannot be verified`);
-    }
+    throw new ConfigError(`plugin ${JSON.stringify(id)} is enabled, but the hooks of its active installation cannot be verified; disable it to use this server`);
   }
 }
 
@@ -326,15 +309,16 @@ export function discoverHooks(config: CodexConfig, io: ConfigIo): { hooks: HookH
 
   if (config.requirements?.hooks) {
     const file = config.requirements.file;
-    appendGroups(out, parseGroups(config.requirements.hooks, file), { path: file, keySource: file, origin: 'requirements', managed: true, env: {} }, states, config, io.platform);
+    appendGroups(out, parseGroups(config.requirements.hooks, file), { path: file, origin: 'requirements', managed: true }, states, config, io.platform);
   }
   const visitedFolders = new Set<string>();
   for (const layer of config.layers) {
     if (managedOnly && !layer.managed) continue;
     const origin: HookHandler['origin'] = layer.source === 'session-flags' ? 'session-flags' : 'layer';
-    if (layer.folder !== null && !visitedFolders.has(layer.folder)) {
-      visitedFolders.add(layer.folder);
-      const file = path.join(layer.folder, 'hooks.json');
+    const hooksFolder = layer.hooksFolder ?? layer.folder;
+    if (hooksFolder !== null && !visitedFolders.has(hooksFolder)) {
+      visitedFolders.add(hooksFolder);
+      const file = path.join(hooksFolder, 'hooks.json');
       const text = io.readFile(file);
       if (text !== undefined) {
         let json: unknown;
@@ -346,18 +330,19 @@ export function discoverHooks(config: CodexConfig, io: ConfigIo): { hooks: HookH
         }
         const parsed = HooksFileSchema.safeParse(json);
         if (!parsed.success) throw new ConfigError(`invalid hooks file ${file}: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
-        appendGroups(out, parsed.data.hooks.PreToolUse, { path: file, keySource: file, origin, managed: layer.managed, env: {} }, states, config, io.platform);
+        appendGroups(out, parsed.data.hooks.PreToolUse, { path: file, origin, managed: layer.managed }, states, config, io.platform);
       }
     }
     const inline = layer.config['hooks'];
     if (inline !== undefined) {
-      if (!isTable(inline)) throw new ConfigError(`[hooks] in ${layer.file} must be a table`);
+      const file = layer.hooksFolder === undefined ? layer.file : path.join(layer.hooksFolder, 'config.toml');
+      if (!isTable(inline)) throw new ConfigError(`[hooks] in ${file} must be a table`);
       const events: TomlTable = { ...inline };
       delete events['state'];
-      appendGroups(out, parseGroups(events, layer.file), { path: layer.file, keySource: layer.file, origin, managed: layer.managed, env: {} }, states, config, io.platform);
+      appendGroups(out, parseGroups(events, file), { path: file, origin, managed: layer.managed }, states, config, io.platform);
     }
   }
-  if (!managedOnly) checkPluginHooks(config, io);
+  if (!managedOnly) checkPluginHooks(config);
   if (out.some((h) => h.mode === 'unverified')) notes.push('calls matched by a hook whose trust cannot be verified are denied');
   return { hooks: out, notes };
 }
@@ -510,7 +495,6 @@ export async function runHooks(input: HookRunInput): Promise<HooksResult> {
       const result = await run({
         command: hookShellCommand(h.handler.command, input.env, input.platform),
         stdin: input.stdin,
-        env: { ...h.handler.env },
         cwd: input.cwd,
         timeoutMs: h.timeoutSec * 1000,
         signal: input.signal,

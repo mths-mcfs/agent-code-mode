@@ -262,8 +262,8 @@ class Tokenizer {
       // Codex `is_literal_word_or_number`: these characters (or a leading `=`)
       // mean the word may expand, so the script is not plain.
       if ('{}*?[]~^#'.includes(ch) || (word.text === '' && !word.quoted && ch === '=')) this.plain = false;
-      // Pathname and brace expansion change the argv at run time.
-      if ('*?[{'.includes(ch)) word.dynamic = true;
+      // Pathname, brace and tilde expansion change the argv at run time.
+      if ('*?[{'.includes(ch) || (ch === '~' && !word.quoted && (word.text === '' || /[=:]$/.test(word.text)))) word.dynamic = true;
       word.text += ch;
       this.#i++;
     }
@@ -604,8 +604,8 @@ function unwrap(argv: readonly string[]): Unwrapped[] {
           // Only the option's value is split; the words after it stay as they are.
           const separate = a === '-S' || a === '--split-string';
           const value = separate ? argv[i + 1] : a.replace(/^--split-string=|^-S/, '');
-          // env's own escapes, `${VAR}` and `#` comments are not reproduced.
-          const words = value === undefined || /[\\$#]/.test(value) ? undefined : shlexSplit(value);
+          // env's own escapes, `${VAR}`, `#` comments and its `\v`/`\f` separators are not reproduced.
+          const words = value === undefined || /[\\$#\v\f]/.test(value) ? undefined : shlexSplit(value);
           if (words === undefined) {
             const unsure: Unwrapped = { kind: 'unsure', reason: `cannot split the env -S value ${JSON.stringify(value ?? '')}` };
             return value === undefined ? [unsure] : [{ kind: 'script', script: value }, unsure];

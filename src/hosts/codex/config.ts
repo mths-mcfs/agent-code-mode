@@ -16,13 +16,14 @@
  * down to the cwd, `-c` overrides, `/etc/codex/managed_config.toml`.
  * Constraints come from `/etc/codex/requirements.toml`.
  *
- * Settings passed only on the parent Codex command line are read best-effort
- * from that command line (Linux `/proc`, macOS `ps`). Anything else that is
+ * Settings passed only on the parent Codex command line are read from its
+ * exact argv, which only Linux gives (`/proc/<ppid>/cmdline`). On macOS and
+ * Windows, or when the parent is not a Codex process, the real IO refuses to
+ * load a policy rather than guess those settings. Anything else that is
  * ephemeral (app-server thread overrides, cloud and MDM config, settings
  * changed inside a running TUI) is invisible to this server.
  */
 
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,6 +40,12 @@ export interface ConfigLayer {
   readonly file: string;
   /** Folder holding the layer's `hooks.json` and `rules/`, when it has one. */
   readonly folder: string | null;
+  /**
+   * Linked git worktree: the main checkout's `.codex` folder whose `hooks.json`
+   * and `[hooks]` this project layer uses instead of its own (Codex
+   * `hooks_config_folder_override`).
+   */
+  readonly hooksFolder?: string;
   readonly config: TomlTable;
   /** Managed layers (system, managed config) run their hooks without user trust. */
   readonly managed: boolean;
@@ -107,10 +114,9 @@ export interface ConfigIo {
   isDir(dir: string): boolean;
   exists(p: string): boolean;
   realpath(p: string): string;
-  listDir(dir: string): string[];
-  /** Names of the regular files in `dir` (symlinks not followed); [] when `dir` is missing; throws otherwise. */
+  /** Names of the regular files in `dir` (symlinks not followed); [] when `dir` does not exist; throws otherwise. */
   listFiles(dir: string): string[];
-  /** The parent Codex process argv, or undefined when it cannot be read. */
+  /** The parent Codex process argv, or undefined when it cannot be read (test IO only: the real IO throws instead). */
   parentArgv(): readonly string[] | undefined;
 }
 
@@ -118,35 +124,15 @@ export class ConfigError extends Error {
   override readonly name = 'ConfigError';
 }
 
+/** The exact parent argv, which only Linux exposes. */
 function readParentArgv(platform: NodeJS.Platform): readonly string[] | undefined {
-  const ppid = process.ppid;
+  if (platform !== 'linux') return undefined;
   try {
-    if (platform === 'linux') {
-      const raw = readFileSync(`/proc/${ppid}/cmdline`, 'utf8');
-      return raw.split('\0').filter((s, i, all) => s !== '' || i < all.length - 1);
-    }
-    if (platform === 'darwin') {
-      const out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(ppid)], { encoding: 'utf8', timeout: 2000 });
-      return darwinArgv(out);
-    }
-  } catch (err) {
-    if (err instanceof ConfigError) throw err;
+    const raw = readFileSync(`/proc/${process.ppid}/cmdline`, 'utf8');
+    return raw.split('\0').filter((s, i, all) => s !== '' || i < all.length - 1);
+  } catch {
     return undefined;
   }
-  return undefined;
-}
-
-/**
- * `ps` joins argv with spaces, so a value with spaces cannot be told apart
- * from further options. A Codex command line that sets permission options is
- * therefore refused rather than guessed.
- */
-export function darwinArgv(psOutput: string): string[] {
-  const argv = psOutput.trim().split(/\s+/);
-  if (looksLikeCodex(argv) && argv.slice(1).some((a) => /^-(-(config|profile|ask-for-approval|sandbox|add-dir|enable|disable|dangerously|yolo|full-auto|approve-for-me)|[cpas])/.test(a))) {
-    throw new ConfigError('the parent Codex command line sets permission options, which cannot be read exactly on macOS');
-  }
-  return argv;
 }
 
 function isMissing(err: unknown): boolean {
@@ -174,7 +160,8 @@ export function nodeConfigIo(env: Readonly<Record<string, string | undefined>> =
           .filter((e) => e.isFile())
           .map((e) => e.name);
       } catch (err) {
-        if (isMissing(err)) return [];
+        // Only a missing folder is empty: `rules` as a file (ENOTDIR) is invalid config.
+        if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return [];
         throw new ConfigError(`cannot list ${dir}: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
@@ -193,14 +180,13 @@ export function nodeConfigIo(env: Readonly<Record<string, string | undefined>> =
         return p;
       }
     },
-    listDir(dir) {
-      try {
-        return readdirSync(dir);
-      } catch {
-        return [];
+    parentArgv() {
+      const argv = readParentArgv(process.platform);
+      if (argv === undefined || !looksLikeCodex(argv)) {
+        throw new ConfigError('the exact command line of a parent Codex process cannot be read (only Linux exposes it), so its -c, --profile, -s and -a options cannot be checked');
       }
+      return argv;
     },
-    parentArgv: () => readParentArgv(process.platform),
   };
 }
 
@@ -299,6 +285,9 @@ const SANDBOX_MODES: readonly SandboxMode[] = ['read-only', 'workspace-write', '
 const APPROVALS: readonly ApprovalPolicy[] = ['untrusted', 'on-failure', 'on-request', 'never'];
 const VALUE_OPTIONS = new Set(['-c', '--config', '-p', '--profile', '-a', '--ask-for-approval', '-s', '--sandbox', '-m', '--model', '-C', '--cd', '-i', '--image', '--enable', '--disable', '--local-provider', '--add-dir', '--output-schema', '-o', '--output-last-message', '--color']);
 
+/** Change approvals, trust or which config and rules load (Codex 0.169 `shared_options.rs`, `exec/src/cli.rs`). */
+const UNSUPPORTED_FLAGS = new Set(['--approve-for-me', '--full-auto', '--ignore-user-config', '--ignore-rules', '--trust']);
+
 function isSandboxMode(v: unknown): v is SandboxMode {
   return typeof v === 'string' && (SANDBOX_MODES as readonly string[]).includes(v);
 }
@@ -338,12 +327,13 @@ export function parseParentCommandLine(argv: readonly string[]): ParentCommandLi
         value = argv[i + 1];
         i++;
       }
-      if (value === undefined) break;
+      if (value === undefined) throw new ConfigError(`${name} without a value on the Codex command line`);
       switch (name) {
         case '-c':
         case '--config': {
           const o = parseOverride(value);
-          if (o) overrides.push(o);
+          if (o === undefined) throw new ConfigError(`invalid ${name} ${JSON.stringify(value)} on the Codex command line`);
+          overrides.push(o);
           break;
         }
         case '-p':
@@ -376,8 +366,8 @@ export function parseParentCommandLine(argv: readonly string[]): ParentCommandLi
     }
     if (arg === '--dangerously-bypass-approvals-and-sandbox' || arg === '--yolo') bypassApprovalsAndSandbox = true;
     else if (arg === '--dangerously-bypass-hook-trust') bypassHookTrust = true;
-    // Authorization options whose effect this adapter does not reproduce.
-    else if (arg === '--approve-for-me' || arg === '--full-auto') throw new ConfigError(`${arg} on the Codex command line is not supported`);
+    // Authorization options (or sources of it) whose effect this adapter does not reproduce.
+    else if (UNSUPPORTED_FLAGS.has(name)) throw new ConfigError(`${name} on the Codex command line is not supported`);
     else if (!arg.startsWith('-') && !sawSubcommand) {
       sawSubcommand = true;
       exec = arg === 'exec' || arg === 'e';
@@ -435,6 +425,8 @@ function loadRequirements(io: ConfigIo): Requirements | null {
   const r = parsed.data;
   const hooks = r.hooks;
   if (hooks && ('managed_dir' in hooks || 'windows_managed_dir' in hooks)) throw new ConfigError(`${file}: hooks.managed_dir is not supported`);
+  // Codex aliases: both together are a deserialization error there.
+  if (r.features !== undefined && r.feature_requirements !== undefined) throw new ConfigError(`${file}: features and feature_requirements cannot both be set`);
   const features = r.features ?? r.feature_requirements;
   return {
     file,
@@ -471,21 +463,35 @@ function trustKeys(io: ConfigIo, dir: string): string[] {
 }
 
 /**
- * The main repository of a linked git worktree, whose trust Codex reuses:
- * `<root>/.git` is a `gitdir: <common>/.git/worktrees/<name>` file and that
- * folder's `commondir` points back to `<common>/.git`.
+ * The main checkout of a linked git worktree, whose trust Codex reuses
+ * (`git-utils/src/trust.rs`): `<root>/.git` is a `gitdir:` file naming
+ * `<common>/worktrees/<name>`, whose `gitdir` registers `<root>/.git` back
+ * and whose `commondir` is `<common>`, and the main checkout's `.git` is (or
+ * points to) `<common>`.
  */
 function linkedWorktreeMain(io: ConfigIo, root: string): string | undefined {
   const dotGit = path.join(root, '.git');
   if (io.isDir(dotGit)) return undefined;
-  const gitdir = /^gitdir:\s*(.+?)\s*$/.exec(io.readFile(dotGit) ?? '')?.[1];
+  const readGitdir = (file: string): string | undefined => /^gitdir:\s*(.+?)\s*$/.exec(io.readFile(file) ?? '')?.[1];
+  const gitdir = readGitdir(dotGit);
   if (gitdir === undefined) return undefined;
-  const worktreeDir = io.realpath(path.resolve(root, gitdir));
+  const gitDirPath = path.resolve(root, gitdir);
+  if (!io.isDir(gitDirPath)) return undefined;
+  const worktreeDir = io.realpath(gitDirPath);
+  if (path.basename(path.dirname(worktreeDir)) !== 'worktrees') return undefined;
+  const common = path.dirname(path.dirname(worktreeDir));
+  const registered = io.readFile(path.join(worktreeDir, 'gitdir'))?.trim();
   const commonRaw = io.readFile(path.join(worktreeDir, 'commondir'))?.trim();
-  if (commonRaw === undefined || commonRaw === '') return undefined;
-  const common = io.realpath(path.resolve(worktreeDir, commonRaw));
-  const confirmed = path.dirname(path.dirname(worktreeDir)) === common && path.basename(path.dirname(worktreeDir)) === 'worktrees' && path.basename(common) === '.git';
-  return confirmed ? path.dirname(common) : undefined;
+  if (!registered || !commonRaw) return undefined;
+  const registeredDotGit = path.resolve(worktreeDir, registered);
+  if (path.basename(registeredDotGit) !== '.git') return undefined;
+  if (io.realpath(path.dirname(registeredDotGit)) !== io.realpath(root) || io.realpath(path.resolve(worktreeDir, commonRaw)) !== common) return undefined;
+  // The main checkout must own the common directory (its `.git` may be a pointer with --separate-git-dir).
+  const mainRoot = path.dirname(path.dirname(path.dirname(gitDirPath)));
+  const mainDotGit = path.join(mainRoot, '.git');
+  const mainGitDir = io.isDir(mainDotGit) ? mainDotGit : readGitdir(mainDotGit);
+  if (mainGitDir === undefined || io.realpath(path.resolve(mainRoot, mainGitDir)) !== common) return undefined;
+  return mainRoot;
 }
 
 function ancestors(dir: string): string[] {
@@ -587,7 +593,12 @@ export function loadCodexConfig(cwd: string, io: ConfigIo): CodexConfig {
   const absCwd = path.resolve(cwd);
   const projectRoot = ancestors(absCwd).find((d) => markers.some((m) => io.exists(path.join(d, m)))) ?? absCwd;
   const trust = projectTrust(preProject, io.platform);
-  const mainRepo = linkedWorktreeMain(io, projectRoot);
+  // The git checkout of cwd (Codex `find_git_checkout_root`) and, for a linked worktree, its main checkout.
+  const checkoutRoot = ancestors(absCwd).find((d) => {
+    const dotGit = path.join(d, '.git');
+    return io.isDir(dotGit) ? io.exists(path.join(dotGit, 'HEAD')) : io.exists(dotGit);
+  });
+  const mainRepo = checkoutRoot === undefined ? undefined : linkedWorktreeMain(io, checkoutRoot);
   const rootKeys = [...trustKeys(io, projectRoot), ...(mainRepo === undefined ? [] : trustKeys(io, mainRepo))];
   const decide = (dir: string): string | undefined => {
     for (const key of [...trustKeys(io, dir), ...rootKeys]) {
@@ -612,7 +623,21 @@ export function loadCodexConfig(cwd: string, io: ConfigIo): CodexConfig {
     }
     const file = path.join(dotCodex, 'config.toml');
     const text = io.readFile(file);
-    layers.push({ source: 'project', file, folder: dotCodex, config: text === undefined ? {} : parseTomlFile(text, file), managed: false });
+    const config = text === undefined ? {} : parseTomlFile(text, file);
+    // A linked worktree takes its hooks from the matching folder of the main checkout (Codex `merge_root_checkout_project_hooks`).
+    const rel = mainRepo === undefined || checkoutRoot === undefined ? undefined : path.relative(checkoutRoot, dir);
+    if (mainRepo === undefined || rel === undefined || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      layers.push({ source: 'project', file, folder: dotCodex, config, managed: false });
+      continue;
+    }
+    const hooksFolder = path.join(mainRepo, rel, '.codex');
+    const hooksFile = path.join(hooksFolder, 'config.toml');
+    const hooksText = io.readFile(hooksFile);
+    const mainHooks = hooksText === undefined ? undefined : own(parseTomlFile(hooksText, hooksFile), 'hooks');
+    const withHooks: TomlTable = {};
+    for (const [k, v] of Object.entries(config)) if (k !== 'hooks') setOwn(withHooks, k, v);
+    if (mainHooks !== undefined) setOwn(withHooks, 'hooks', mainHooks);
+    layers.push({ source: 'project', file, folder: dotCodex, hooksFolder, config: withHooks, managed: false });
   }
   if (untrustedProjectFolders.length > 0) notes.push(`untrusted project config ignored: ${untrustedProjectFolders.join(', ')}`);
 
