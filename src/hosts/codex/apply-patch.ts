@@ -130,6 +130,9 @@ export function parsePatch(patch: string): { hunks: PatchHunk[]; environmentId: 
     if (st.mode === 'update' && h && h.chunks.length === 0) {
       hunkError(`Update file hunk for path '${h.path}' is empty`);
     }
+    // A trailing `@@` with no lines is a chunk Codex refuses.
+    const last = h?.chunks[h.chunks.length - 1];
+    if (st.mode === 'update' && last && last.oldLines.length === 0 && last.newLines.length === 0) hunkError('Update hunk does not contain any lines');
     void line;
   };
   const headers = (t: string): boolean => {
@@ -559,22 +562,24 @@ export function generatePatch(file: string, before: string | null, after: string
     // Codex cannot express an update without lines; show the first line as context.
     if (chunks.length === 0) chunks = beforeLines.length > 0 ? [[` ${beforeLines[0] ?? ''}`]] : [];
     patch = chunks.length > 0 ? renderUpdate(file, chunks) : [BEGIN, `${ADD}${file}`, END].join('\n');
-    if (!sameLines(applyGenerated(patch, before), afterLines)) {
+    if (!sameLines(applyGenerated(patch, before, file), afterLines)) {
       // A chunk matched earlier than intended (duplicate or fuzzy match). A
       // whole-file chunk starts at line 0 and always matches there.
       const whole = [...beforeLines.map((l) => `-${l}`), ...afterLines.map((l) => `+${l}`)];
       patch = whole.length > 0 ? renderUpdate(file, [whole]) : patch;
     }
   }
-  const applied = applyGenerated(patch, before);
+  const applied = applyGenerated(patch, before, file);
   if (!sameLines(applied, afterLines)) throw new PatchError('generated patch does not reproduce the new content');
   return { patch, exact: applied === after };
 }
 
-function applyGenerated(patch: string, before: string | null): string {
+function applyGenerated(patch: string, before: string | null, file: string): string {
   const { hunks } = parsePatch(patch);
   const hunk = hunks[0];
   if (hunks.length !== 1 || hunk === undefined) throw new PatchError('generated patch must have one hunk');
+  // The reparsed patch must name the prepared destination (the parser trims header paths).
+  if (hunk.path !== file || (hunk.kind === 'update' && hunk.movePath !== null)) throw new PatchError('generated patch does not name the file exactly');
   // An Add hunk over an existing (empty) file overwrites it, like Codex.
   return applyHunk(hunk.kind === 'add' ? null : before, hunk);
 }

@@ -45,7 +45,7 @@ export interface ConfigLayer {
 }
 
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
-export type ApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never' | 'granular';
+export type ApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
 
 /** What could be read from the parent Codex command line. */
 export interface ParentCommandLine {
@@ -64,10 +64,12 @@ export interface ParentCommandLine {
 
 export interface Requirements {
   readonly allowedSandboxModes?: readonly SandboxMode[];
-  readonly allowedApprovalPolicies?: readonly string[];
+  readonly allowedApprovalPolicies?: readonly ApprovalPolicy[];
   readonly allowManagedHooksOnly: boolean;
   /** Inline managed hooks (`[hooks]` of requirements.toml), as a TOML table. */
   readonly hooks?: TomlTable;
+  /** Pinned feature flags (`[features]` of requirements.toml). */
+  readonly features?: TomlTable;
   readonly file: string;
 }
 
@@ -106,6 +108,8 @@ export interface ConfigIo {
   exists(p: string): boolean;
   realpath(p: string): string;
   listDir(dir: string): string[];
+  /** Names of the regular files in `dir` (symlinks not followed); [] when `dir` is missing; throws otherwise. */
+  listFiles(dir: string): string[];
   /** The parent Codex process argv, or undefined when it cannot be read. */
   parentArgv(): readonly string[] | undefined;
 }
@@ -122,14 +126,31 @@ function readParentArgv(platform: NodeJS.Platform): readonly string[] | undefine
       return raw.split('\0').filter((s, i, all) => s !== '' || i < all.length - 1);
     }
     if (platform === 'darwin') {
-      // Best effort: `ps` joins argv with spaces, so quoted values with spaces are mis-split.
       const out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(ppid)], { encoding: 'utf8', timeout: 2000 });
-      return out.trim().split(/\s+/);
+      return darwinArgv(out);
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof ConfigError) throw err;
     return undefined;
   }
   return undefined;
+}
+
+/**
+ * `ps` joins argv with spaces, so a value with spaces cannot be told apart
+ * from further options. A Codex command line that sets permission options is
+ * therefore refused rather than guessed.
+ */
+export function darwinArgv(psOutput: string): string[] {
+  const argv = psOutput.trim().split(/\s+/);
+  if (looksLikeCodex(argv) && argv.slice(1).some((a) => /^-(-(config|profile|ask-for-approval|sandbox|add-dir|enable|disable|dangerously|yolo|full-auto|approve-for-me)|[cpas])/.test(a))) {
+    throw new ConfigError('the parent Codex command line sets permission options, which cannot be read exactly on macOS');
+  }
+  return argv;
+}
+
+function isMissing(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && (err.code === 'ENOENT' || err.code === 'ENOTDIR');
 }
 
 /** Real filesystem and process access. */
@@ -143,8 +164,18 @@ export function nodeConfigIo(env: Readonly<Record<string, string | undefined>> =
       try {
         return readFileSync(file, 'utf8');
       } catch (err) {
-        if (err instanceof Error && 'code' in err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return undefined;
+        if (isMissing(err)) return undefined;
         throw new ConfigError(`cannot read ${file}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+    listFiles(dir) {
+      try {
+        return readdirSync(dir, { withFileTypes: true })
+          .filter((e) => e.isFile())
+          .map((e) => e.name);
+      } catch (err) {
+        if (isMissing(err)) return [];
+        throw new ConfigError(`cannot list ${dir}: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
     isDir(dir) {
@@ -192,12 +223,22 @@ function parseTomlFile(text: string, file: string): TomlTable {
   }
 }
 
+/** Own property only (never `__proto__` or an inherited member). */
+function own(t: TomlTable, k: string): unknown {
+  return Object.hasOwn(t, k) ? t[k] : undefined;
+}
+
+function setOwn(t: TomlTable, k: string, v: unknown): void {
+  Object.defineProperty(t, k, { value: v, enumerable: true, writable: true, configurable: true });
+}
+
 /** Deep merge: tables merge recursively, everything else is replaced (Codex `merge_toml_values`). */
 export function mergeTables(base: TomlTable, over: TomlTable): TomlTable {
-  const out: TomlTable = { ...base };
+  const out: TomlTable = {};
+  for (const [k, v] of Object.entries(base)) setOwn(out, k, v);
   for (const [k, v] of Object.entries(over)) {
-    const prev = out[k];
-    out[k] = isTable(prev) && isTable(v) ? mergeTables(prev, v) : v;
+    const prev = own(out, k);
+    setOwn(out, k, isTable(prev) && isTable(v) ? mergeTables(prev, v) : v);
   }
   return out;
 }
@@ -207,7 +248,7 @@ export function getPath(t: TomlTable, keys: readonly string[]): unknown {
   let cur: unknown = t;
   for (const k of keys) {
     if (!isTable(cur)) return undefined;
-    cur = cur[k];
+    cur = own(cur, k);
   }
   return cur;
 }
@@ -229,13 +270,23 @@ export function parseOverride(raw: string): readonly [string, unknown] | undefin
   return [key, value];
 }
 
+/** `-c` overrides in order: each one replaces the value at its path (Codex `apply_single_override`). */
 function overridesTable(overrides: readonly (readonly [string, unknown])[]): TomlTable {
-  let out: TomlTable = {};
+  const out: TomlTable = {};
   for (const [key, value] of overrides) {
     const parts = key.split('.');
-    let leaf: unknown = value;
-    for (let i = parts.length - 1; i >= 0; i--) leaf = { [parts[i] ?? '']: leaf };
-    if (isTable(leaf)) out = mergeTables(out, leaf);
+    const leafKey = parts.pop() ?? '';
+    let cur = out;
+    for (const p of parts) {
+      const next = own(cur, p);
+      if (isTable(next)) cur = next;
+      else {
+        const t: TomlTable = {};
+        setOwn(cur, p, t);
+        cur = t;
+      }
+    }
+    setOwn(cur, leafKey, value);
   }
   return out;
 }
@@ -301,11 +352,13 @@ export function parseParentCommandLine(argv: readonly string[]): ParentCommandLi
           break;
         case '-a':
         case '--ask-for-approval':
-          if (isApproval(value)) approvalPolicy = value;
+          if (!isApproval(value)) throw new ConfigError(`unsupported ${name} ${JSON.stringify(value)} on the Codex command line`);
+          approvalPolicy = value;
           break;
         case '-s':
         case '--sandbox':
-          if (isSandboxMode(value)) sandboxMode = value;
+          if (!isSandboxMode(value)) throw new ConfigError(`unsupported ${name} ${JSON.stringify(value)} on the Codex command line`);
+          sandboxMode = value;
           break;
         case '--enable':
           enable.push(value);
@@ -323,6 +376,8 @@ export function parseParentCommandLine(argv: readonly string[]): ParentCommandLi
     }
     if (arg === '--dangerously-bypass-approvals-and-sandbox' || arg === '--yolo') bypassApprovalsAndSandbox = true;
     else if (arg === '--dangerously-bypass-hook-trust') bypassHookTrust = true;
+    // Authorization options whose effect this adapter does not reproduce.
+    else if (arg === '--approve-for-me' || arg === '--full-auto') throw new ConfigError(`${arg} on the Codex command line is not supported`);
     else if (!arg.startsWith('-') && !sawSubcommand) {
       sawSubcommand = true;
       exec = arg === 'exec' || arg === 'e';
@@ -352,29 +407,42 @@ function looksLikeCodex(argv: readonly string[]): boolean {
 // ---------------------------------------------------------------------------
 
 const RequirementsSchema = z.looseObject({
-  allowed_sandbox_modes: z.array(z.enum(['read-only', 'workspace-write', 'danger-full-access'])).optional(),
-  allowed_approval_policies: z.array(z.string()).optional(),
+  // `external-sandbox` is valid but never the mode of a session this adapter sees.
+  allowed_sandbox_modes: z
+    .array(z.enum(['read-only', 'workspace-write', 'danger-full-access', 'external-sandbox']))
+    .refine((m) => m.includes('read-only'), 'allowed_sandbox_modes must include read-only')
+    .optional(),
+  // Granular approval entries are outside the supported subset.
+  allowed_approval_policies: z.array(z.enum(['untrusted', 'on-failure', 'on-request', 'never'])).nonempty().optional(),
   allow_managed_hooks_only: z.boolean().optional(),
   hooks: z.record(z.string(), z.unknown()).optional(),
-  rules: z.unknown().optional(),
+  features: z.record(z.string(), z.unknown()).optional(),
+  feature_requirements: z.record(z.string(), z.unknown()).optional(),
 });
+
+/** Containment requirements of Codex 0.169 (`config_requirements.rs`) this adapter does not reproduce. */
+const UNSUPPORTED_REQUIREMENTS = ['rules', 'allowed_permission_profiles', 'default_permissions', 'permissions', 'remote_sandbox_config', 'network_proxy', 'experimental_network'];
 
 function loadRequirements(io: ConfigIo): Requirements | null {
   const file = path.join(io.systemDir, 'requirements.toml');
   const text = io.readFile(file);
   if (text === undefined) return null;
-  const parsed = RequirementsSchema.safeParse(parseTomlFile(text, file));
+  const table = parseTomlFile(text, file);
+  const unsupported = [...UNSUPPORTED_REQUIREMENTS, ...(io.platform === 'win32' ? ['windows'] : [])].find((k) => Object.hasOwn(table, k));
+  if (unsupported !== undefined) throw new ConfigError(`${file}: the \`${unsupported}\` requirement is not supported`);
+  const parsed = RequirementsSchema.safeParse(table);
   if (!parsed.success) throw new ConfigError(`unsupported ${file}: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
   const r = parsed.data;
-  if (r.rules !== undefined) throw new ConfigError(`${file}: [rules] requirements are not supported`);
   const hooks = r.hooks;
   if (hooks && ('managed_dir' in hooks || 'windows_managed_dir' in hooks)) throw new ConfigError(`${file}: hooks.managed_dir is not supported`);
+  const features = r.features ?? r.feature_requirements;
   return {
     file,
     allowManagedHooksOnly: r.allow_managed_hooks_only ?? false,
-    ...(r.allowed_sandbox_modes ? { allowedSandboxModes: r.allowed_sandbox_modes } : {}),
+    ...(r.allowed_sandbox_modes ? { allowedSandboxModes: r.allowed_sandbox_modes.filter(isSandboxMode) } : {}),
     ...(r.allowed_approval_policies ? { allowedApprovalPolicies: r.allowed_approval_policies } : {}),
     ...(hooks ? { hooks } : {}),
+    ...(features ? { features } : {}),
   };
 }
 
@@ -392,13 +460,32 @@ function resolveCodexHome(io: ConfigIo): string {
   return path.join(io.home, '.codex');
 }
 
-function stripTrailingSep(p: string): string {
-  return p.length > 1 ? p.replace(/[\\/]+$/, '') : p;
+/** Strips trailing separators of the platform (on POSIX a backslash is a file-name character). */
+function stripTrailingSep(p: string, platform: NodeJS.Platform): string {
+  return p.length > 1 ? p.replace(platform === 'win32' ? /[\\/]+$/ : /\/+$/, '') : p;
 }
 
 function trustKeys(io: ConfigIo, dir: string): string[] {
-  const keys = [stripTrailingSep(io.realpath(dir)), stripTrailingSep(dir)];
+  const keys = [stripTrailingSep(io.realpath(dir), io.platform), stripTrailingSep(dir, io.platform)];
   return [...new Set(keys)];
+}
+
+/**
+ * The main repository of a linked git worktree, whose trust Codex reuses:
+ * `<root>/.git` is a `gitdir: <common>/.git/worktrees/<name>` file and that
+ * folder's `commondir` points back to `<common>/.git`.
+ */
+function linkedWorktreeMain(io: ConfigIo, root: string): string | undefined {
+  const dotGit = path.join(root, '.git');
+  if (io.isDir(dotGit)) return undefined;
+  const gitdir = /^gitdir:\s*(.+?)\s*$/.exec(io.readFile(dotGit) ?? '')?.[1];
+  if (gitdir === undefined) return undefined;
+  const worktreeDir = io.realpath(path.resolve(root, gitdir));
+  const commonRaw = io.readFile(path.join(worktreeDir, 'commondir'))?.trim();
+  if (commonRaw === undefined || commonRaw === '') return undefined;
+  const common = io.realpath(path.resolve(worktreeDir, commonRaw));
+  const confirmed = path.dirname(path.dirname(worktreeDir)) === common && path.basename(path.dirname(worktreeDir)) === 'worktrees' && path.basename(common) === '.git';
+  return confirmed ? path.dirname(common) : undefined;
 }
 
 function ancestors(dir: string): string[] {
@@ -412,13 +499,13 @@ function ancestors(dir: string): string[] {
   }
 }
 
-const ProjectsSchema = z.record(z.string(), z.looseObject({ trust_level: z.string().optional() }).catch({}));
+const ProjectsSchema = z.record(z.string(), z.looseObject({ trust_level: z.enum(['trusted', 'untrusted']).optional() }));
 
-function projectTrust(merged: TomlTable): Map<string, string> {
-  const parsed = ProjectsSchema.safeParse(merged['projects'] ?? {});
+function projectTrust(merged: TomlTable, platform: NodeJS.Platform): Map<string, string> {
+  const parsed = ProjectsSchema.safeParse(own(merged, 'projects') ?? {});
+  if (!parsed.success) throw new ConfigError(`invalid [projects] trust config: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
   const out = new Map<string, string>();
-  if (!parsed.success) return out;
-  for (const [k, v] of Object.entries(parsed.data)) if (v.trust_level !== undefined) out.set(stripTrailingSep(k), v.trust_level);
+  for (const [k, v] of Object.entries(parsed.data)) if (v.trust_level !== undefined) out.set(stripTrailingSep(k, platform), v.trust_level);
   return out;
 }
 
@@ -426,19 +513,24 @@ function stringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : undefined;
 }
 
-function featureEnabled(merged: TomlTable, cmd: ParentCommandLine | null, name: string, aliases: readonly string[], dflt: boolean): boolean {
+/** A boolean feature flag: config, then `--enable`/`--disable`, then the managed config and requirements, which win. */
+function featureEnabled(merged: TomlTable, cmd: ParentCommandLine | null, pinned: readonly (TomlTable | undefined)[], name: string, aliases: readonly string[], dflt: boolean): boolean {
   let value = dflt;
-  const features = merged['features'];
-  if (isTable(features)) {
+  const apply = (features: TomlTable | undefined, where: string): void => {
     for (const key of [...aliases, name]) {
-      const v = features[key];
-      if (typeof v === 'boolean') value = v;
+      const v = features === undefined ? undefined : own(features, key);
+      if (v !== undefined && typeof v !== 'boolean') throw new ConfigError(`${where}.${key} must be a boolean`);
+      if (v !== undefined) value = v;
     }
-  }
+  };
+  const features = own(merged, 'features');
+  if (features !== undefined && !isTable(features)) throw new ConfigError('[features] must be a table');
+  apply(features, 'features');
   if (cmd) {
     if (cmd.enable.some((f) => f === name || aliases.includes(f))) value = true;
     if (cmd.disable.some((f) => f === name || aliases.includes(f))) value = false;
   }
+  for (const p of pinned) apply(p, 'managed features');
   return value;
 }
 
@@ -482,14 +574,21 @@ export function loadCodexConfig(cwd: string, io: ConfigIo): CodexConfig {
 
   const baseMerged = layers.reduce<TomlTable>((acc, l) => mergeTables(acc, l.config), {});
   const sessionFlags = overridesTable(cmdline?.overrides ?? []);
-  const preProject = mergeTables(baseMerged, sessionFlags);
+  // The managed config has the highest precedence, also for trust and the project root.
+  const managedFile = path.join(io.systemDir, 'managed_config.toml');
+  const managedText = io.readFile(managedFile);
+  const managedConfig = managedText === undefined ? undefined : parseTomlFile(managedText, managedFile);
+  const preProject = mergeTables(mergeTables(baseMerged, sessionFlags), managedConfig ?? {});
 
   // Project root: the nearest ancestor of cwd with a marker (default `.git`), else cwd.
-  const markers = stringArray(getPath(preProject, ['project_root_markers'])) ?? ['.git'];
+  const rawMarkers = getPath(preProject, ['project_root_markers']);
+  const markers = rawMarkers === undefined ? ['.git'] : stringArray(rawMarkers);
+  if (markers === undefined) throw new ConfigError('project_root_markers must be a list of strings');
   const absCwd = path.resolve(cwd);
   const projectRoot = ancestors(absCwd).find((d) => markers.some((m) => io.exists(path.join(d, m)))) ?? absCwd;
-  const trust = projectTrust(preProject);
-  const rootKeys = trustKeys(io, projectRoot);
+  const trust = projectTrust(preProject, io.platform);
+  const mainRepo = linkedWorktreeMain(io, projectRoot);
+  const rootKeys = [...trustKeys(io, projectRoot), ...(mainRepo === undefined ? [] : trustKeys(io, mainRepo))];
   const decide = (dir: string): string | undefined => {
     for (const key of [...trustKeys(io, dir), ...rootKeys]) {
       const level = trust.get(key);
@@ -520,29 +619,33 @@ export function loadCodexConfig(cwd: string, io: ConfigIo): CodexConfig {
   if (Object.keys(sessionFlags).length > 0) {
     layers.push({ source: 'session-flags', file: '<session-flags>/config.toml', folder: null, config: sessionFlags, managed: false });
   }
-  addFileLayer('managed', path.join(io.systemDir, 'managed_config.toml'), null, true);
+  if (managedConfig !== undefined) layers.push({ source: 'managed', file: managedFile, folder: null, config: managedConfig, managed: true });
   if (io.platform === 'darwin') notes.push('macOS managed preferences (MDM) are not read');
 
   const merged = layers.reduce<TomlTable>((acc, l) => mergeTables(acc, l.config), {});
+  const rawManagedFeatures = managedConfig === undefined ? undefined : own(managedConfig, 'features');
+  if (rawManagedFeatures !== undefined && !isTable(rawManagedFeatures)) throw new ConfigError(`[features] in ${managedFile} must be a table`);
+  const managedFeatures = isTable(rawManagedFeatures) ? rawManagedFeatures : undefined;
 
-  if (merged['profile'] !== undefined) throw new ConfigError('the `profile` config key is not supported by Codex 0.169 (use --profile)');
-  if (merged['default_permissions'] !== undefined || merged['permissions'] !== undefined) {
+  if (own(merged, 'profile') !== undefined) throw new ConfigError('the `profile` config key is not supported by Codex 0.169 (use --profile)');
+  if (own(merged, 'default_permissions') !== undefined || own(merged, 'permissions') !== undefined) {
     throw new ConfigError('permission profiles (`default_permissions`, `[permissions]`) are not supported');
   }
 
   // Sandbox mode and approval policy, command line first.
   let sandboxMode: SandboxMode = 'read-only';
-  const cfgSandbox = merged['sandbox_mode'];
+  const cfgSandbox = own(merged, 'sandbox_mode');
   if (cfgSandbox !== undefined) {
     if (!isSandboxMode(cfgSandbox)) throw new ConfigError(`invalid sandbox_mode ${JSON.stringify(cfgSandbox)}`);
     sandboxMode = cfgSandbox;
   }
-  let approvalPolicy: ApprovalPolicy = 'on-request';
-  const cfgApproval = merged['approval_policy'];
+  // Codex asks for everything in a project explicitly marked untrusted unless a policy is set.
+  let approvalPolicy: ApprovalPolicy = decide(absCwd) === 'untrusted' ? 'untrusted' : 'on-request';
+  const cfgApproval = own(merged, 'approval_policy');
   if (cfgApproval !== undefined) {
-    if (isTable(cfgApproval) && 'granular' in cfgApproval) approvalPolicy = 'granular';
-    else if (isApproval(cfgApproval)) approvalPolicy = cfgApproval;
-    else throw new ConfigError(`invalid approval_policy ${JSON.stringify(cfgApproval)}`);
+    // Granular approval categories are not reproduced: refused rather than approximated.
+    if (!isApproval(cfgApproval)) throw new ConfigError(`unsupported approval_policy ${JSON.stringify(cfgApproval)}`);
+    approvalPolicy = cfgApproval;
   }
   if (cmdline) {
     if (cmdline.exec) approvalPolicy = 'never';
@@ -558,14 +661,22 @@ export function loadCodexConfig(cwd: string, io: ConfigIo): CodexConfig {
     if (allowed === undefined) throw new ConfigError('requirements allow no sandbox mode');
     sandboxMode = allowed;
   }
+  // Codex starts from the first allowed approval policy when the configured one is not allowed.
+  const allowedApprovals = requirements?.allowedApprovalPolicies;
+  if (allowedApprovals && !allowedApprovals.includes(approvalPolicy)) approvalPolicy = allowedApprovals[0] ?? approvalPolicy;
 
-  const sww = merged['sandbox_workspace_write'];
-  const swwTable = isTable(sww) ? sww : {};
-  const rawRoots = swwTable['writable_roots'] === undefined ? [] : stringArray(swwTable['writable_roots']);
+  const sww = own(merged, 'sandbox_workspace_write');
+  if (sww !== undefined && !isTable(sww)) throw new ConfigError('[sandbox_workspace_write] must be a table');
+  const swwTable = sww ?? {};
+  const rawRoots = own(swwTable, 'writable_roots') === undefined ? [] : stringArray(own(swwTable, 'writable_roots'));
   if (rawRoots === undefined) throw new ConfigError('sandbox_workspace_write.writable_roots must be a list of strings');
-  const writableRoots = [...rawRoots, ...(cmdline?.addDirs ?? [])].map((r) => path.resolve(absCwd, r.startsWith('~/') ? path.join(io.home, r.slice(2)) : r));
+  // Relative roots resolve against the folder of the config file that set them (the cwd for -c); --add-dir against the cwd.
+  const rootsLayer = [...layers].reverse().find((l) => getPath(l.config, ['sandbox_workspace_write', 'writable_roots']) !== undefined);
+  const rootsBase = rootsLayer === undefined || rootsLayer.source === 'session-flags' ? absCwd : path.dirname(rootsLayer.file);
+  const expand = (base: string) => (r: string) => path.resolve(base, r.startsWith('~/') ? path.join(io.home, r.slice(2)) : r);
+  const writableRoots = [...rawRoots.map(expand(rootsBase)), ...(cmdline?.addDirs ?? []).map(expand(absCwd))];
   const bool = (key: string): boolean => {
-    const v = swwTable[key];
+    const v = own(swwTable, key);
     if (v === undefined) return false;
     if (typeof v !== 'boolean') throw new ConfigError(`sandbox_workspace_write.${key} must be a boolean`);
     return v;
@@ -586,13 +697,17 @@ export function loadCodexConfig(cwd: string, io: ConfigIo): CodexConfig {
     networkAccess: bool('network_access'),
     excludeTmpdirEnvVar: bool('exclude_tmpdir_env_var'),
     excludeSlashTmp: bool('exclude_slash_tmp'),
-    hooksEnabled: featureEnabled(merged, cmdline, 'hooks', ['codex_hooks'], true),
+    hooksEnabled: featureEnabled(merged, cmdline, [managedFeatures, requirements?.features], 'hooks', ['codex_hooks'], true),
     bypassHookTrust: cmdline?.bypassHookTrust ?? false,
     notes,
   };
 }
 
-/** Rule files of the active layers: `<folder>/rules/*.rules`, not recursive. */
+/**
+ * Rule files of the active layers: the regular files `<folder>/rules/*.rules`
+ * (not recursive, symlinks not followed). A missing `rules/` is empty; any
+ * other listing error fails the load.
+ */
 export function ruleFiles(config: CodexConfig, io: ConfigIo): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -600,7 +715,7 @@ export function ruleFiles(config: CodexConfig, io: ConfigIo): string[] {
     if (layer.folder === null || seen.has(layer.folder)) continue;
     seen.add(layer.folder);
     const dir = path.join(layer.folder, 'rules');
-    for (const name of io.listDir(dir).sort()) if (name.endsWith('.rules')) out.push(path.join(dir, name));
+    for (const name of io.listFiles(dir).sort()) if (name.endsWith('.rules')) out.push(path.join(dir, name));
   }
   return out;
 }

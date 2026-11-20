@@ -10,7 +10,8 @@
  *
  * Discovery: each active config layer contributes `<folder>/hooks.json` and
  * the inline `[hooks]` table of its config.toml; `/etc/codex/requirements.toml`
- * contributes managed inline hooks; enabled plugins contribute their hooks.
+ * contributes managed inline hooks. Enabled plugins whose cached versions
+ * declare hooks fail the load: the active installation cannot be verified.
  *
  * Trust: Codex runs a non-managed hook only when the user config has
  * `[hooks.state."<source path>:pre_tool_use:<group>:<handler>"]` with
@@ -19,10 +20,9 @@
  * `{event_name, matcher, hooks: [normalized handler]}`. Managed layers are
  * trusted; `--dangerously-bypass-hook-trust` trusts everything.
  *
- * Hooks this adapter cannot reproduce exactly run in deny-only mode: a deny
- * still denies, a rewrite is refused, anything else is ignored. That covers
- * plugin hooks (their trust includes a plugin content fingerprint), `-c`
- * session-flag hooks, and every hook when `[hooks.state]` cannot be parsed.
+ * A hook whose trust cannot be decided (`-c` session-flag hooks, every hook
+ * when `[hooks.state]` cannot be parsed) or whose matcher cannot be evaluated
+ * exactly never runs: a call it matches is denied before any hook starts.
  */
 
 import { createHash } from 'node:crypto';
@@ -34,15 +34,20 @@ import { ConfigError, getPath, isTable, type CodexConfig, type ConfigIo, type To
 import { rustRegexToJs } from './rust-regex.js';
 import { shellQuote } from './shell.js';
 
-export type HookTrustMode = 'trusted' | 'deny-only';
+export type HookTrustMode = 'trusted' | 'unverified';
 
-export type HookMatcher = { readonly kind: 'all' } | { readonly kind: 'exact'; readonly names: readonly string[] } | { readonly kind: 'regex'; readonly source: string; readonly flags: string };
+export type HookMatcher =
+  | { readonly kind: 'all' }
+  | { readonly kind: 'exact'; readonly names: readonly string[] }
+  | { readonly kind: 'regex'; readonly source: string; readonly flags: string }
+  /** A Rust regex with no exact JavaScript translation: matches every call, which is then denied. */
+  | { readonly kind: 'unsupported'; readonly pattern: string };
 
 /** One PreToolUse handler Codex would consider. */
 export interface HookHandler {
   readonly key: string;
   readonly sourcePath: string;
-  readonly origin: 'layer' | 'requirements' | 'plugin' | 'session-flags';
+  readonly origin: 'layer' | 'requirements' | 'session-flags';
   readonly matcher: HookMatcher;
   readonly handler: { readonly type: 'command'; readonly command: string; readonly env: Readonly<Record<string, string>> } | { readonly type: 'mcp_tool'; readonly server: string; readonly tool: string };
   readonly timeoutSec: number;
@@ -159,21 +164,20 @@ export function hookKey(sourcePath: string, groupIndex: number, handlerIndex: nu
 // Matchers (hooks/src/engine/matcher.rs).
 // ---------------------------------------------------------------------------
 
-export function compileMatcher(pattern: string | null | undefined, where: string): HookMatcher {
+export function compileMatcher(pattern: string | null | undefined): HookMatcher {
   if (pattern === undefined || pattern === null || pattern === '' || pattern === '*') return { kind: 'all' };
   if (/^[A-Za-z0-9_|]+$/.test(pattern)) return { kind: 'exact', names: pattern.split('|') };
-  // Codex matchers are Rust regexes. When one cannot be translated to an
-  // equivalent JavaScript RegExp, the hook matches every call: a blocking
-  // hook must never silently stop matching. (Codex itself drops a group
-  // whose matcher is not a valid Rust regex; matching it is stricter.)
-  void where;
+  // Codex matchers are Rust regexes. One without an exact JavaScript
+  // translation cannot be evaluated: it matches every call so the call is
+  // refused, never silently skipped.
   const js = rustRegexToJs(pattern);
-  return js === undefined ? { kind: 'all' } : { kind: 'regex', source: js.source, flags: js.flags };
+  return js === undefined ? { kind: 'unsupported', pattern } : { kind: 'regex', source: js.source, flags: js.flags };
 }
 
 export function matcherMatches(m: HookMatcher, names: readonly string[]): boolean {
   switch (m.kind) {
     case 'all':
+    case 'unsupported':
       return true;
     case 'exact':
       return names.some((n) => m.names.includes(n));
@@ -198,7 +202,8 @@ function readHookStates(config: CodexConfig): HookStates {
   const states = new Map<string, z.infer<typeof HookStateSchema>>();
   let readable = true;
   for (const layer of config.layers) {
-    if (layer.source !== 'user' && layer.source !== 'session-flags') continue;
+    // User-level state, in layer precedence: user config, profile, session flags.
+    if (layer.source !== 'user' && layer.source !== 'profile' && layer.source !== 'session-flags') continue;
     const raw = getPath(layer.config, ['hooks', 'state']);
     if (raw === undefined) continue;
     if (!isTable(raw)) {
@@ -241,16 +246,20 @@ function parseGroups(raw: unknown, where: string): MatcherGroup[] {
 function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], source: Source, states: HookStates, config: CodexConfig, platform: NodeJS.Platform): void {
   groups.forEach((group, groupIndex) => {
     const matcherRaw = group.matcher;
-    const matcher = compileMatcher(matcherRaw, source.path);
+    const matcher = compileMatcher(matcherRaw);
     group.hooks.forEach((h, handlerIndex) => {
-      if (h.type === 'prompt' || h.type === 'agent') return; // Codex skips these with a warning.
-      const timeoutSec = Math.max(1, h.timeout ?? DEFAULT_TIMEOUT_SEC);
       const key = hookKey(source.keySource, groupIndex, handlerIndex);
+      // Codex skips these with a warning; a handler required by requirements.toml must load.
+      const skip = (why: string): void => {
+        if (source.origin === 'requirements') throw new ConfigError(`required hook ${key} cannot be loaded: ${why}`);
+      };
+      if (h.type === 'prompt' || h.type === 'agent') return skip(`${h.type} handlers are not supported`);
+      const timeoutSec = Math.max(1, h.timeout ?? DEFAULT_TIMEOUT_SEC);
       let hash: string;
       let handler: HookHandler['handler'];
       if (h.type === 'command') {
         const cmd = platform === 'win32' ? (h.commandWindows ?? h.command_windows ?? h.command) : h.command;
-        if (cmd.trim() === '') return; // Codex skips empty commands.
+        if (cmd.trim() === '') return skip('empty command');
         hash = commandHookHash({ matcher: matcherRaw, command: cmd, timeoutSec, async: h.async ?? false, statusMessage: h.statusMessage, additionalContextLimit: h.additionalContextLimit });
         // Async hooks never change the decision in Codex; nothing to run here.
         if (h.async === true) return;
@@ -258,7 +267,7 @@ function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], sourc
         for (const [k, v] of Object.entries(source.env)) command = command.split(`\${${k}}`).join(v);
         handler = { type: 'command', command, env: source.env };
       } else {
-        if (h.server.trim() === '' || h.tool.trim() === '') return;
+        if (h.server.trim() === '' || h.tool.trim() === '') return skip('empty MCP server or tool');
         hash = mcpHookHash(matcherRaw, h, timeoutSec);
         handler = { type: 'mcp_tool', server: h.server, tool: h.tool };
       }
@@ -267,7 +276,7 @@ function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], sourc
       if (!source.managed && state?.enabled === false) return;
       let mode: HookTrustMode | undefined;
       if (source.managed || config.bypassHookTrust) mode = 'trusted';
-      else if (source.origin === 'plugin' || source.origin === 'session-flags' || !states.readable) mode = 'deny-only';
+      else if (source.origin === 'session-flags' || !states.readable) mode = 'unverified';
       else if (state?.trusted_hash === hash) mode = 'trusted';
       if (mode === undefined) return; // Untrusted or modified: Codex skips it.
       out.push({ key, sourcePath: source.path, origin: source.origin, matcher, handler, timeoutSec, mode, hash });
@@ -275,70 +284,33 @@ function appendGroups(out: HookHandler[], groups: readonly MatcherGroup[], sourc
   });
 }
 
-const PluginManifestSchema = z.looseObject({
-  hooks: z.union([z.string(), z.array(z.string()), z.record(z.string(), z.unknown()), z.array(z.record(z.string(), z.unknown()))]).optional(),
-});
-
 const PluginEnabledSchema = z.record(z.string(), z.looseObject({ enabled: z.boolean().optional() }).catch({}));
 
-function appendPluginHooks(out: HookHandler[], config: CodexConfig, io: ConfigIo, states: HookStates, notes: string[]): void {
+/**
+ * Codex runs the hooks of a plugin's active installation, which is not
+ * recorded where this server can verify it. Rather than pick a cached
+ * version, an enabled plugin whose cache may hold hooks fails the load.
+ */
+function checkPluginHooks(config: CodexConfig, io: ConfigIo): void {
   const plugins = PluginEnabledSchema.safeParse(config.merged['plugins'] ?? {});
-  if (!plugins.success) return;
+  if (!plugins.success) throw new ConfigError('[plugins] must be a table of plugin tables');
   for (const [id, entry] of Object.entries(plugins.data)) {
     if (entry.enabled === false) continue;
     const at = id.lastIndexOf('@');
-    if (at <= 0) continue;
-    const name = id.slice(0, at);
-    const marketplace = id.slice(at + 1);
-    if (!/^[A-Za-z0-9._-]+$/.test(name) || !/^[A-Za-z0-9._-]+$/.test(marketplace)) continue;
+    const [name, marketplace] = [id.slice(0, at), id.slice(at + 1)];
+    if (at <= 0 || !/^[A-Za-z0-9._-]+$/.test(name) || !/^[A-Za-z0-9._-]+$/.test(marketplace)) throw new ConfigError(`unsupported plugin id ${JSON.stringify(id)}`);
     const base = path.join(config.codexHome, 'plugins', 'cache', marketplace, name);
-    // The installed version is not recorded where this server can read it; every cached version is considered.
-    for (const version of io.listDir(base).sort()) {
+    for (const version of io.listDir(base)) {
       const root = path.join(base, version);
-      const env = { PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root };
-      const manifestPath = path.join(root, '.codex-plugin', 'plugin.json');
-      const text = io.readFile(manifestPath);
-      let sources: { file: string; rel: string; value: unknown }[] = [];
-      let manifestHooks: z.infer<typeof PluginManifestSchema>['hooks'];
-      if (text !== undefined) {
-        let json: unknown;
-        try {
-          json = JSON.parse(text);
-        } catch {
-          notes.push(`plugin manifest ${manifestPath} is not valid JSON; its hooks were not loaded`);
-          continue;
-        }
-        const m = PluginManifestSchema.safeParse(json);
-        if (!m.success) {
-          notes.push(`plugin manifest ${manifestPath} is invalid; its hooks were not loaded`);
-          continue;
-        }
-        manifestHooks = m.data.hooks;
+      const manifest = io.readFile(path.join(root, '.codex-plugin', 'plugin.json'));
+      let declares = io.exists(path.join(root, 'hooks', 'hooks.json'));
+      try {
+        const json: unknown = manifest === undefined ? {} : JSON.parse(manifest);
+        declares ||= !isTable(json) || Object.hasOwn(json, 'hooks');
+      } catch {
+        declares = true;
       }
-      const fromFile = (rel: string): void => {
-        const file = path.resolve(root, rel);
-        const body = io.readFile(file);
-        if (body === undefined) return;
-        try {
-          sources.push({ file, rel: path.relative(root, file).split(path.sep).join('/'), value: JSON.parse(body) });
-        } catch {
-          throw new ConfigError(`plugin hooks file ${file} is not valid JSON`);
-        }
-      };
-      if (manifestHooks === undefined) fromFile(path.join('hooks', 'hooks.json'));
-      else if (typeof manifestHooks === 'string') fromFile(manifestHooks);
-      else if (Array.isArray(manifestHooks)) {
-        manifestHooks.forEach((item, index) => {
-          if (typeof item === 'string') fromFile(item);
-          else sources.push({ file: manifestPath, rel: `plugin.json#hooks[${index}]`, value: item });
-        });
-      } else sources.push({ file: manifestPath, rel: 'plugin.json#hooks[0]', value: manifestHooks });
-      sources = sources.filter((s) => isTable(s.value));
-      for (const s of sources) {
-        const value = s.value;
-        const events = isTable(value) && isTable(value['hooks']) ? value['hooks'] : value;
-        appendGroups(out, parseGroups(events, s.file), { path: s.file, keySource: `${id}:${s.rel}`, origin: 'plugin', managed: false, env }, states, config, io.platform);
-      }
+      if (declares) throw new ConfigError(`plugin ${id} may define hooks, but its active installation cannot be verified`);
     }
   }
 }
@@ -349,7 +321,7 @@ export function discoverHooks(config: CodexConfig, io: ConfigIo): { hooks: HookH
   const out: HookHandler[] = [];
   if (!config.hooksEnabled) return { hooks: out, notes: ['hooks are disabled (features.hooks = false)'] };
   const states = readHookStates(config);
-  if (!states.readable) notes.push('[hooks.state] could not be parsed: every configured hook runs in deny-only mode');
+  if (!states.readable) notes.push('[hooks.state] could not be parsed: calls matched by a non-managed hook are denied');
   const managedOnly = config.requirements?.allowManagedHooksOnly ?? false;
 
   if (config.requirements?.hooks) {
@@ -385,8 +357,8 @@ export function discoverHooks(config: CodexConfig, io: ConfigIo): { hooks: HookH
       appendGroups(out, parseGroups(events, layer.file), { path: layer.file, keySource: layer.file, origin, managed: layer.managed, env: {} }, states, config, io.platform);
     }
   }
-  if (!managedOnly) appendPluginHooks(out, config, io, states, notes);
-  if (out.some((h) => h.mode === 'deny-only')) notes.push('some hooks run in deny-only mode (trust could not be verified)');
+  if (!managedOnly) checkPluginHooks(config, io);
+  if (out.some((h) => h.mode === 'unverified')) notes.push('calls matched by a hook whose trust cannot be verified are denied');
   return { hooks: out, notes };
 }
 
@@ -395,7 +367,7 @@ export function discoverHooks(config: CodexConfig, io: ConfigIo): { hooks: HookH
 // ---------------------------------------------------------------------------
 
 const HookSpecificSchema = z.strictObject({
-  hookEventName: z.enum(['PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact', 'SessionStart', 'UserPromptSubmit', 'SubagentStart', 'SubagentStop', 'Stop', 'Interrupt']),
+  hookEventName: z.literal('PreToolUse'),
   permissionDecision: z.enum(['allow', 'deny', 'ask']).optional(),
   permissionDecisionReason: z.string().optional(),
   updatedInput: z.unknown().optional(),
@@ -524,9 +496,12 @@ export function hookShellCommand(command: string, env: Readonly<Record<string, s
 export async function runHooks(input: HookRunInput): Promise<HooksResult> {
   const matching = input.hooks.filter((h) => matcherMatches(h.matcher, input.names));
   if (matching.length === 0) return { kind: 'allow' };
-  const mcp = matching.find((h) => h.handler.type === 'mcp_tool');
-  if (mcp && mcp.handler.type === 'mcp_tool') {
-    return { kind: 'deny', source: 'unsupported-config', reason: `hook ${mcp.key} is an MCP tool hook (${mcp.handler.server}/${mcp.handler.tool}), which this server cannot run` };
+  // Refuse before any hook starts what cannot be run exactly.
+  for (const h of matching) {
+    const deny = (reason: string): HooksResult => ({ kind: 'deny', source: 'unsupported-config', reason: `hook ${h.key} ${reason}` });
+    if (h.matcher.kind === 'unsupported') return deny(`has the matcher ${JSON.stringify(h.matcher.pattern)}, which cannot be evaluated exactly`);
+    if (h.mode === 'unverified') return deny('cannot run: its trust cannot be verified');
+    if (h.handler.type === 'mcp_tool') return deny(`is an MCP tool hook (${h.handler.server}/${h.handler.tool}), which this server cannot run`);
   }
   const run = input.run ?? runCommandHook;
   const outcomes = await Promise.all(
@@ -540,13 +515,7 @@ export async function runHooks(input: HookRunInput): Promise<HooksResult> {
         timeoutMs: h.timeoutSec * 1000,
         signal: input.signal,
       });
-      const outcome = interpretHookResult(result, `hook ${h.key}`);
-      if (h.mode === 'deny-only') {
-        if (outcome.kind === 'deny') return outcome;
-        if (outcome.kind === 'update') return { kind: 'error', source: 'unsupported-config', reason: `hook ${h.key} rewrote the call but its trust could not be verified` };
-        return { kind: 'none' };
-      }
-      return outcome;
+      return interpretHookResult(result, `hook ${h.key}`);
     }),
   );
   for (const o of outcomes) {

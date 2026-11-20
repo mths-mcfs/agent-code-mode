@@ -92,6 +92,12 @@ describe('rule evaluation', () => {
     expect(decide("echo 'rm -rf x'")).toBeUndefined();
   });
 
+  it.runIf(process.platform !== 'win32')('resolves executable paths with POSIX syntax', () => {
+    // A backslash is part of the file name: `/opt/x\rm` is not `rm`.
+    expect(matchRules(policy, ['/opt/x\\rm', 'x'])).toEqual([]);
+    expect(isDangerousCommand(['/opt/x\\rm', '-rf', 'x'])).toBe(false);
+  });
+
   it('flags forced rm like Codex', () => {
     expect(isDangerousCommand(['rm', '-rf', 'x'])).toBe(true);
     expect(isDangerousCommand(['sudo', 'env', 'A=1', 'rm', '--force', 'x'])).toBe(true);

@@ -251,6 +251,9 @@ export function rustRegexToJs(pattern: string): JsRegex | undefined {
       }
     }
     if (depth !== 0) return undefined;
+    // Rust case-folds a negated Unicode property before negating it; JavaScript
+    // negates first, so `\P{..}` under `i` matches different names.
+    if (flags.includes('i') && out.includes('\\P{')) return undefined;
     new RegExp(out, flags);
     return { source: out, flags };
   } catch {

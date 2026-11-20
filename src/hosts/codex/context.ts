@@ -17,20 +17,21 @@ import type { ContextInput, ContextProvider, ContextSource, SessionContext } fro
 const id = z.string().min(1).max(512);
 const opt = id.optional().catch(undefined);
 
+// The turn metadata and its sandbox mode carry authorization: when present they must be valid.
 export const CodexTurnMetadataSchema = z.object({
   session_id: opt,
   thread_id: opt,
   turn_id: opt,
   model: opt,
   sandbox: opt,
-  sandbox_mode: opt,
+  sandbox_mode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
 });
 
 export const CodexMetaSchema = z.object({
   sessionId: opt,
   threadId: opt,
   callId: opt,
-  'x-codex-turn-metadata': CodexTurnMetadataSchema.optional().catch(undefined),
+  'x-codex-turn-metadata': CodexTurnMetadataSchema.optional(),
 });
 
 function metaObject(meta: unknown): Record<string, unknown> {
@@ -39,7 +40,9 @@ function metaObject(meta: unknown): Record<string, unknown> {
 
 export class CodexContextProvider implements ContextProvider {
   async resolve(input: ContextInput): Promise<SessionContext> {
-    const meta = CodexMetaSchema.parse(metaObject(input.meta));
+    const parsed = CodexMetaSchema.safeParse(metaObject(input.meta));
+    if (!parsed.success) throw new Error(`invalid Codex turn metadata: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
+    const meta = parsed.data;
     const turn = meta['x-codex-turn-metadata'];
     const sources: Record<string, ContextSource> = {};
     const roots = input.roots.filter((r) => path.isAbsolute(r));

@@ -28,7 +28,7 @@ import type { BashContainment, Decision, HostAdapter, PolicyLoadError, PolicySna
 import { ConfigError, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
 import { isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
 import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
-import { mapUpdatedInput, nativeCall, NativeShapeError, shellCommandFor, type NativeCall } from './native.js';
+import { APPLY_PATCH_NAMES, BASH_NAMES, mapUpdatedInput, nativeCall, NativeShapeError, shellCommandFor, type NativeCall } from './native.js';
 import { ShellParseError, splitShellCommands } from './shell.js';
 
 /** Adapter-specific part of the policy snapshot. */
@@ -60,11 +60,13 @@ export interface CodexHostAdapterOptions {
 }
 
 const READ_ONLY_SUBPATHS = ['.git', '.agents', '.codex', '.aws'];
-const SANDBOX_MODES: readonly string[] = ['read-only', 'workspace-write', 'danger-full-access'];
+/** Sandbox modes, least to most permissive. */
+const SANDBOX_MODES: readonly SandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
 function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  // Compare whole segments: a child named `..name` is inside.
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 function unique(xs: readonly string[]): string[] {
@@ -123,16 +125,17 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     const rules: PrefixRule[] = [];
     for (const file of ruleFiles(config, io)) {
       const text = io.readFile(file);
-      if (text === undefined) continue;
+      if (text === undefined) throw new ConfigError(`rule file ${file} disappeared while the rules were read`);
       rules.push(...parseRulesFile(text, file));
     }
     const { hooks, notes: hookNotes } = discoverHooks(config, io);
 
-    // The host's own turn metadata is authoritative for the sandbox mode.
+    // The turn metadata can narrow the sandbox mode, never widen it past the reconstructed policy.
     let sandboxMode = config.sandboxMode;
     if (ctx.sandboxMode !== undefined) {
-      if (!SANDBOX_MODES.includes(ctx.sandboxMode)) throw new ConfigError(`unknown Codex sandbox mode ${JSON.stringify(ctx.sandboxMode)}`);
-      sandboxMode = ctx.sandboxMode === 'read-only' ? 'read-only' : ctx.sandboxMode === 'workspace-write' ? 'workspace-write' : 'danger-full-access';
+      const turn = SANDBOX_MODES.find((m) => m === ctx.sandboxMode);
+      if (turn === undefined) throw new ConfigError(`unknown Codex sandbox mode ${JSON.stringify(ctx.sandboxMode)}`);
+      if (SANDBOX_MODES.indexOf(turn) < SANDBOX_MODES.indexOf(sandboxMode)) sandboxMode = turn;
     }
 
     const tmp = this.#opts.tmpDirs ?? { slashTmp: process.platform === 'win32' ? null : '/tmp', tmpdir: io.env['TMPDIR'] ?? null };
@@ -145,15 +148,17 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
 
     const stateDir = this.#opts.stateDir ?? stateDirPath(io.env, io.home);
     const homeCodex = path.join(io.home, '.codex');
+    // Each protected path also by its canonical destination; a missing one through its nearest existing parent.
+    const canonical = (p: string): string => {
+      if (io.exists(p)) return io.realpath(p);
+      const parent = path.dirname(p);
+      return parent === p ? p : path.join(canonical(parent), path.basename(p));
+    };
+    const both = (p: string): string[] => [p, canonical(p)];
     const protectedPaths = unique([
       '**/.codex/**',
-      `${config.codexHome}/**`,
-      `${io.realpath(config.codexHome)}/**`,
-      `${homeCodex}/**`,
-      `${io.systemDir}/**`,
-      `${stateDir}/**`,
-      path.join(config.cwd, '.mcp.json'),
-      path.join(config.projectRoot, '.mcp.json'),
+      ...[config.codexHome, homeCodex, io.systemDir, stateDir].flatMap(both).map((d) => `${d}/**`),
+      ...[path.join(config.cwd, '.mcp.json'), path.join(config.projectRoot, '.mcp.json')].flatMap(both),
     ]);
 
     return {
@@ -185,6 +190,9 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
   async authorize(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>, signal: AbortSignal): Promise<Decision> {
     const p = policy.payload;
     if (!p.hooksEnabled || p.hooks.length === 0) return { kind: 'allow' };
+    // Filter by the tool's names first: no file is read or patch built for a call no hook matches.
+    const names = prepared.tool === 'write' || prepared.tool === 'edit' ? APPLY_PATCH_NAMES : BASH_NAMES;
+    if (!p.hooks.some((h) => matcherMatches(h.matcher, names))) return { kind: 'allow' };
     let native: NativeCall;
     try {
       native = await nativeCall(prepared, ctx, this.#opts.readCurrent);
@@ -192,7 +200,6 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       const reason = err instanceof NativeShapeError ? err.message : `cannot build the Codex tool input: ${err instanceof Error ? err.message : String(err)}`;
       return { kind: 'deny', source: 'hook-error', reason };
     }
-    if (!p.hooks.some((h) => matcherMatches(h.matcher, native.names))) return { kind: 'allow' };
     // The patch grammar cannot express every byte sequence (a missing final
     // newline, line endings other than the file's first). A hook must not
     // approve a change different from the one that would be applied.
@@ -207,7 +214,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       hooks: p.hooks,
       names: native.names,
       stdin: JSON.stringify(hookInput(prepared, native, ctx, p)),
-      cwd: native.cwd,
+      // Codex starts hooks in the session cwd; the tool's cwd is only in the input.
+      cwd: ctx.cwd,
       env: this.#opts.hookEnv ?? process.env,
       platform: process.platform,
       signal,
@@ -259,6 +267,13 @@ export function checkShellCommand(command: string, p: CodexPolicy): Decision {
   }
   // A wrapper whose options this server does not know may run anything: ask.
   if (split.unsure.length > 0) unmatchedAsk ??= `cannot tell which command runs behind a wrapper (${split.unsure[0] ?? ''})`;
+  // Words expanded at run time: ask when they could reach a rule or the forced-rm check.
+  for (const argv of split.dynamic) {
+    const program = argv[0] ?? '';
+    const base = path.basename(program);
+    const relevant = /[$`*?[{]/.test(program) || ['rm', 'sudo', 'env'].includes(base) || p.rules.rules.some((r) => r.program === program || r.program === base);
+    if (relevant) unmatchedAsk ??= `${argv.join(' ')} has words expanded at run time, so its exact command cannot be checked`;
+  }
   const top = strictest(matched);
   const why = (r: PrefixRule): string => `${r.decision} by Codex rule ${r.source} (${[r.program, ...r.rest.map((a) => a.join('|'))].join(' ')})${r.justification ? `: ${r.justification}` : ''}`;
   if (top?.decision === 'forbidden') return { kind: 'deny', source: 'rule', reason: why(top) };

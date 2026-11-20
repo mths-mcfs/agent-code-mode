@@ -29,6 +29,8 @@ export interface SplitResult {
   readonly plain: boolean;
   /** Wrapped commands this splitter could not resolve (unknown wrapper options). */
   readonly unsure: readonly string[];
+  /** Commands with words expanded at run time (and what wrappers run from them): their real argv is unknown. */
+  readonly dynamic: readonly (readonly string[])[];
 }
 
 export class ShellParseError extends Error {
@@ -260,6 +262,8 @@ class Tokenizer {
       // Codex `is_literal_word_or_number`: these characters (or a leading `=`)
       // mean the word may expand, so the script is not plain.
       if ('{}*?[]~^#'.includes(ch) || (word.text === '' && !word.quoted && ch === '=')) this.plain = false;
+      // Pathname and brace expansion change the argv at run time.
+      if ('*?[{'.includes(ch)) word.dynamic = true;
       word.text += ch;
       this.#i++;
     }
@@ -426,8 +430,9 @@ function shellScriptArg(argv: readonly string[]): string | undefined {
   return undefined;
 }
 
-function buildCommands(tokens: readonly Token[], plainSoFar: boolean): { commands: string[][]; plain: boolean } {
+function buildCommands(tokens: readonly Token[], plainSoFar: boolean): { commands: string[][]; dynamic: boolean[]; plain: boolean } {
   const commands: string[][] = [];
+  const dynamic: boolean[] = [];
   let plain = plainSoFar;
   let current: Word[] = [];
   let skipRest = false;
@@ -449,7 +454,10 @@ function buildCommands(tokens: readonly Token[], plainSoFar: boolean): { command
         }
         break;
       }
-      if (words.length > 0) commands.push(words.map((w) => w.text));
+      if (words.length > 0) {
+        commands.push(words.map((w) => w.text));
+        dynamic.push(words.some((w) => w.dynamic));
+      }
     }
     current = [];
     skipRest = false;
@@ -477,7 +485,7 @@ function buildCommands(tokens: readonly Token[], plainSoFar: boolean): { command
   }
   if (pendingOp || !sawCommand) plain = false;
   flush();
-  return { commands, plain };
+  return { commands, dynamic, plain };
 }
 
 /** What a wrapper command runs: another argv, a script, or something this splitter cannot tell. */
@@ -544,8 +552,12 @@ function unwrap(argv: readonly string[]): Unwrapped[] {
   if (script !== undefined) return [{ kind: 'script', script }];
   switch (program) {
     case 'command':
-    case 'builtin':
-      return one(rest(argv, skipOptions(argv, 1, [], ['-p', '-v', '-V'])));
+    case 'builtin': {
+      const skipped = skipOptions(argv, 1, [], ['-p', '-v', '-V']);
+      // `command -v` / `-V` only look the name up; nothing runs.
+      if (program === 'command' && typeof skipped === 'number' && argv.slice(1, skipped).some((a) => a !== '--' && /[vV]/.test(a))) return [];
+      return one(rest(argv, skipped));
+    }
     case 'exec':
       return one(rest(argv, skipOptions(argv, 1, ['-a'], ['-c', '-l'])));
     case 'nohup':
@@ -579,7 +591,6 @@ function unwrap(argv: readonly string[]): Unwrapped[] {
       );
     case 'env': {
       let i = 1;
-      const out: Unwrapped[] = [];
       while (i < argv.length) {
         const a = argv[i] ?? '';
         if (a === '--') {
@@ -589,12 +600,17 @@ function unwrap(argv: readonly string[]): Unwrapped[] {
         if (a === '-i' || a === '--ignore-environment' || a === '-0' || a === '--null') i++;
         else if (a === '-u' || a === '--unset' || a === '-C' || a === '--chdir') i += 2;
         else if (a.startsWith('--unset=') || a.startsWith('--chdir=') || /^-[uC]./.test(a)) i++;
-        else if (a === '-S' || a === '--split-string') {
-          out.push({ kind: 'script', script: argv.slice(i + 1).join(' ') });
-          return out;
-        } else if (a.startsWith('--split-string=') || /^-S./.test(a)) {
-          out.push({ kind: 'script', script: [a.replace(/^--split-string=|^-S/, ''), ...argv.slice(i + 1)].join(' ') });
-          return out;
+        else if (a === '-S' || a === '--split-string' || a.startsWith('--split-string=') || /^-S./.test(a)) {
+          // Only the option's value is split; the words after it stay as they are.
+          const separate = a === '-S' || a === '--split-string';
+          const value = separate ? argv[i + 1] : a.replace(/^--split-string=|^-S/, '');
+          // env's own escapes, `${VAR}` and `#` comments are not reproduced.
+          const words = value === undefined || /[\\$#]/.test(value) ? undefined : shlexSplit(value);
+          if (words === undefined) {
+            const unsure: Unwrapped = { kind: 'unsure', reason: `cannot split the env -S value ${JSON.stringify(value ?? '')}` };
+            return value === undefined ? [unsure] : [{ kind: 'script', script: value }, unsure];
+          }
+          return [{ kind: 'argv', argv: ['env', ...words, ...argv.slice(separate ? i + 2 : i + 1)] }];
         } else if (a.startsWith('-')) return [{ kind: 'unsure', reason: `unknown option ${a} of env` }];
         else if (/^[^=]+=/.test(a)) i++;
         else break;
@@ -643,16 +659,18 @@ function unwrap(argv: readonly string[]): Unwrapped[] {
 
 interface SplitState {
   readonly out: string[][];
+  readonly dynamic: string[][];
   readonly unsure: string[];
 }
 
-function addCommand(argv: readonly string[], depth: number, st: SplitState): boolean {
+function addCommand(argv: readonly string[], depth: number, st: SplitState, dynamic: boolean): boolean {
   if (depth > MAX_DEPTH) throw new ShellParseError('commands nested too deeply');
   st.out.push([...argv]);
+  if (dynamic) st.dynamic.push([...argv]);
   let plain = true;
   for (const u of unwrap(argv)) {
     plain = false;
-    if (u.kind === 'argv') addCommand(u.argv, depth + 1, st);
+    if (u.kind === 'argv') addCommand(u.argv, depth + 1, st, dynamic);
     else if (u.kind === 'script') splitInto(u.script, depth + 1, st);
     else st.unsure.push(u.reason);
   }
@@ -665,9 +683,9 @@ function splitInto(script: string, depth: number, st: SplitState): boolean {
   t.run();
   const built = buildCommands(t.tokens, t.plain);
   let plain = built.plain && t.nested.length === 0;
-  for (const argv of built.commands) {
-    if (!addCommand(argv, depth, st)) plain = false;
-  }
+  built.commands.forEach((argv, k) => {
+    if (!addCommand(argv, depth, st, built.dynamic[k] ?? true)) plain = false;
+  });
   for (const nested of t.nested) {
     splitInto(nested, depth + 1, st);
     plain = false;
@@ -681,9 +699,9 @@ function splitInto(script: string, depth: number, st: SplitState): boolean {
  * heredoc).
  */
 export function splitShellCommands(script: string): SplitResult {
-  const st: SplitState = { out: [], unsure: [] };
+  const st: SplitState = { out: [], dynamic: [], unsure: [] };
   const plain = splitInto(script, 0, st);
-  return { commands: st.out, plain, unsure: st.unsure };
+  return { commands: st.out, dynamic: st.dynamic, plain, unsure: st.unsure };
 }
 
 /**
