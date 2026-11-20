@@ -12,6 +12,8 @@ import { ToolError } from '../core/errors.js';
  */
 
 const NOFOLLOW = FS.O_NOFOLLOW ?? 0;
+/** Opening a FIFO or a device for reading must not wait for a writer before the type check. */
+const NONBLOCK = FS.O_NONBLOCK ?? 0;
 const IS_LINUX = process.platform === 'linux';
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -72,18 +74,32 @@ async function assertHandleAt(handle: FileHandle, abs: string): Promise<Stats> {
 export async function readFileInside(abs: string, maxBytes: number): Promise<Buffer | null> {
   let handle: FileHandle;
   try {
-    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW);
+    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW | NONBLOCK);
   } catch {
     return null;
   }
   try {
     const st = await assertHandleAt(handle, abs);
     if (!st.isFile() || st.size > maxBytes) return null;
-    return await handle.readFile();
+    return await readAtMost(handle, maxBytes);
   } catch {
     return null;
   } finally {
     await handle.close();
+  }
+}
+
+/** Reads an open file to its end, or returns null once it holds more than `maxBytes` (it may grow after the size check). */
+async function readAtMost(handle: FileHandle, maxBytes: number): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+    if (bytesRead === 0) return Buffer.concat(chunks, total);
+    total += bytesRead;
+    if (total > maxBytes) return null;
+    chunks.push(chunk.subarray(0, bytesRead));
   }
 }
 
@@ -155,7 +171,7 @@ export interface RegularFile {
 export async function readRegularFile(abs: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<RegularFile | null> {
   let handle: FileHandle;
   try {
-    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW);
+    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW | NONBLOCK);
   } catch (err) {
     const code = errnoCode(err);
     if (code === 'ENOENT') return null;
@@ -167,8 +183,10 @@ export async function readRegularFile(abs: string, maxBytes = Number.MAX_SAFE_IN
     const st = await assertHandleAt(handle, abs);
     if (st.isDirectory()) throw new ToolError('invalid-args', `${abs} is a directory`);
     if (!st.isFile()) throw new ToolError('invalid-args', `${abs} is not a regular file`);
-    if (st.size > maxBytes) throw new ToolError('tool-error', `${abs} is ${st.size} bytes, more than the ${maxBytes}-byte limit`);
-    const bytes = await handle.readFile();
+    const tooBig = (size: number | string): ToolError => new ToolError('tool-error', `${abs} is ${size} bytes, more than the ${maxBytes}-byte limit`);
+    if (st.size > maxBytes) throw tooBig(st.size);
+    const bytes = await readAtMost(handle, maxBytes);
+    if (bytes === null) throw tooBig(`over ${maxBytes}`);
     return { bytes, mode: st.mode & 0o7777 };
   } finally {
     await handle.close();
@@ -181,7 +199,7 @@ export type Expectation = { readonly kind: 'absent' } | { readonly kind: 'hash';
 export interface WriteOutcome {
   /** Bytes that were there before (null when absent). */
   readonly before: RegularFile | null;
-  /** Directories created to hold the file, outermost first. */
+  /** Directories this write created to hold the file (not ones that appeared meanwhile), outermost first. */
   readonly createdDirs: readonly string[];
 }
 
@@ -260,9 +278,11 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
 
   await beforeWrite?.(before, toCreate);
 
+  const createdDirs: string[] = [];
   for (const d of toCreate) {
     try {
       await fs.mkdir(d);
+      createdDirs.push(d);
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
@@ -270,10 +290,9 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
   }
   await assertDirUnchanged(dir);
 
-  const tmp = path.join(dir, `.${path.basename(abs)}.acm-${randomBytes(6).toString('hex')}.tmp`);
+  const tmp = path.join(dir, `.acm-${randomBytes(6).toString('hex')}.tmp`);
   const mode = opts.mode ?? before?.mode ?? 0o666;
   const handle = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | NOFOLLOW, mode);
-  let placed = false;
   try {
     try {
       await handle.writeFile(bytes);
@@ -283,25 +302,24 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
       await handle.close();
     }
     // Last checks before the irreversible step.
-    assertNotAborted(signal, abs);
     await assertDirUnchanged(dir);
     if (identity) await assertIdentity(identity);
     if (!hashMatches(expect, await readRegularFile(abs))) {
       throw new ToolError('stale', `file changed since prepared: ${abs} changed while it was being written`);
     }
+    assertNotAborted(signal, abs);
     if (expect.kind === 'absent') {
       try {
         await fs.link(tmp, abs);
-        placed = true;
       } catch (err) {
         const code = errnoCode(err);
         if (code === 'EEXIST') throw new ToolError('stale', `file changed since prepared: ${abs} was created meanwhile`);
-        // File systems without hard links: fall back to rename.
-        if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'EXDEV') throw err;
+        throw err;
       }
+    } else {
+      await fs.rename(tmp, abs);
     }
-    if (!placed) await fs.rename(tmp, abs);
-    return { before, createdDirs: toCreate };
+    return { before, createdDirs };
   } finally {
     // After `link` the temp name is still there; after `rename` it is gone.
     await fs.rm(tmp, { force: true }).catch(() => undefined);

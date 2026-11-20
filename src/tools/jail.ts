@@ -195,6 +195,11 @@ async function withRealPrefixes(patterns: readonly string[]): Promise<string[]> 
     const fwd = pattern.replace(/\\/g, '/');
     const wild = fwd.search(/[*?[]/);
     const literal = wild === -1 ? fwd : fwd.slice(0, wild);
+    if (wild === -1) {
+      // A literal path that is a link protects what it names, too.
+      const real = await fs.realpath(fwd).then((r) => r.replace(/\\/g, '/'), () => null);
+      if (real !== null && real !== fwd) out.add(real);
+    }
     const cut = literal.lastIndexOf('/');
     if (cut <= 0) continue;
     // Resolve the deepest existing directory of the literal prefix.
@@ -292,37 +297,51 @@ export class Jail {
   async resolveForWrite(input: string): Promise<string> {
     const r = await this.#resolve(input);
     for (const p of [r.real, ...r.links]) this.assertWritable(p);
+    // The directories the write will create are names it affects too.
+    for (let dir = path.dirname(r.real); this.rootOf(dir) !== undefined && !(await lstatOrNull(dir)); dir = path.dirname(dir)) {
+      this.assertWritable(dir);
+    }
     if (r.finalIsLink) {
       throw new ToolError('invalid-args', `${input} is a symbolic link; write to its target (${r.real}) instead`);
     }
     return r.real;
   }
 
+  /**
+   * Like `resolve`, for the path grep and glob search: refuses a path whose
+   * last component is a symbolic link, since search never follows links.
+   */
+  async resolveSearchRoot(input: string): Promise<string> {
+    const r = await this.#resolve(input);
+    if (r.finalIsLink) throw new ToolError('invalid-args', `${input} is a symbolic link; search its target (${r.real}) instead`);
+    return r.real;
+  }
+
   async #resolve(input: string): Promise<Resolution> {
     if (input.includes('\0')) throw new ToolError('invalid-args', 'path must not contain NUL characters');
-    const trimmed = input.trim();
-    if (trimmed === '') throw new ToolError('invalid-args', 'path must not be empty');
+    // Not trimmed: spaces are part of a file name.
+    if (input.trim() === '') throw new ToolError('invalid-args', 'path must not be empty');
     if (this.#windowsChecks) {
-      const problem = windowsPathProblem(trimmed);
-      if (problem) throw new ToolError('outside-workspace', `${trimmed}: ${problem}`);
+      const problem = windowsPathProblem(input);
+      if (problem) throw new ToolError('outside-workspace', `${input}: ${problem}`);
     }
-    const expanded = expandTilde(trimmed);
+    const expanded = expandTilde(input);
     let r: Resolution;
     try {
       r = await resolvePhysical(expanded, this.cwd);
     } catch (err) {
       if (err instanceof ToolError) throw err;
       const code = errnoCode(err);
-      if (code === 'ENAMETOOLONG') throw new ToolError('invalid-args', `path is too long: ${trimmed.slice(0, 120)}…`);
-      if (code === 'ELOOP') throw new ToolError('outside-workspace', `${trimmed}: too many symbolic links`);
-      throw new ToolError('tool-error', `cannot resolve ${trimmed}: ${code ?? String(err)}`);
+      if (code === 'ENAMETOOLONG') throw new ToolError('invalid-args', `path is too long: ${input.slice(0, 120)}…`);
+      if (code === 'ELOOP') throw new ToolError('outside-workspace', `${input}: too many symbolic links`);
+      throw new ToolError('tool-error', `cannot resolve ${input}: ${code ?? String(err)}`);
     }
     if (this.rootOf(r.real) === undefined) {
-      throw new ToolError('outside-workspace', `${trimmed} resolves to ${r.real}, outside the workspace (${this.roots.join(', ')})`);
+      throw new ToolError('outside-workspace', `${input} resolves to ${r.real}, outside the workspace (${this.roots.join(', ')})`);
     }
     if (this.#windowsChecks) {
       const problem = windowsPathProblem(r.real);
-      if (problem) throw new ToolError('outside-workspace', `${trimmed}: ${problem}`);
+      if (problem) throw new ToolError('outside-workspace', `${input}: ${problem}`);
     }
     return r;
   }

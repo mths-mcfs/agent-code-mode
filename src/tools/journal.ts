@@ -23,11 +23,11 @@ import {
   removeEmptyDirInside,
   removeRegularFile,
   sha256,
-  syncDir,
   syncDirStrict,
   writeDurable,
 } from './fs-ops.js';
-import { isInsideDir, isInsideGitDir } from './jail.js';
+import { findMatchingPattern } from '../core/paths.js';
+import { expandTilde, isInsideDir, isInsideGitDir } from './jail.js';
 
 /** Above this many bytes of originals a transaction refuses further writes. */
 export const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
@@ -52,6 +52,8 @@ const EntrySchema = z.object({
   blob: z.string().regex(/^[0-9]+\.bin$/).nullable(),
   /** Hashes this transaction wrote (or was about to write) to the file, oldest first. */
   written: z.array(z.string()),
+  /** Wall-clock time (ms) of the latest write to the file; recovery undoes writes newest first across journals. */
+  at: z.number().optional(),
 });
 
 const ManifestSchema = z.object({
@@ -89,6 +91,26 @@ const defaultIo: JournalIo = {
 /** Ids of transactions this process still has open; a recovery pass leaves them alone. */
 const openTransactions = new Set<string>();
 
+const TXID = /^[0-9a-z]+-\d+-[0-9a-f]+$/;
+
+function writeTime(): number {
+  return performance.timeOrigin + performance.now();
+}
+
+/**
+ * Throws unless `dir` is a real directory (not a link) that only this user
+ * can write: journals are restored from and deleted in it.
+ */
+async function assertPrivateDir(dir: string): Promise<void> {
+  const st = await fs.lstat(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new ToolError('tool-error', `journal directory ${dir} is not a real directory`);
+  if (process.platform === 'win32') return;
+  const uid = process.getuid?.();
+  if ((uid !== undefined && st.uid !== uid) || (st.mode & 0o022) !== 0) {
+    throw new ToolError('tool-error', `journal directory ${dir} is not private to this user (owner ${st.uid}, mode ${(st.mode & 0o777).toString(8)})`);
+  }
+}
+
 interface LiveEntry {
   readonly entry: Entry;
   /** Original bytes, kept in memory for the in-process rollback. */
@@ -96,6 +118,9 @@ interface LiveEntry {
   /** Hash of what this transaction last wrote, or null after a failed write. */
   last: string | null;
 }
+
+/** How finalization ended, once it did. */
+type Finalized = { readonly durable: true } | { readonly durable: false; readonly error: TransactionFinalizeError };
 
 /**
  * A per-run journal. The first write to a file snapshots its original bytes
@@ -109,9 +134,12 @@ export class FileTransaction implements Transaction {
   readonly #startedAt = Date.now();
   readonly #entries = new Map<string, LiveEntry>();
   readonly #dirs: string[] = [];
+  /** Directories this transaction's writes really created; only those are removed by the in-process rollback. */
+  readonly #ownDirs = new Set<string>();
   #bytes = 0;
   #created = false;
   #closed = false;
+  #finalized: Finalized | undefined;
   #queue: Promise<unknown> = Promise.resolve();
   readonly #io: JournalIo;
 
@@ -145,16 +173,21 @@ export class FileTransaction implements Transaction {
     };
   }
 
+  /** Writes the manifest; once it resolves, the record survives a crash (where directories can be flushed). */
   async #persist(): Promise<void> {
     if (!this.#created) {
-      await fs.mkdir(path.dirname(this.dir), { recursive: true, mode: 0o700 });
+      const root = path.dirname(this.dir);
+      await fs.mkdir(root, { recursive: true, mode: 0o700 });
+      await assertPrivateDir(root);
+      await this.#io.syncDir(path.dirname(root));
       await fs.mkdir(this.dir, { mode: 0o700 });
       this.#created = true;
+      await this.#io.syncDir(root);
     }
     const next = path.join(this.dir, `${MANIFEST}.next`);
     await writeDurable(next, JSON.stringify(this.#manifest()));
     await fs.rename(next, path.join(this.dir, MANIFEST));
-    await syncDir(this.dir);
+    await this.#io.syncDir(this.dir);
   }
 
   /**
@@ -174,7 +207,15 @@ export class FileTransaction implements Transaction {
       if (!this.#roots.includes(root)) this.#roots.push(root);
       const existing = this.#entries.get(absPath);
       if (existing) {
+        // Another writer changed the file since this transaction last wrote it: restoring the
+        // original later would discard that change, so the write is refused.
+        const current = before ? sha256(before.bytes) : null;
+        const ours = existing.last ?? (existing.entry.existed ? existing.entry.original : null);
+        if (current !== ours) {
+          throw new ToolError('stale', `${absPath} was changed by another writer since this transaction last wrote it`);
+        }
         existing.entry.written.push(nextHash);
+        existing.entry.at = writeTime();
         await this.#persist();
         return;
       }
@@ -201,6 +242,7 @@ export class FileTransaction implements Transaction {
           mode: before?.mode ?? null,
           blob,
           written: [nextHash],
+          at: writeTime(),
         },
         bytes: before?.bytes ?? null,
         last: null,
@@ -209,10 +251,11 @@ export class FileTransaction implements Transaction {
     });
   }
 
-  /** Called after a successful write. */
-  written(absPath: string, hash: string): void {
+  /** Called after a successful write, with the directories it created. */
+  written(absPath: string, hash: string, createdDirs: readonly string[] = []): void {
     const live = this.#entries.get(absPath);
     if (live) live.last = hash;
+    for (const d of createdDirs) this.#ownDirs.add(d);
   }
 
   rollback(): Promise<RollbackReport> {
@@ -239,8 +282,13 @@ export class FileTransaction implements Transaction {
           skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
         }
       }
-      await removeCreatedDirs(this.#dirs, this.#roots);
-      await this.#removeRecord();
+      await removeCreatedDirs(
+        this.#dirs.filter((d) => this.#ownDirs.has(d)),
+        this.#roots,
+      );
+      // A file whose restore failed keeps the record, so a recovery pass can still restore it.
+      if (skipped.some((s) => s.reason === 'error')) await this.#flushRecord();
+      else await this.#removeRecord();
       return { restored, skipped };
     });
   }
@@ -251,13 +299,19 @@ export class FileTransaction implements Transaction {
    * durable. The recursive delete of the renamed directory runs afterwards
    * and is not awaited. Rejects with `TransactionFinalizeError`: not
    * committed when the rename failed (the journal stays open for a
-   * rollback), committed when only the fsync failed.
+   * rollback), committed when only the fsync failed. Called again, it
+   * settles the same way.
    */
   dispose(): Promise<void> {
     return this.#serial(async () => {
+      if (this.#finalized) {
+        if (this.#finalized.durable) return;
+        throw this.#finalized.error;
+      }
       if (this.#closed) return;
       if (!this.#created) {
         this.#closed = true;
+        this.#finalized = { durable: true };
         openTransactions.delete(this.id);
         return;
       }
@@ -273,14 +327,24 @@ export class FileTransaction implements Transaction {
       try {
         await this.#io.syncDir(path.dirname(this.dir));
       } catch (err) {
-        throw new TransactionFinalizeError(
+        // The committed record stays: recovery deletes it without undoing anything.
+        const error = new TransactionFinalizeError(
           true,
           `the transaction journal was finalized, but flushing it to disk failed (${errorMessage(err)}); the changes are on disk, but their durability is not guaranteed`,
         );
-      } finally {
-        void this.#io.removeDir(committed).catch(() => undefined);
+        this.#finalized = { durable: false, error };
+        throw error;
       }
+      this.#finalized = { durable: true };
+      void this.#io.removeDir(committed).catch(() => undefined);
     });
+  }
+
+  /** Keeps the record on disk for a recovery pass and stops tracking it here. */
+  async #flushRecord(): Promise<void> {
+    if (!this.#created) return;
+    await this.#persist().catch(() => undefined);
+    this.#created = false;
   }
 
   async #removeRecord(): Promise<void> {
@@ -360,39 +424,46 @@ async function readOriginal(dir: string, entry: Entry): Promise<Buffer | null> {
   return fs.readFile(path.join(dir, entry.blob));
 }
 
-async function undoRecord(manifest: Manifest, dir: string, roots: readonly string[]): Promise<RollbackReport> {
-  const restored: string[] = [];
-  const skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[] = [];
-  for (const entry of [...manifest.entries].reverse()) {
-    try {
-      // The record is data on disk: each path is checked like a tool argument.
-      if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
-        skipped.push({ path: entry.path, reason: 'error', detail: 'outside the workspace roots; not touched' });
-        continue;
-      }
-      if (!manifest.roots.some((root) => isInsideDir(root, entry.path))) {
-        skipped.push({ path: entry.path, reason: 'error', detail: 'outside the roots the journal was written for; not touched' });
-        continue;
-      }
-      const current = await currentContent(entry.path);
-      const currentHash = current ? sha256(current.bytes) : null;
-      const originalHash = entry.existed ? entry.original : null;
-      if (currentHash === originalHash) continue;
-      if (currentHash === null || !entry.written.includes(currentHash)) {
-        skipped.push({ path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what the crashed run wrote' });
-        continue;
-      }
-      const bytes = await readOriginal(dir, entry);
-      await restoreEntry(entry, bytes, currentHash);
-      restored.push(entry.path);
-    } catch (err) {
-      skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
+/** A claimed stale journal and what undoing it has done so far. */
+interface Claimed {
+  readonly id: string;
+  readonly dir: string;
+  readonly manifest: Manifest;
+  readonly restored: string[];
+  readonly skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[];
+}
+
+async function undoEntry(record: Claimed, entry: Entry, roots: readonly string[], protectedPaths: readonly string[]): Promise<void> {
+  const { manifest, dir, restored, skipped } = record;
+  try {
+    // The record is data on disk: each path is checked like a tool argument.
+    if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
+      skipped.push({ path: entry.path, reason: 'error', detail: 'outside the workspace roots; not touched' });
+      return;
     }
+    if (!manifest.roots.some((root) => isInsideDir(root, entry.path))) {
+      skipped.push({ path: entry.path, reason: 'error', detail: 'outside the roots the journal was written for; not touched' });
+      return;
+    }
+    const hit = findMatchingPattern(entry.path, protectedPaths);
+    if (hit !== undefined) {
+      skipped.push({ path: entry.path, reason: 'error', detail: `a protected host policy path (${hit}); not touched` });
+      return;
+    }
+    const current = await currentContent(entry.path);
+    const currentHash = current ? sha256(current.bytes) : null;
+    const originalHash = entry.existed ? entry.original : null;
+    if (currentHash === originalHash) return;
+    if (currentHash === null || !entry.written.includes(currentHash)) {
+      skipped.push({ path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what the crashed run wrote' });
+      return;
+    }
+    const bytes = await readOriginal(dir, entry);
+    await restoreEntry(entry, bytes, currentHash);
+    restored.push(entry.path);
+  } catch (err) {
+    skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
   }
-  // Only directories inside both the given roots and the roots the journal was written for.
-  const dirs = manifest.dirs.filter((d) => manifest.roots.some((root) => isInsideDir(root, d)));
-  await removeCreatedDirs(dirs, roots);
-  return { restored, skipped };
 }
 
 function isCommitted(name: string): boolean {
@@ -401,32 +472,46 @@ function isCommitted(name: string): boolean {
 
 /**
  * Restores every journal left by a server process that is gone and that
- * touched one of `roots` (newest first, so two cut-off runs that changed the
- * same file unwind in order). Files are restored only when they still hold
- * what that run wrote; anything else is reported in `skipped`. Never throws.
+ * touched one of `roots`. Writes are undone newest first across journals, so
+ * two cut-off runs that changed the same file unwind in order. Files are
+ * restored only when they still hold what that run wrote and are not
+ * protected by `protectedPaths` (host policy patterns, `~` expanded);
+ * anything else is reported in `skipped`. A journal with a file that could not
+ * be handled is kept for a later pass. Nothing is read or deleted unless the
+ * journal directory is private to this user. Never throws.
  */
-export async function recoverStaleJournals(stateDir: string, roots: readonly string[]): Promise<RecoveredJournal[]> {
+export async function recoverStaleJournals(
+  stateDir: string,
+  roots: readonly string[],
+  protectedPaths: readonly string[],
+): Promise<RecoveredJournal[]> {
   const base = journalRoot(stateDir);
   let names: string[];
   try {
+    await assertPrivateDir(base);
     names = await fs.readdir(base);
   } catch {
     return [];
   }
   const realRoots = await Promise.all(roots.filter((r) => path.isAbsolute(r)).map(realOrSelf));
+  const patterns = protectedPaths.map((p) => expandTilde(p));
   // A finalized run is never undone, whatever its directory still holds; it is only deleted.
   for (const name of names.filter(isCommitted)) {
-    await fs.rm(path.join(base, name), { recursive: true, force: true }).catch(() => undefined);
+    if (!TXID.test(name.slice(0, -COMMITTED.length))) continue;
+    const dir = path.join(base, name);
+    const st = await fs.lstat(dir).catch(() => null);
+    if (st?.isDirectory()) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
   // The id pattern below also rejects `<txid>.committed`, so a finalized run is never read as pending.
   const records = names
     .map((name) => ({ name, id: name.includes(RECOVERING) ? name.slice(0, name.indexOf(RECOVERING)) : name }))
-    .filter((r) => /^[0-9a-z]+-\d+-[0-9a-f]+$/.test(r.id))
-    .sort((a, b) => parseInt(b.id.split('-')[0] ?? '0', 36) - parseInt(a.id.split('-')[0] ?? '0', 36));
-  const out: RecoveredJournal[] = [];
+    .filter((r) => TXID.test(r.id));
+  const claimed: Claimed[] = [];
   for (const record of records) {
     const dir = path.join(base, record.name);
     try {
+      const st = await fs.lstat(dir);
+      if (st.isSymbolicLink() || !st.isDirectory()) continue;
       const raw: unknown = JSON.parse(await fs.readFile(path.join(dir, MANIFEST), 'utf8'));
       const parsed = ManifestSchema.safeParse(raw);
       if (!parsed.success) continue;
@@ -439,17 +524,30 @@ export async function recoverStaleJournals(stateDir: string, roots: readonly str
       } else if (!ownerGone(manifest, openTransactions, record.id)) {
         continue;
       }
-      const claimed = path.join(base, `${record.id}${RECOVERING}${process.pid}`);
-      if (claimed !== dir) {
+      const target = path.join(base, `${record.id}${RECOVERING}${process.pid}`);
+      if (target !== dir) {
         try {
-          await fs.rename(dir, claimed);
+          await fs.rename(dir, target);
         } catch {
           continue;
         }
       }
-      const report = await undoRecord(manifest, claimed, realRoots);
-      await fs.rm(claimed, { recursive: true, force: true });
-      out.push({ id: record.id, report });
+      claimed.push({ id: record.id, dir: target, manifest, restored: [], skipped: [] });
+    } catch {
+      // One bad record must not stop the others.
+    }
+  }
+  const writes = claimed
+    .flatMap((record) => record.manifest.entries.map((entry) => ({ record, entry })))
+    .sort((a, b) => (b.entry.at ?? b.record.manifest.startedAt) - (a.entry.at ?? a.record.manifest.startedAt));
+  for (const { record, entry } of writes) await undoEntry(record, entry, realRoots, patterns);
+  const out: RecoveredJournal[] = [];
+  for (const record of claimed) {
+    try {
+      // The journal contains planned directory names and cannot establish ownership after a crash.
+      // A file that could not be handled keeps the record for a later pass.
+      if (!record.skipped.some((s) => s.reason === 'error')) await fs.rm(record.dir, { recursive: true, force: true });
+      out.push({ id: record.id, report: { restored: record.restored, skipped: record.skipped } });
     } catch {
       // One bad record must not stop the others.
     }

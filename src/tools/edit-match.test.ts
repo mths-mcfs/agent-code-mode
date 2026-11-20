@@ -111,3 +111,23 @@ describe('edit matching (ported from Turnpack)', () => {
     expect(nowhere.message).toMatch(/nothing close to it is in the file \(7 lines\)/);
   });
 });
+
+describe('edit matching guards', () => {
+  it('treats overlapping occurrences as two places', () => {
+    expect(miss(apply('aaa', 'aa', 'b')).kind).toBe('ambiguous');
+    expect(miss(apply('x\nx\nx\n', 'x\nx', 'y')).kind).toBe('ambiguous');
+    expect(miss(apply('x\nx\nx\n', '  x\n  x', 'y')).kind).toBe('ambiguous');
+  });
+
+  it('refuses an indentation match where one indent of the search stands for two in the file', () => {
+    const out = miss(apply('\tif (a) {\n\t\tb();\n', 'if (a) {\nb();', 'if (a) {\nc();'));
+    expect(out.kind).toBe('ambiguous');
+    expect(out.message).toMatch(/indentation/);
+  });
+
+  it('refuses an edit whose result would exceed the size limit', () => {
+    expect(miss(applySearchReplace('a b a', 'a', 'x'.repeat(100), true, 50)).kind).toBe('too-large');
+    expect(miss(applySearchReplace('  a\n  b\n', 'a\nb', 'x'.repeat(100), false, 50)).kind).toBe('too-large');
+    expect(ok(applySearchReplace('a b a', 'a', 'xy', true, 50)).text).toBe('xy b xy');
+  });
+});

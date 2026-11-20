@@ -101,12 +101,12 @@ describe.skipIf(IS_WINDOWS)('2. crash recovery never deletes through a link', ()
     mkdirSync(path.join(outside, 'empty'));
     symlinkSync(outside, path.join(ws, 'sub'), 'dir');
     const dir = path.join(journalRoot(path.join(base, 'state')), 'abc-99999999-dead');
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(
       path.join(dir, 'manifest.json'),
       JSON.stringify({ version: 1, pid: 99_999_999, host: os.hostname(), startedAt: 0, roots: [ws], dirs: [path.join(ws, 'sub', 'empty')], entries: [] }),
     );
-    await recoverStaleJournals(path.join(base, 'state'), [ws]);
+    await recoverStaleJournals(path.join(base, 'state'), [ws], []);
     expect(existsSync(path.join(outside, 'empty'))).toBe(true);
   });
 });

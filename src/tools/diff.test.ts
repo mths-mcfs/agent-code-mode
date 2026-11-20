@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { unifiedDiff } from './diff.js';
+import { quotePath, unifiedDiff } from './diff.js';
 
 const hasGit = spawnSync('git', ['--version']).status === 0;
 
@@ -58,5 +58,19 @@ describe('unifiedDiff', () => {
       const diff = unifiedDiff('f.txt', before, after);
       expect(gitApply(before, diff)).toBe(after);
     }
+  });
+});
+
+describe('diff headers', () => {
+  it('quotes a path that a quote, a backslash or a control character would change', () => {
+    expect(unifiedDiff('plain name.txt', 'a\n', 'b\n')).toContain('--- a/plain name.txt\n+++ b/plain name.txt\n');
+    expect(unifiedDiff('x\n+++ b/y', 'a\n', 'b\n')).toContain('--- "a/x\\n+++ b/y"\n+++ "b/x\\n+++ b/y"\n');
+    expect(quotePath('a/q"b\\c\td')).toBe('"a/q\\"b\\\\c\\td"');
+  });
+
+  it.skipIf(!hasGit)('describes the creation of an empty file in a patch git applies', () => {
+    const diff = unifiedDiff('f.txt', null, '');
+    expect(diff).toContain('new file mode');
+    expect(gitApply(null, diff)).toBe('');
   });
 });

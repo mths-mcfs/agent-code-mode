@@ -92,7 +92,7 @@ export interface BashRunOptions {
   readonly denyWrite?: readonly string[];
 }
 
-function spawnAndWait(
+export function spawnAndWait(
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
@@ -150,6 +150,8 @@ function spawnAndWait(
     };
     const onAbort = (): void => killGroup(child);
     const timer = setTimeout(() => {
+      // The shell already exited: only its output was still draining.
+      if (exit) return finish();
       timedOut = true;
       killGroup(child);
     }, timeoutMs);
@@ -171,6 +173,20 @@ function spawnAndWait(
   });
 }
 
+/**
+ * The environment of the sandbox bootstrap: the wrapper runs `<shell> -c`
+ * before the sandbox applies, so nothing may make that shell run code of its
+ * own first (startup files, exported functions, shell options).
+ */
+export function bootstrapEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key === 'BASH_ENV' || key === 'ENV' || key === 'SHELLOPTS' || key === 'BASHOPTS' || key.startsWith('BASH_FUNC_')) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /** Runs a prepared `bash` effect. */
 export async function runBash(effect: BashEffect, signal: AbortSignal, opts: BashRunOptions = {}): Promise<BashResult> {
   if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
@@ -183,8 +199,8 @@ export async function runBash(effect: BashEffect, signal: AbortSignal, opts: Bas
   if (containment.mode === 'none') {
     return spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap);
   }
-  return withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], (wrapped) => {
+  return withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], signal, (wrapped) => {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-    return spawnAndWait(wrapped.argv, { ...process.env, ...wrapped.env }, effect.cwd, effect.timeoutMs, signal, cap);
+    return spawnAndWait(wrapped.argv, bootstrapEnv({ ...process.env, ...wrapped.env }), effect.cwd, effect.timeoutMs, signal, cap);
   });
 }

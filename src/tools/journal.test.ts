@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,7 @@ import { ToolError, TransactionFinalizeError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
 import { COMMITTED, FileTransaction, type JournalIo, journalRoot, recoverStaleJournals } from './journal.js';
-import { syncDirStrict } from './fs-ops.js';
+import { atomicWrite, sha256, syncDirStrict } from './fs-ops.js';
 import { NodeToolRuntime } from './runtime.js';
 
 let base: string;
@@ -26,6 +26,8 @@ async function write(rel: string, content: string, tx: Transaction): Promise<voi
 }
 
 const read = (rel: string): string => readFileSync(path.join(ws, rel), 'utf8');
+
+const IS_WINDOWS = process.platform === 'win32';
 
 /** A pid that belonged to a process that has exited. */
 function deadPid(): number {
@@ -108,6 +110,36 @@ describe('transactions', () => {
     expect(readFileSync(path.join(ws, 'big1.txt')).equals(big)).toBe(true);
   });
 
+  it('refuses to write again a file another writer changed since this transaction wrote it', async () => {
+    const mine = rt.beginTransaction();
+    const other = rt.beginTransaction();
+    await write('a.txt', 'mine\n', mine);
+    await write('a.txt', 'other\n', other);
+    await other.dispose();
+    await expect(write('a.txt', 'mine again\n', mine)).rejects.toMatchObject({ code: 'stale' });
+    await mine.rollback();
+    expect(read('a.txt')).toBe('other\n');
+  });
+
+  it('rolls back only directories its own writes created', async () => {
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    const dir = path.join(ws, 'shared');
+    const abs = path.join(dir, 'x.txt');
+    const bytes = Buffer.from('x\n');
+    const outcome = await atomicWrite(abs, bytes, { kind: 'absent' }, {
+      beforeWrite: async (before, dirs) => {
+        await tx.record(abs, ws, before, sha256(bytes), dirs);
+        // Another writer creates the directory between the checks and the write.
+        mkdirSync(dir);
+      },
+    });
+    tx.written(abs, sha256(bytes), outcome.createdDirs);
+    await tx.rollback();
+    expect(existsSync(abs)).toBe(false);
+    expect(existsSync(dir)).toBe(true);
+  });
+
   it('refuses a transaction it did not start', async () => {
     const foreign: Transaction = { rollback: async () => ({ restored: [], skipped: [] }), dispose: async () => undefined };
     await expect(write('a.txt', 'a1\n', foreign)).rejects.toThrow(/not started by this tool runtime/);
@@ -130,6 +162,29 @@ describe('crash recovery', () => {
     return moved;
   }
 
+  it('recovers a journal without write timestamps and preserves directories with unknown ownership', async () => {
+    const pid = deadPid();
+    const dir = path.join(journalRoot(stateDir), `old-${pid}-abcd`);
+    const shared = path.join(ws, 'shared');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(shared);
+    writeFileSync(path.join(ws, 'a.txt'), 'a1\n');
+    writeFileSync(path.join(dir, '0.bin'), 'a0\n');
+    writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
+      version: 1, pid, host: os.hostname(), startedAt: 0, roots: [ws], dirs: [shared],
+      entries: [{
+        path: path.join(ws, 'a.txt'), existed: true, original: sha256('a0\n'),
+        mode: 0o644, blob: '0.bin', written: [sha256('a1\n')],
+      }],
+    }));
+
+    const recovered = await recoverStaleJournals(stateDir, [ws], []);
+
+    expect(recovered[0]?.report.restored).toEqual([path.join(ws, 'a.txt')]);
+    expect(read('a.txt')).toBe('a0\n');
+    expect(existsSync(shared)).toBe(true);
+  });
+
   it('restores a journal whose process is gone, and leaves a live one alone', async () => {
     const crashed = rt.beginTransaction();
     if (!(crashed instanceof FileTransaction)) throw new Error('unreachable');
@@ -143,7 +198,7 @@ describe('crash recovery', () => {
     writeFileSync(path.join(ws, 'live.txt'), 'l0\n');
     await write('live.txt', 'l1\n', live);
 
-    const recovered = await recoverStaleJournals(stateDir, [ws]);
+    const recovered = await recoverStaleJournals(stateDir, [ws], []);
     expect(recovered).toHaveLength(1);
     const report = recovered[0]?.report;
     expect([...(report?.restored ?? [])].sort()).toEqual([path.join(ws, 'a.txt'), path.join(ws, 'new.txt')]);
@@ -162,7 +217,7 @@ describe('crash recovery', () => {
     await write('a.txt', 'a1\n', tx);
     const moved = abandon(tx);
     // Another workspace: nothing happens.
-    expect(await recoverStaleJournals(stateDir, [outside])).toEqual([]);
+    expect(await recoverStaleJournals(stateDir, [outside], [])).toEqual([]);
     expect(read('a.txt')).toBe('a1\n');
 
     // A tampered record pointing outside the roots is not followed.
@@ -172,16 +227,62 @@ describe('crash recovery', () => {
     const first = manifest.entries[0];
     if (first) first.path = path.join(outside, 'victim.txt');
     writeFileSync(manifestPath, JSON.stringify(manifest));
-    const recovered = await recoverStaleJournals(stateDir, [ws]);
+    const recovered = await recoverStaleJournals(stateDir, [ws], []);
     expect(recovered[0]?.report.restored).toEqual([]);
     expect(recovered[0]?.report.skipped[0]?.reason).toBe('error');
     expect(readFileSync(path.join(outside, 'victim.txt'), 'utf8')).toBe('victim\n');
+    // A record with a file it could not handle is kept for a later pass.
+    expect(readdirSync(journalRoot(stateDir))).toHaveLength(1);
+  });
+
+  it('undoes writes newest first across journals, whatever order the runs started in', async () => {
+    const first = rt.beginTransaction();
+    const second = rt.beginTransaction();
+    if (!(first instanceof FileTransaction) || !(second instanceof FileTransaction)) throw new Error('unreachable');
+    await write('a.txt', 'second\n', second);
+    await new Promise((r) => setTimeout(r, 5));
+    await write('a.txt', 'first\n', first);
+    abandon(first);
+    abandon(second);
+    await recoverStaleJournals(stateDir, [ws], []);
+    expect(read('a.txt')).toBe('a0\n');
+  });
+
+  it('never restores a protected path', async () => {
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    await write('a.txt', 'a1\n', tx);
+    abandon(tx);
+    const recovered = await recoverStaleJournals(stateDir, [ws], [path.join(ws, 'a.txt')]);
+    expect(recovered[0]?.report.skipped).toEqual([{ path: path.join(ws, 'a.txt'), reason: 'error', detail: expect.stringContaining('protected') }]);
+    expect(read('a.txt')).toBe('a1\n');
+  });
+
+  it.skipIf(IS_WINDOWS)('reads and deletes nothing in a journal directory other users can write', async () => {
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    await write('a.txt', 'a1\n', tx);
+    abandon(tx);
+    mkdirSync(path.join(journalRoot(stateDir), `zz-1-abcd${COMMITTED}`));
+    chmodSync(journalRoot(stateDir), 0o777);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([]);
+    expect(read('a.txt')).toBe('a1\n');
+    expect(readdirSync(journalRoot(stateDir))).toHaveLength(2);
+  });
+
+  it('deletes only finalized transaction directories', async () => {
+    const root = journalRoot(stateDir);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    mkdirSync(path.join(root, `notes${COMMITTED}`));
+    mkdirSync(path.join(root, `zz-1-abcd${COMMITTED}`));
+    await recoverStaleJournals(stateDir, [ws], []);
+    expect(readdirSync(root)).toEqual([`notes${COMMITTED}`]);
   });
 
   it('skips a malformed record', async () => {
     mkdirSync(path.join(journalRoot(stateDir), 'zz-1-abcd'), { recursive: true });
     writeFileSync(path.join(journalRoot(stateDir), 'zz-1-abcd', 'manifest.json'), '{"version":1,"entries":"nope"}');
-    expect(await recoverStaleJournals(stateDir, [ws])).toEqual([]);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([]);
   });
 });
 
@@ -198,7 +299,7 @@ describe('finalization', () => {
     expect(existsSync(tx.dir)).toBe(false);
     expect(existsSync(path.join(`${tx.dir}${COMMITTED}`, 'manifest.json'))).toBe(true);
 
-    expect(await recoverStaleJournals(stateDir, [ws])).toEqual([]);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([]);
     expect(read('a.txt')).toBe('a1\n');
     expect(read('new.txt')).toBe('n1\n');
     // Recovery deletes what a finalized run left behind.
@@ -206,14 +307,16 @@ describe('finalization', () => {
   });
 
   it('reports a committed but not flushed journal and never rolls it back', async () => {
+    let failing = false;
     const io: JournalIo = {
       syncDir: async () => {
-        throw new Error('EIO: flush failed');
+        if (failing) throw new Error('EIO: flush failed');
       },
       removeDir: held,
     };
     const tx = new FileTransaction(stateDir, io);
     await write('a.txt', 'a1\n', tx);
+    failing = true;
     const err = await tx.dispose().then(
       () => undefined,
       (e: unknown) => e,
@@ -221,10 +324,23 @@ describe('finalization', () => {
     expect(err).toBeInstanceOf(TransactionFinalizeError);
     expect(err).toMatchObject({ committed: true });
     expect(String(err)).toMatch(/durability is not guaranteed/);
+    // Asked again, finalization settles the same way.
+    await expect(tx.dispose()).rejects.toBe(err);
     expect(existsSync(path.join(`${tx.dir}${COMMITTED}`, 'manifest.json'))).toBe(true);
     expect(await tx.rollback()).toEqual({ restored: [], skipped: [] });
-    expect(await recoverStaleJournals(stateDir, [ws])).toEqual([]);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([]);
     expect(read('a.txt')).toBe('a1\n');
+  });
+
+  it('refuses the write when its journal record cannot be flushed', async () => {
+    const tx = new FileTransaction(stateDir, {
+      syncDir: async () => {
+        throw new Error('EIO: flush failed');
+      },
+      removeDir: held,
+    });
+    await expect(write('a.txt', 'a1\n', tx)).rejects.toThrow(/EIO/);
+    expect(read('a.txt')).toBe('a0\n');
   });
 
   it('keeps the journal open for a rollback when the commit rename fails', async () => {

@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
 import { DEFAULT_CASE_INSENSITIVE, matchesPathPattern } from '../core/paths.js';
-import { readFileInside } from './fs-ops.js';
+import { isBinary, readFileInside } from './fs-ops.js';
 import type { GlobEffect, GlobResult, GrepEffect, GrepMatch, GrepResult } from '../core/types.js';
 
 /** Default `grep` result count. */
@@ -111,9 +111,12 @@ interface IgnoreLayer {
 
 function isIgnored(layers: readonly IgnoreLayer[], abs: string, isDir: boolean): boolean {
   let ignored = false;
+  // Directory rules decide about a file's parents apart from the rules about the file itself,
+  // so `!dir/` re-includes the directory without clearing what `*.log` says about its files.
+  let parentIgnored = false;
   for (const layer of layers) {
     const rel = path.relative(layer.base, abs).split(path.sep).join('/');
-    if (rel === '' || rel.startsWith('..')) continue;
+    if (rel === '' || rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) continue;
     for (const rule of layer.rules) {
       if (rule.dirOnly && !isDir) {
         // `dir/` also ignores what is below it: test the parents.
@@ -123,18 +126,19 @@ function isIgnored(layers: readonly IgnoreLayer[], abs: string, isDir: boolean):
         for (let i = parts.length; i > 0 && !matchedParent; i--) {
           if (rule.re.test(parts.slice(0, i).join('/'))) matchedParent = true;
         }
-        if (matchedParent) ignored = !rule.negate;
+        if (matchedParent) parentIgnored = !rule.negate;
         continue;
       }
       if (rule.re.test(rel)) ignored = !rule.negate;
     }
   }
-  return ignored;
+  return ignored || parentIgnored;
 }
 
 async function loadIgnore(dir: string): Promise<IgnoreLayer | null> {
   try {
-    const handle = await fs.open(path.join(dir, '.gitignore'), FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0));
+    // Non-blocking, so a FIFO named .gitignore cannot stall the open before the type check.
+    const handle = await fs.open(path.join(dir, '.gitignore'), FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
     try {
       const st = await handle.stat();
       if (!st.isFile() || st.size > 1024 * 1024) return null;
@@ -213,8 +217,9 @@ async function* walkFiles(absRoot: string, jailRoot: string, signal: AbortSignal
       if (++visited > MAX_VISITED) throw new ToolError('tool-error', `too many files under ${absRoot} (more than ${MAX_VISITED}); narrow the path`);
       const abs = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) continue;
+      // `.git` is also a file, in worktrees and submodules.
+      if (ALWAYS_IGNORED.has(entry.name)) continue;
       if (entry.isDirectory()) {
-        if (ALWAYS_IGNORED.has(entry.name)) continue;
         if (isIgnored(here, abs, true)) continue;
         subdirs.push(abs);
       } else if (entry.isFile()) {
@@ -403,11 +408,12 @@ export async function runGrep(
   const worker = new MatchWorker(effect.pattern, effect.ignoreCase ? 'i' : '');
   try {
     for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
-      if (globs && file !== effect.absRoot && !matchesFileGlob(toRel(effect.absRoot, file), globs)) continue;
+      const rel = file === effect.absRoot ? path.basename(file) : toRel(effect.absRoot, file);
+      if (globs && !matchesFileGlob(rel, globs)) continue;
       // Opened without following links and checked to be the file at this path,
       // so a directory swapped for a link mid-walk cannot lead outside.
       const bytes = await readFileInside(file, MAX_GREP_FILE_BYTES);
-      if (bytes === null || bytes.subarray(0, 8192).includes(0)) continue;
+      if (bytes === null || isBinary(bytes)) continue;
       const room = effect.maxResults - matches.length;
       const found = await worker.match(file, bytes.toString('utf8'), room, fileBudgetMs, signal);
       for (const [line, text] of found.hits) matches.push({ file, line, text });
@@ -430,4 +436,3 @@ export async function runGlob(effect: GlobEffect, jailRoot: string, signal: Abor
   all.sort();
   return { files: all.slice(0, effect.maxResults), truncated: all.length > effect.maxResults };
 }
-
