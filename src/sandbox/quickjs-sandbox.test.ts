@@ -1,0 +1,800 @@
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CallReply, LogLevel, SandboxOutcome, ToolResult } from '../core/types.js';
+import { childEntryPath, childEnv, childExecArgv, permissionFlag, QuickJsSandbox, readGrants, SandboxUnavailableError, type QuickJsSandboxOptions } from './quickjs-sandbox.js';
+
+interface Recorded {
+  readonly outcome: SandboxOutcome;
+  readonly calls: { tool: string; args: unknown }[];
+  readonly logs: { level: LogLevel; text: string }[];
+  readonly elapsedMs: number;
+}
+
+type OnCall = (tool: string, args: unknown, index: number) => Promise<CallReply>;
+
+/** Every binding call succeeds with `{tool, args}` after a host turn. */
+const echo: OnCall = async (tool, args) => {
+  await new Promise((resolve) => setImmediate(resolve));
+  return ok({ tool, args });
+};
+
+/** Test replies carry arbitrary data; the sandbox forwards any JSON value. */
+function ok(value: unknown): CallReply {
+  return { ok: true, value: value as ToolResult };
+}
+
+async function run(
+  code: string,
+  options: { onCall?: OnCall; timeoutMs?: number; memoryBytes?: number; signal?: AbortSignal; sandbox?: QuickJsSandboxOptions } = {},
+): Promise<Recorded> {
+  const sandbox = new QuickJsSandbox(options.sandbox);
+  const calls: Recorded['calls'] = [];
+  const logs: Recorded['logs'] = [];
+  const onCall = options.onCall ?? echo;
+  const started = Date.now();
+  const outcome = await sandbox.run(code, {
+    timeoutMs: options.timeoutMs ?? 10_000,
+    memoryBytes: options.memoryBytes ?? 64 * 1024 * 1024,
+    signal: options.signal ?? new AbortController().signal,
+    onCall: (tool, args) => {
+      calls.push({ tool, args });
+      return onCall(tool, args, calls.length - 1);
+    },
+    onLog: (level, text) => logs.push({ level, text }),
+  });
+  return { outcome, calls, logs, elapsedMs: Date.now() - started };
+}
+
+function value(outcome: SandboxOutcome): unknown {
+  if (!outcome.ok) throw new Error(`expected ok, got ${outcome.kind}: ${outcome.error.name}: ${outcome.error.message}`);
+  return outcome.value;
+}
+
+function failure(outcome: SandboxOutcome): Extract<SandboxOutcome, { ok: false }> {
+  if (outcome.ok) throw new Error(`expected a failure, got ${JSON.stringify(outcome.value)}`);
+  return outcome;
+}
+
+function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+describe('QuickJsSandbox: script semantics', () => {
+  it('runs the code as an async function body and returns JSON', async () => {
+    const { outcome } = await run('const a = [1, 2, 3]; return { sum: a.reduce((x, y) => x + y, 0), s: "ok", n: null, b: true };');
+    expect(value(outcome)).toEqual({ sum: 6, s: 'ok', n: null, b: true });
+  });
+
+  it('returns null when the script returns nothing', async () => {
+    expect(value((await run('const x = 1;')).outcome)).toBeNull();
+  });
+
+  it('normalizes binding arguments to the contract shapes', async () => {
+    const { outcome, calls } = await run(`
+      await bash('ls -la');
+      await bash({ command: 'pwd', cwd: 'src', timeoutMs: 5 });
+      await read({ path: 'a.txt', offset: 2, limit: 3 });
+      await write({ path: 'b.txt', content: 'x' });
+      await edit({ path: 'b.txt', oldString: 'x', newString: 'y', replaceAll: true });
+      await grep({ pattern: 'TODO', glob: '*.ts', ignoreCase: true });
+      await glob({ pattern: '**/*.ts', maxResults: 10 });
+      return 'done';
+    `);
+    expect(value(outcome)).toBe('done');
+    expect(calls).toEqual([
+      { tool: 'bash', args: { command: 'ls -la' } },
+      { tool: 'bash', args: { command: 'pwd', cwd: 'src', timeoutMs: 5 } },
+      { tool: 'read', args: { path: 'a.txt', offset: 2, limit: 3 } },
+      { tool: 'write', args: { path: 'b.txt', content: 'x' } },
+      { tool: 'edit', args: { path: 'b.txt', oldString: 'x', newString: 'y', replaceAll: true } },
+      { tool: 'grep', args: { pattern: 'TODO', glob: '*.ts', ignoreCase: true } },
+      { tool: 'glob', args: { pattern: '**/*.ts', maxResults: 10 } },
+    ]);
+  });
+
+  it('passes the binding result into the script', async () => {
+    const { outcome } = await run('const r = await read({ path: "x" }); return r.args.path + ":" + r.tool;');
+    expect(value(outcome)).toBe('x:read');
+  });
+
+  it('rehydrates binding errors as Error objects the script can catch', async () => {
+    const { outcome } = await run(
+      `
+      const out = [];
+      for (const path of ['denied', 'missing']) {
+        try { await read({ path }); } catch (e) {
+          out.push({ isError: e instanceof Error, name: e.name, message: e.message, code: e.code, source: e.source ?? null, reason: e.reason ?? null });
+        }
+      }
+      return out;
+    `,
+      {
+        onCall: async (_tool, args, index) =>
+          index === 0
+            ? { ok: false, error: { name: 'PermissionDenied', code: 'denied', source: 'hook', message: `blocked ${JSON.stringify(args)}` } }
+            : { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'no such file' } },
+      },
+    );
+    expect(value(outcome)).toEqual([
+      { isError: true, name: 'PermissionDenied', message: 'blocked {"path":"denied"}', code: 'denied', source: 'hook', reason: 'blocked {"path":"denied"}' },
+      { isError: true, name: 'ToolError', message: 'no such file', code: 'not-found', source: null, reason: null },
+    ]);
+  });
+
+  it('reports an uncaught throw with the script frames only', async () => {
+    const { outcome } = await run('function inner() { throw new TypeError("bad thing"); }\ninner();');
+    const f = failure(outcome);
+    expect(f.kind).toBe('error');
+    expect(f.error.name).toBe('TypeError');
+    expect(f.error.message).toBe('bad thing');
+    expect(f.error.stack).toContain('script.js:1');
+    expect(f.error.stack).not.toContain('shim.js');
+  });
+
+  it('reports a syntax error', async () => {
+    const f = failure((await run('return (;')).outcome);
+    expect(f.kind).toBe('error');
+    expect(f.error.name).toBe('SyntaxError');
+  });
+
+  it('reports thrown non-Error values', async () => {
+    expect(failure((await run('throw "plain";')).outcome).error).toEqual({ name: 'Error', message: 'plain' });
+    expect(failure((await run('throw { a: 1 };')).outcome).error.message).toBe('Uncaught { a: 1 }');
+  });
+
+  it('converts non-JSON return values to descriptive strings', async () => {
+    const { outcome } = await run(`
+      const cyclic = { name: 'c' }; cyclic.self = cyclic;
+      return { fn: function named() {}, arrow: () => 1, sym: Symbol('s'), big: 12n, nan: NaN, inf: -Infinity,
+        cyclic, date: new Date(0), err: new RangeError('r'), undef: undefined, arr: [undefined, 1], map: new Map([[1, 2]]) };
+    `);
+    expect(value(outcome)).toEqual({
+      fn: '[Function: named]',
+      arrow: '[Function: arrow]',
+      sym: 'Symbol(s)',
+      big: '12n',
+      nan: 'NaN',
+      inf: '-Infinity',
+      cyclic: { name: 'c', self: '[Circular]' },
+      date: '1970-01-01T00:00:00.000Z',
+      err: 'RangeError: r',
+      arr: [null, 1],
+      map: {},
+    });
+  });
+
+  it('turns a throwing getter into a description instead of crashing', async () => {
+    const { outcome } = await run('return { get bad() { throw new Error("no"); }, ok: 1 };');
+    expect(value(outcome)).toEqual({ bad: '[threw: no]', ok: 1 });
+  });
+
+  it('formats console output like Node and keeps the level', async () => {
+    const { logs } = await run(`
+      console.log('a', 1, { k: 'v', n: [1, 2] }, null, undefined);
+      console.info('i'); console.warn('w'); console.error(new Error('boom'));
+    `);
+    expect(logs).toEqual([
+      { level: 'log', text: "a 1 { k: 'v', n: [ 1, 2 ] } null undefined" },
+      { level: 'info', text: 'i' },
+      { level: 'warn', text: 'w' },
+      { level: 'error', text: 'Error: boom' },
+    ]);
+  });
+
+  it('reports an error whose name or message getter throws', async () => {
+    const f = failure((await run('const e = new Error("x"); Object.defineProperty(e, "message", { get() { throw 1; } }); throw e;')).outcome);
+    expect(f.kind).toBe('error');
+    expect(f.error).toMatchObject({ name: 'Error', message: '[unreadable message]' });
+  });
+
+  it('formats arrays in console output without running their getters and keeps text after a NUL', async () => {
+    const { outcome, logs } = await run('const a = [1, 2]; let reads = 0; Object.defineProperty(a, 1, { get() { reads++; return 3; } }); console.log(a); console.log("a\\u0000b"); return reads;');
+    expect(value(outcome)).toBe(0);
+    expect(logs.map((l) => l.text)).toEqual(['[ 1, [Getter/Setter] ]', 'a\u0000b']);
+  });
+
+  it('keeps a script error when the WASM memory starts close to its maximum, and reports oom below it', async () => {
+    const thrown = failure((await run('throw new Error("boom");', { memoryBytes: 17 * 1024 * 1024 })).outcome);
+    expect(thrown).toMatchObject({ kind: 'error', error: { name: 'Error', message: 'boom' } });
+    for (const empty of ['null', 'undefined']) {
+      expect(failure((await run(`throw ${empty};`, { memoryBytes: 17 * 1024 * 1024 })).outcome)).toMatchObject({ kind: 'error', error: { message: `Uncaught ${empty}` } });
+    }
+    const small = failure((await run('return 1;', { memoryBytes: 1024 * 1024 })).outcome);
+    expect(small).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: expect.stringContaining('below') } });
+  });
+
+  it('fails fast when the script waits on a promise nothing can settle', async () => {
+    const { outcome, elapsedMs } = await run('await new Promise(() => {});', { timeoutMs: 10_000 });
+    expect(failure(outcome).error.name).toBe('Deadlock');
+    expect(elapsedMs).toBeLessThan(5_000);
+  });
+
+  it('rejects a binding argument that is not JSON-serializable without calling the host', async () => {
+    const { outcome, calls } = await run('const a = {}; a.a = a; try { await read(a); } catch (e) { return e.name + ": " + (e.message.includes("JSON") ? "json" : e.message); }');
+    expect(value(outcome)).toBe('TypeError: json');
+    expect(calls).toEqual([]);
+  });
+});
+
+/**
+ * Variables the OS layer adds to every child env even when the parent passes
+ * an empty one: libuv on Windows copies these required ones, macOS adds its
+ * text-encoding hint. None of them is a server secret.
+ */
+const PLATFORM_ENV = new Set(
+  process.platform === 'win32'
+    ? ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'PATH', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR']
+    : process.platform === 'darwin'
+      ? ['__CF_USER_TEXT_ENCODING']
+      : [],
+);
+
+describe('QuickJsSandbox: no ambient authority', () => {
+  it('exposes no host objects, module loading or timers', async () => {
+    const { outcome, calls } = await run(`
+      const names = ['require', 'process', 'fetch', 'Deno', 'Bun', 'std', 'os', 'module', 'exports', 'Buffer',
+        'setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'performance', 'XMLHttpRequest', 'WebSocket',
+        'importScripts', 'print', 'scriptArgs', '__acm_call', 'hostCall'];
+      const types = {};
+      for (const n of names) types[n] = typeof globalThis[n];
+      const viaFunction = new Function('return this')();
+      const viaEval = (0, eval)('this');
+      const extra = (g) => Object.getOwnPropertyNames(g).filter((k) => !STANDARD.includes(k));
+      let dynamicImport;
+      try { await import('fs'); dynamicImport = 'loaded'; } catch (e) { dynamicImport = 'rejected'; }
+      let nodeImport;
+      try { await import('node:child_process'); nodeImport = 'loaded'; } catch (e) { nodeImport = 'rejected'; }
+      return { types, same: viaFunction === globalThis && viaEval === globalThis, extraFn: extra(viaFunction), extraEval: extra(viaEval), dynamicImport, nodeImport };
+    `.replace(
+      'STANDARD',
+      JSON.stringify([
+        'Object', 'Function', 'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError', 'InternalError',
+        'AggregateError', 'Iterator', 'Array', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'decodeURI', 'decodeURIComponent', 'encodeURI',
+        'encodeURIComponent', 'escape', 'unescape', 'Infinity', 'NaN', 'undefined', 'Number', 'Boolean', 'String', 'Math', 'Reflect', 'Symbol',
+        'eval', 'globalThis', 'Date', 'RegExp', 'JSON', 'Proxy', 'Map', 'Set', 'WeakMap', 'WeakSet', 'ArrayBuffer', 'SharedArrayBuffer',
+        'Uint8ClampedArray', 'Int8Array', 'Uint8Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'BigInt64Array',
+        'BigUint64Array', 'Float16Array', 'Float32Array', 'Float64Array', 'DataView', 'Promise', 'BigInt', 'WeakRef', 'FinalizationRegistry',
+        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob',
+      ]),
+    ));
+    const result = value(outcome);
+    expect(result).toEqual({
+      types: Object.fromEntries(
+        ['require', 'process', 'fetch', 'Deno', 'Bun', 'std', 'os', 'module', 'exports', 'Buffer', 'setTimeout', 'setInterval', 'setImmediate',
+          'queueMicrotask', 'performance', 'XMLHttpRequest', 'WebSocket', 'importScripts', 'print', 'scriptArgs', '__acm_call', 'hostCall'].map((n) => [n, 'undefined']),
+      ),
+      same: true,
+      extraFn: [],
+      extraEval: [],
+      dynamicImport: 'rejected',
+      nodeImport: 'rejected',
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('starts the child with an env that has none of the server secrets', () => {
+    const env = childEnv({ ACM_TEST_CANARY: 'secret', PATH: '/bin', HOME: '/home/x', GITHUB_TOKEN: 't' }, 'linux');
+    expect(env).toEqual({});
+    expect(childEnv({ ACM_TEST_CANARY: 'secret', SystemRoot: 'C:\\Windows' }, 'win32')).toEqual({ SystemRoot: 'C:\\Windows' });
+  });
+
+  it('runs the child process under the Node permission model of the running Node', async () => {
+    const target = join(tmpdir(), `acm-permission-probe-${process.pid}`);
+    const server = createServer((socket) => {
+      // Where Node allows the connection (before Node 25) the probe exits right away and resets it.
+      socket.on('error', () => undefined);
+      socket.end('hello');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const port = typeof address === 'object' && address !== null ? address.port : 0;
+    const probe = `const r = {}; const fs = require('fs');
+      try { fs.writeFileSync(${JSON.stringify(target)}, 'x'); r.write = 'allowed'; } catch (e) { r.write = e.code; }
+      try { require('child_process').execFileSync(process.execPath, ['-e', '0']); r.spawn = 'allowed'; } catch (e) { r.spawn = e.code; }
+      try { new (require('worker_threads').Worker)('0', { eval: true }).terminate(); r.worker = 'allowed'; } catch (e) { r.worker = e.code; }
+      try { new Function('return 1')(); r.codegen = 'allowed'; } catch (e) { r.codegen = e.name; }
+      r.env = Object.keys(process.env).filter((k) => !PLATFORM_ENV.has(k.toUpperCase()));
+      const done = (v) => { r.socket = v; console.log(JSON.stringify(r)); process.exit(0); };
+      try {
+        const s = require('net').connect(${port}, '127.0.0.1');
+        s.on('connect', () => done('allowed'));
+        s.on('error', (e) => done(e.code));
+      } catch (e) { done(e.code); }`;
+    try {
+      const flags = childExecArgv(childEntryPath(), 256).filter((flag) => flag !== '--experimental-strip-types');
+      const child = spawn(process.execPath, [...flags, '-e', probe.replace('PLATFORM_ENV', `new Set(${JSON.stringify([...PLATFORM_ENV])})`)], {
+        env: childEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+      await new Promise((resolve) => child.on('close', resolve));
+      const result = JSON.parse(stdout) as Record<string, unknown>;
+      expect({ ...result, socket: undefined }).toEqual({ write: 'ERR_ACCESS_DENIED', spawn: 'ERR_ACCESS_DENIED', worker: 'ERR_ACCESS_DENIED', codegen: 'EvalError', env: [], socket: undefined });
+      expect(existsSync(target)).toBe(false);
+      // Node's permission model covers the network only from Node 25 (the release that added --allow-net).
+      if (process.allowedNodeEnvironmentFlags.has('--allow-net')) expect(result.socket).toBe('ERR_ACCESS_DENIED');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('uses whichever permission flag this Node has and refuses to start without one', async () => {
+    expect(permissionFlag(new Set(['--permission', '--experimental-permission']))).toBe('--permission');
+    expect(permissionFlag(new Set(['--experimental-permission']))).toBe('--experimental-permission');
+    const legacy = childExecArgv('child.js', 64, new Set(['--experimental-permission']));
+    expect(legacy).toContain('--experimental-permission');
+    expect(legacy).toContain('--preserve-symlinks');
+    expect(legacy).toContain(`--allow-fs-read=${join(dirname(childEntryPath()), '*')}`);
+    expect(() => childExecArgv('child.js', 64, new Set())).toThrow(SandboxUnavailableError);
+    expect(permissionFlag()).toBeDefined();
+  });
+
+  it('lets the child read only its own entry directory and the packages it loads', () => {
+    const { dirs, files } = readGrants();
+    const packages = ['@jitl/quickjs-ffi-types', '@jitl/quickjs-ng-wasmfile-release-sync', 'quickjs-emscripten-core', 'zod'];
+    expect(dirs.sort()).toEqual([...packages.map((name) => join(process.cwd(), 'node_modules', name)), dirname(childEntryPath())].sort());
+    expect(files).toContain(join(process.cwd(), 'package.json'));
+  });
+
+  describe('read grants for probed paths', () => {
+    let root = '';
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), 'acm-grants-'));
+    });
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    /** Builds `<root>/a/b/entry` (the child entry directory) with a regular package.json at `<root>/a`; returns the entry. */
+    function layout(): { entry: string; probed: string; above: string } {
+      const entry = join(root, 'a', 'b', 'entry');
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(root, 'a', 'package.json'), '{}');
+      return { entry, probed: join(root, 'a', 'b', 'package.json'), above: join(root, 'a', 'package.json') };
+    }
+
+    it('grants an absent ancestor manifest and keeps walking to the first regular one', () => {
+      const { entry, probed, above } = layout();
+      const { files } = readGrants(entry, []);
+      expect(files).toContain(probed);
+      expect(files).toContain(above);
+    });
+
+    it('never grants an ancestor manifest that is a dangling link', () => {
+      const { entry, probed, above } = layout();
+      symlinkSync(join(root, 'missing-target.json'), probed);
+      const { files, dirs } = readGrants(entry, []);
+      expect([...files, ...dirs]).not.toContain(probed);
+      expect(files).not.toContain(above);
+    });
+
+    it('never grants an ancestor manifest that links to a regular file', () => {
+      const { entry, probed } = layout();
+      writeFileSync(join(root, 'target.json'), '{}');
+      symlinkSync(join(root, 'target.json'), probed);
+      const { files, dirs } = readGrants(entry, []);
+      expect([...files, ...dirs]).not.toContain(probed);
+    });
+
+    it('never grants a directory in place of an ancestor manifest', () => {
+      const { entry, probed } = layout();
+      mkdirSync(probed);
+      const { files, dirs } = readGrants(entry, []);
+      expect([...files, ...dirs]).not.toContain(probed);
+    });
+
+    it('refuses a directory grant that covers an unexpected manifest entry', () => {
+      const { entry } = layout();
+      mkdirSync(join(entry, 'package.json'));
+      expect(() => readGrants(entry, [])).toThrow(SandboxUnavailableError);
+    });
+
+    it('omits a regular file found where a dependency directory was expected', () => {
+      const { entry } = layout();
+      const candidate = join(root, 'a', 'b', 'node_modules', 'dep');
+      mkdirSync(dirname(candidate), { recursive: true });
+      writeFileSync(candidate, 'not a package');
+      expect(readGrants(entry, ['dep']).files).not.toContain(candidate);
+    });
+
+    it('never grants a node_modules lookup entry that is a link without a package, and still finds the package above it', () => {
+      const { entry } = layout();
+      const linked = join(root, 'a', 'b', 'node_modules', 'dep');
+      mkdirSync(dirname(linked), { recursive: true });
+      symlinkSync(join(root, 'missing-dep'), linked);
+      const real = join(root, 'a', 'node_modules', 'dep');
+      mkdirSync(real, { recursive: true });
+      writeFileSync(join(real, 'package.json'), '{}');
+      const { files, dirs } = readGrants(entry, ['dep']);
+      expect([...files, ...dirs]).not.toContain(linked);
+      expect(dirs).toContain(real);
+    });
+  });
+
+  it('never lets the script observe a canary secret from the server env', async () => {
+    const canary = `canary-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+    process.env.ACM_TEST_CANARY = canary;
+    let childEnviron: string | undefined;
+    try {
+      let pid = 0;
+      const recorded = await run(
+        `
+        const seen = [];
+        const scan = (o, depth) => { if (depth > 3 || o === null || (typeof o !== 'object' && typeof o !== 'function')) return;
+          for (const k of Object.getOwnPropertyNames(o)) { seen.push(k); try { scan(o[k], depth + 1); } catch {} } };
+        scan(globalThis, 0);
+        try { await bash({ command: 'echo $ACM_TEST_CANARY' }); } catch (e) { seen.push(e.message, String(e.stack)); }
+        try { await read({ path: '/proc/self/environ' }); } catch (e) { seen.push(e.message); }
+        try { null.x; } catch (e) { seen.push(String(e.stack)); }
+        console.log(seen.join(' '));
+        return seen.join(' ');
+      `,
+        {
+          sandbox: { onSpawn: (p) => (pid = p) },
+          onCall: async (tool) => {
+            if (process.platform === 'linux' && pid > 0 && childEnviron === undefined) childEnviron = readFileSync(`/proc/${pid}/environ`, 'utf8');
+            return { ok: false, error: { name: 'ToolError', code: 'tool-error', message: `${tool} failed` } };
+          },
+        },
+      );
+      const everything = JSON.stringify(recorded);
+      expect(recorded.outcome.ok).toBe(true);
+      expect(everything).not.toContain(canary);
+      if (process.platform === 'linux') {
+        expect(childEnviron).toBeTypeOf('string');
+        expect(childEnviron).not.toContain(canary);
+        expect(childEnviron).not.toContain('PATH=');
+      }
+    } finally {
+      delete process.env.ACM_TEST_CANARY;
+    }
+  });
+});
+
+describe('QuickJsSandbox: prototype pollution', () => {
+  it('keeps host prototypes intact and parses hostile keys as own data', async () => {
+    const { outcome } = await run(`
+      Object.prototype.polluted = 1;
+      Array.prototype.map = function () { return 'hijacked'; };
+      JSON.stringify = () => '"hijacked"';
+      Promise.prototype.then = function () { throw new Error('hijacked then'); };
+      const viaParse = JSON.parse('{"__proto__": {"injected": true}, "constructor": {"prototype": {"injected": true}}}');
+      const literal = { ['__proto__']: { injected: true }, constructor: { prototype: { injected: true } }, list: [1, 2] };
+      return { viaParse, literal };
+    `);
+    const result = value(outcome);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect([1].map((x) => x + 1)).toEqual([2]);
+    expect(Object.prototype).not.toHaveProperty('injected');
+    const top = result as Record<string, Record<string, unknown>>;
+    for (const key of ['viaParse', 'literal'] as const) {
+      const obj = top[key];
+      expect(obj).toBeDefined();
+      if (!obj) continue;
+      expect(Object.getPrototypeOf(obj)).toBe(Object.prototype);
+      expect(Object.keys(obj)).toContain('__proto__');
+      expect((obj as { injected?: unknown }).injected).toBeUndefined();
+      expect(({} as { injected?: unknown }).injected).toBeUndefined();
+      expect(Object.hasOwn(obj, 'polluted')).toBe(false);
+    }
+  });
+
+  it('keeps bindings working after the script overrides intrinsics', async () => {
+    const { outcome } = await run(`
+      JSON.parse = () => 'hijacked';
+      JSON.stringify = () => 'hijacked';
+      Promise.prototype.then = function () { throw new Error('hijacked then'); };
+      const r = read({ path: 'p' });
+      return 'called';
+    `);
+    expect(value(outcome)).toBe('called');
+  });
+});
+
+describe('QuickJsSandbox: resource abuse', () => {
+  it('stops an infinite loop with outcome timeout within the deadline plus a small margin', async () => {
+    const { outcome, elapsedMs } = await run('for (;;) {}', { timeoutMs: 1_000 });
+    expect(failure(outcome).kind).toBe('timeout');
+    expect(elapsedMs).toBeLessThan(1_000 + 1_000);
+  });
+
+  it('stops a loop that catches every error', async () => {
+    const { outcome, elapsedMs } = await run('for (;;) { try { for (;;) {} } catch (e) {} }', { timeoutMs: 800 });
+    expect(failure(outcome).kind).toBe('timeout');
+    expect(elapsedMs).toBeLessThan(800 + 1_000);
+  });
+
+  it('times out while a binding never replies', async () => {
+    const { outcome, elapsedMs } = await run('await read({ path: "slow" });', { timeoutMs: 600, onCall: () => new Promise<CallReply>(() => undefined) });
+    expect(failure(outcome).kind).toBe('timeout');
+    expect(elapsedMs).toBeLessThan(600 + 1_000);
+  });
+
+  it('counts the time spent starting the child against the deadline', async () => {
+    let spawnReturnedAt = 0;
+    const onSpawn = (): void => {
+      const until = performance.now() + 400;
+      while (performance.now() < until);
+      spawnReturnedAt = performance.now();
+    };
+    const { outcome, calls } = await run('await read({ path: "x" }); return 1;', { timeoutMs: 300, sandbox: { onSpawn } });
+    expect(failure(outcome)).toMatchObject({ kind: 'timeout', error: { message: 'the script did not finish within 300 ms' } });
+    expect(calls).toEqual([]);
+    expect(performance.now() - spawnReturnedAt).toBeLessThan(100);
+  });
+
+  it('reports an allocation bomb as oom', async () => {
+    const arrays = await run('const a = []; for (let i = 0; ; i++) a.push("x".repeat(100000) + i);', { memoryBytes: 32 * 1024 * 1024 });
+    expect(failure(arrays.outcome).kind).toBe('oom');
+    const objects = await run('const a = []; for (;;) a.push({ a: 1, b: [1, 2, 3] });', { memoryBytes: 32 * 1024 * 1024 });
+    expect(failure(objects.outcome).kind).toBe('oom');
+    const single = await run('return "x".repeat(1e9).length;', { memoryBytes: 32 * 1024 * 1024 });
+    expect(failure(single.outcome).kind).toBe('oom');
+  });
+
+  it('enforces memoryBytes as the real heap limit', async () => {
+    const fill = (mib: number): string => `const a = []; for (let i = 0; i < ${mib * 10}; i++) a.push("x".repeat(100000) + i); return a.length;`;
+    expect(value((await run(fill(16), { memoryBytes: 48 * 1024 * 1024 })).outcome)).toBe(160);
+    expect(failure((await run(fill(96), { memoryBytes: 48 * 1024 * 1024 })).outcome).kind).toBe('oom');
+  });
+
+  it('turns deep recursion into a script error, not a crash', async () => {
+    const f = failure((await run('function f(n) { return f(n + 1) + 1; } return f(0);')).outcome);
+    expect(f.kind).toBe('error');
+    expect(f.error.name).toBe('RangeError');
+    const caught = await run('function f() { f(); } try { f(); } catch (e) { return e.name; }');
+    expect(value(caught.outcome)).toBe('RangeError');
+  });
+
+  it('refuses binding calls after the cap and never forwards them', async () => {
+    const { outcome, calls } = await run(
+      `
+      const settled = await Promise.allSettled(Array.from({ length: 10000 }, (_, i) => glob({ pattern: String(i) })));
+      const rejected = settled.filter((s) => s.status === 'rejected');
+      return { fulfilled: settled.length - rejected.length, rejected: rejected.length, sample: rejected[0].reason.message, code: rejected[0].reason.code };
+    `,
+      { onCall: async () => ok({ files: [], truncated: false }) },
+    );
+    expect(value(outcome)).toEqual({ fulfilled: 2000, rejected: 8000, sample: expect.stringContaining('at most 2000 calls'), code: 'tool-error' });
+    expect(calls).toHaveLength(2000);
+  });
+
+  it('caps console spam', async () => {
+    const { logs, outcome } = await run('for (let i = 0; i < 200000; i++) console.log("spam line " + i + " " + "y".repeat(80));', {
+      sandbox: { maxLogBytes: 256 * 1024 },
+    });
+    expect(outcome.ok).toBe(true);
+    const bytes = logs.reduce((n, l) => n + Buffer.byteLength(l.text) + 1, 0);
+    expect(bytes).toBeLessThanOrEqual(256 * 1024 + 1024);
+    expect(logs.at(-1)?.text).toContain('console output truncated');
+  });
+
+  it('cuts a single huge console line', async () => {
+    const { logs } = await run('console.log("z".repeat(500000));');
+    expect(logs).toHaveLength(1);
+    expect(logs[0]?.text.length).toBeLessThan(10_100);
+    expect(logs[0]?.text).toContain('[truncated]');
+  });
+
+  it('bounds a gigantic return value', async () => {
+    const str = failure((await run('return "x".repeat(5 * 1024 * 1024);')).outcome);
+    expect(str.error.name).toBe('ResultTooLarge');
+    const arr = await run('return new Array(1e8);');
+    expect(failure(arr.outcome).error.name).toBe('ResultTooLarge');
+    expect(arr.elapsedMs).toBeLessThan(5_000);
+  });
+});
+
+describe('QuickJsSandbox: out of memory is fatal', () => {
+  const MEMORY = 32 * 1024 * 1024;
+  /** Fills the heap with small objects: the engine's growth is refused and it could not even build an error object. */
+  const objectBomb = 'for (;;) a.push({ a: 1, b: [1, 2, 3] });';
+  /** Fills the heap with 100 kB strings: the engine could still build an InternalError for the script to catch. */
+  const stringBomb = 'for (let i = 0; ; i++) a.push("x".repeat(100000) + i);';
+  /** Visible effects a catch block would leave if it ran: it frees the heap first, then logs and calls a binding. */
+  const caught = 'a = null; console.log("catch ran"); await read({ path: "after-oom" });';
+
+  it('(1) ends an uncaught allocation bomb as oom', async () => {
+    const { outcome } = await run(`let a = []; ${objectBomb}`, { memoryBytes: MEMORY });
+    expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: expect.stringContaining('out of memory') } });
+  });
+
+  it('(2) ends the run at the refused growth: a catch never runs, whatever the script throws or returns next', async () => {
+    for (const [bomb, after] of [[objectBomb, 'throw null;'], [stringBomb, 'throw undefined;'], [objectBomb, 'return "recovered";']]) {
+      const { outcome, logs, calls } = await run(`let a = []; try { ${bomb} } catch (e) { ${caught} } finally { console.log("finally ran"); }\n${after}`, { memoryBytes: MEMORY });
+      expect(logs).toEqual([]);
+      expect(calls).toEqual([]);
+      expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError' } });
+    }
+  });
+
+  it('(3) reports throw null or undefined as a script error when no growth was refused', async () => {
+    for (const empty of ['null', 'undefined']) {
+      expect(failure((await run(`throw ${empty};`, { memoryBytes: MEMORY })).outcome)).toMatchObject({ kind: 'error', error: { name: 'Error', message: `Uncaught ${empty}` } });
+      // A memory error the QuickJS limit raises before any growth is an ordinary, catchable error.
+      const { outcome, logs } = await run(`try { "x".repeat(1e9); } catch (e) { console.log(e.name); } throw ${empty};`, { memoryBytes: MEMORY });
+      expect(failure(outcome)).toMatchObject({ kind: 'error', error: { message: `Uncaught ${empty}` } });
+      expect(logs.map((l) => l.text)).toEqual(['InternalError']);
+    }
+  });
+
+  it('(4) keeps an explicit memory error as oom', async () => {
+    const { outcome } = await run('return "x".repeat(1e9).length;', { memoryBytes: MEMORY });
+    expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
+  });
+
+  it('(5) delivers the logs and calls made before the refused growth, in order, while the parent is slow to read', async () => {
+    const lines = 4_000;
+    const pad = 'p'.repeat(200);
+    const logs: string[] = [];
+    const calls: string[] = [];
+    let stalled = false;
+    const outcome = await new QuickJsSandbox().run(
+      `for (let i = 0; i < ${lines}; i++) console.log("line " + i + "${pad}"); read({ path: "before-oom" }); let a = []; ${objectBomb}`,
+      {
+        timeoutMs: 10_000,
+        memoryBytes: MEMORY,
+        signal: new AbortController().signal,
+        onCall: (tool) => {
+          calls.push(tool);
+          return Promise.resolve(ok(null));
+        },
+        onLog: (_level, text) => {
+          // The parent stops reading for a moment, so the child's output backs up while the script fills the heap.
+          if (!stalled) {
+            stalled = true;
+            const until = Date.now() + 300;
+            while (Date.now() < until);
+          }
+          logs.push(text);
+        },
+      },
+    );
+    expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError' } });
+    expect(logs).toEqual(Array.from({ length: lines }, (_, i) => `line ${i}${pad}`));
+    expect(calls).toEqual(['read']);
+  });
+});
+
+describe('QuickJsSandbox: reply buffering', () => {
+  const bigRead = (): Promise<CallReply> =>
+    Promise.resolve(ok({ path: '/example.txt', content: 'x'.repeat(1024 * 1024), startLine: 1, totalLines: 1, truncated: false }));
+
+  it('ends a run whose script stops reading binding results instead of buffering them', async () => {
+    const before = process.memoryUsage();
+    const { outcome, calls, elapsedMs } = await run('for (let i = 0; i < 200; i++) read({ path: "x" }); while (true) {}', {
+      timeoutMs: 10_000,
+      onCall: bigRead,
+      sandbox: { maxPendingReplyBytes: 16 * 1024 * 1024 },
+    });
+    const f = failure(outcome);
+    expect(f.kind).toBe('oom');
+    expect(f.error.name).toBe('ReplyBufferFull');
+    expect(calls.length).toBeGreaterThan(16);
+    expect(elapsedMs).toBeLessThan(5_000);
+    const after = process.memoryUsage();
+    expect(after.external + after.arrayBuffers - (before.external + before.arrayBuffers)).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it('does not count the script itself against the reply quotas', async () => {
+    const code = `// ${'p'.repeat(8_192)}\nreturn await read({ path: 'x' });`;
+    const { outcome } = await run(code, { sandbox: { maxReplyBytes: 4_096, maxPendingReplyBytes: 4_096 } });
+    expect(value(outcome)).toEqual({ tool: 'read', args: { path: 'x' } });
+  });
+
+  it('caps the total bytes of binding results per run', async () => {
+    const { outcome } = await run('for (let i = 0; i < 20; i++) await read({ path: "x" }); return "read all";', {
+      onCall: bigRead,
+      sandbox: { maxReplyBytes: 8 * 1024 * 1024 },
+    });
+    expect(failure(outcome).error.name).toBe('ReplyBufferFull');
+    const fine = await run('for (let i = 0; i < 20; i++) await read({ path: "x" }); return "read all";', { onCall: bigRead });
+    expect(value(fine.outcome)).toBe('read all');
+  });
+});
+
+describe('QuickJsSandbox: concurrency', () => {
+  it('resolves Promise.all of 200 bindings answered in reverse order', async () => {
+    const waiting: (() => void)[] = [];
+    const { outcome } = await run('return await Promise.all(Array.from({ length: 200 }, (_, i) => read({ path: "f" + i })));', {
+      onCall: (_tool, args, index) =>
+        new Promise<CallReply>((resolve) => {
+          waiting.push(() => resolve(ok({ echo: args, index })));
+          if (waiting.length === 200) {
+            for (const answer of [...waiting].reverse()) setImmediate(answer);
+          }
+        }),
+    });
+    const result = value(outcome) as { echo: { path: string }; index: number }[];
+    expect(result).toHaveLength(200);
+    result.forEach((r, i) => {
+      expect(r.echo.path).toBe(`f${i}`);
+      expect(r.index).toBe(i);
+    });
+  });
+
+  it('keeps running when one binding inside Promise.allSettled rejects', async () => {
+    const { outcome } = await run(
+      'const s = await Promise.allSettled([read({ path: "a" }), read({ path: "b" }), read({ path: "c" })]); return s.map((x) => x.status + ":" + (x.status === "fulfilled" ? x.value.path : x.reason.code));',
+      {
+        onCall: async (_tool, args) => {
+          const path = (args as { path: string }).path;
+          await new Promise((resolve) => setTimeout(resolve, path === 'a' ? 20 : 1));
+          return path === 'b' ? { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'missing' } } : ok({ path });
+        },
+      },
+    );
+    expect(value(outcome)).toEqual(['fulfilled:a', 'rejected:not-found', 'fulfilled:c']);
+  });
+});
+
+describe('QuickJsSandbox: cancellation', () => {
+  it('kills the child during a pending binding and forwards no later call', async () => {
+    const controller = new AbortController();
+    let pid = 0;
+    const started = Date.now();
+    const { outcome, calls } = await run('await read({ path: "first" }); await read({ path: "second" }); return "finished";', {
+      signal: controller.signal,
+      sandbox: { onSpawn: (p) => (pid = p) },
+      onCall: async () => {
+        setTimeout(() => controller.abort(), 10);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return ok({ late: true });
+      },
+    });
+    expect(failure(outcome).kind).toBe('killed');
+    expect(pid).toBeGreaterThan(0);
+    while (!processGone(pid) && Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(processGone(pid)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(calls).toEqual([{ tool: 'read', args: { path: 'first' } }]);
+  });
+
+  it('stops the run when the signal is aborted while the child starts', async () => {
+    const controller = new AbortController();
+    let pid = 0;
+    const { outcome, calls } = await run('await write({ path: "example.txt", content: "x" }); return 42;', {
+      signal: controller.signal,
+      sandbox: {
+        onSpawn: (p) => {
+          pid = p;
+          controller.abort();
+        },
+      },
+    });
+    expect(failure(outcome).kind).toBe('killed');
+    expect(calls).toEqual([]);
+    const started = Date.now();
+    while (!processGone(pid) && Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(processGone(pid)).toBe(true);
+  });
+
+  it('does not start a child when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let spawned = false;
+    const { outcome } = await run('return 1;', { signal: controller.signal, sandbox: { onSpawn: () => (spawned = true) } });
+    expect(failure(outcome).kind).toBe('killed');
+    expect(spawned).toBe(false);
+  });
+
+  it('never reuses a child across runs', async () => {
+    const pids: number[] = [];
+    const sandbox = { onSpawn: (p: number) => pids.push(p) };
+    await run('globalThis.leak = 42; return 1;', { sandbox });
+    const second = await run('return typeof globalThis.leak;', { sandbox });
+    expect(value(second.outcome)).toBe('undefined');
+    expect(pids).toHaveLength(2);
+    expect(pids[0]).not.toBe(pids[1]);
+  });
+});
