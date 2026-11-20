@@ -327,24 +327,37 @@ function matchesPrefix(rule: PrefixRule, argv: readonly string[]): boolean {
   return rule.rest.every((alts, i) => alts.includes(argv[i + 1] ?? ''));
 }
 
-// Executable paths use the host platform's syntax: on POSIX a backslash is a
-// literal file-name character, not a separator.
-const isAbsolutePath = (p: string): boolean => path.isAbsolute(p);
-const basename = (p: string): string => path.basename(p);
+const WINDOWS_EXECUTABLE_SUFFIXES = ['.exe', '.cmd', '.bat', '.com'];
+
+/**
+ * Lookup key of an absolute executable path (Codex `executable_path_lookup_key`):
+ * the basename in the platform's path syntax (on POSIX a backslash is a
+ * literal file-name character), on Windows ASCII-lowercased and without one
+ * executable suffix.
+ */
+function executableLookupKey(program: string, platform: NodeJS.Platform): string | undefined {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  if (!p.isAbsolute(program)) return undefined;
+  const base = p.basename(program);
+  if (platform !== 'win32') return base;
+  const lower = base.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const suffix = WINDOWS_EXECUTABLE_SUFFIXES.find((x) => lower.endsWith(x));
+  return suffix === undefined ? lower : lower.slice(0, -suffix.length);
+}
 
 /**
  * Rules matching `argv`: exact program first; when none match and the
- * program is an absolute path, rules for its basename (Codex
+ * program is an absolute path, rules for its lookup key (Codex
  * `resolve_host_executables`, without `host_executable` restrictions since
  * those are outside the subset).
  */
-export function matchRules(policy: ExecPolicy, argv: readonly string[]): PrefixRule[] {
+export function matchRules(policy: ExecPolicy, argv: readonly string[], platform: NodeJS.Platform = process.platform): PrefixRule[] {
   const exact = policy.rules.filter((r) => matchesPrefix(r, argv));
   if (exact.length > 0) return exact;
   const program = argv[0];
-  if (program === undefined || !isAbsolutePath(program)) return [];
-  const base = basename(program);
-  if (base === '') return [];
+  if (program === undefined) return [];
+  const base = executableLookupKey(program, platform);
+  if (base === undefined || base === '') return [];
   const rewritten = [base, ...argv.slice(1)];
   return policy.rules.filter((r) => matchesPrefix(r, rewritten));
 }
@@ -374,7 +387,7 @@ function rmHasForce(args: readonly string[]): boolean {
 /** Whether Codex flags this argv as dangerous (forced `rm`, through `sudo` and `env`). */
 export function isDangerousCommand(argv: readonly string[], depth = 0): boolean {
   if (depth > 8) return true;
-  const program = basename(argv[0] ?? '');
+  const program = path.basename(argv[0] ?? '');
   if (program === 'rm') return rmHasForce(argv.slice(1));
   if (program === 'sudo') return isDangerousCommand(argv.slice(1), depth + 1);
   if (program === 'env') {

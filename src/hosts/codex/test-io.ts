@@ -34,13 +34,6 @@ export function memoryIo(opts: {
     isDir: (d) => dirs.has(d),
     exists: (p) => files.has(p) || dirs.has(p),
     realpath: (p) => p,
-    listDir: (d) => {
-      const out = new Set<string>();
-      for (const p of [...files.keys(), ...dirs]) {
-        if (path.posix.dirname(p) === d) out.add(path.posix.basename(p));
-      }
-      return [...out];
-    },
     listFiles: (d) => [...files.keys()].filter((p) => path.posix.dirname(p) === d).map((p) => path.posix.basename(p)),
     parentArgv: () => opts.argv,
   };

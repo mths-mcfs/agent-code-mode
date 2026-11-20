@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, darwinArgv, getPath, loadCodexConfig, mergeTables, nodeConfigIo, parseOverride, parseParentCommandLine, ruleFiles } from './config.js';
+import { ConfigError, getPath, loadCodexConfig, mergeTables, nodeConfigIo, parseOverride, parseParentCommandLine, ruleFiles } from './config.js';
+import { discoverHooks } from './hooks.js';
 import { memoryIo } from './test-io.js';
 
 const posix = process.platform !== 'win32';
@@ -118,7 +119,7 @@ describe.runIf(posix)('loadCodexConfig', () => {
       expect(user(toml), toml).toThrow(ConfigError);
     }
     const req = (toml: string) => () => loadCodexConfig('/w', memoryIo({ files: { '/etc/codex/requirements.toml': toml } }));
-    for (const toml of ['[rules]\nx = 1\n', '[permissions.filesystem]\nx = 1\n', 'allowed_sandbox_modes = ["workspace-write"]\n', 'allowed_approval_policies = [{ granular = {} }]\n']) {
+    for (const toml of ['[rules]\nx = 1\n', '[permissions.filesystem]\nx = 1\n', 'allowed_sandbox_modes = ["workspace-write"]\n', 'allowed_approval_policies = [{ granular = {} }]\n', '[features]\nhooks = true\n[feature_requirements]\nhooks = false\n']) {
       expect(req(toml), toml).toThrow(ConfigError);
     }
   });
@@ -151,10 +152,24 @@ describe.runIf(posix)('loadCodexConfig', () => {
     expect(c.networkAccess).toBe(false);
   });
 
-  it('reuses the trust of a linked worktree only after confirming its main repository', () => {
-    const files = { '/home/u/.codex/config.toml': trusted, '/wt/.git': 'gitdir: /repo/.git/worktrees/wt\n', '/wt/.codex/config.toml': 'sandbox_mode = "workspace-write"\n' };
-    expect(loadCodexConfig('/wt', memoryIo({ files: { ...files, '/repo/.git/worktrees/wt/commondir': '../..\n' } })).sandboxMode).toBe('workspace-write');
+  it('reuses the trust of a linked worktree only after confirming its registration both ways', () => {
+    const hook = JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }] } });
+    const files = {
+      '/home/u/.codex/config.toml': trusted,
+      '/wt/.git': 'gitdir: /repo/.git/worktrees/wt\n',
+      '/wt/.codex/config.toml': 'sandbox_mode = "workspace-write"\n',
+      '/wt/.codex/hooks.json': hook,
+      '/repo/.codex/hooks.json': hook,
+      '/repo/.git/worktrees/wt/commondir': '../..\n',
+    };
+    const io = memoryIo({ files: { ...files, '/repo/.git/worktrees/wt/gitdir': '/wt/.git\n' }, argv: ['codex', '--dangerously-bypass-hook-trust'] });
+    const linked = loadCodexConfig('/wt', io);
+    expect(linked.sandboxMode).toBe('workspace-write');
+    // Hooks come from the main checkout's matching folder, like Codex.
+    expect(discoverHooks(linked, io).hooks.map((h) => h.sourcePath)).toEqual(['/repo/.codex/hooks.json']);
+    // Without the registration back to this checkout (or pointing elsewhere), no trust is inherited.
     expect(loadCodexConfig('/wt', memoryIo({ files })).sandboxMode).toBe('read-only');
+    expect(loadCodexConfig('/wt', memoryIo({ files: { ...files, '/repo/.git/worktrees/wt/gitdir': '/other/.git\n' } })).sandboxMode).toBe('read-only');
   });
 
   it('treats a trailing backslash as part of a POSIX trust path', () => {
@@ -194,11 +209,16 @@ describe('command line parsing', () => {
   });
 
   it('refuses authorization options it cannot read exactly', () => {
-    for (const argv of [['codex', '-a', 'bogus'], ['codex', '--sandbox', 'nope'], ['codex', '--approve-for-me']]) {
+    const refused = [['codex', '-a', 'bogus'], ['codex', '--sandbox', 'nope'], ['codex', '--approve-for-me'], ['codex', 'exec', '--ignore-rules'], ['codex', '--ignore-user-config'], ['codex', '--trust'], ['codex', '-p'], ['codex', '-c', 'novalue']];
+    for (const argv of refused) {
       expect(() => parseParentCommandLine(argv), argv.join(' ')).toThrow(ConfigError);
     }
-    expect(() => darwinArgv('/usr/local/bin/codex -s danger-full-access')).toThrow(ConfigError);
-    expect(darwinArgv('/usr/local/bin/codex exec hello')).toEqual(['/usr/local/bin/codex', 'exec', 'hello']);
+    expect(parseParentCommandLine(['codex', '--strict-config', 'exec']).exec).toBe(true);
+  });
+
+  it('refuses a real parent command line that is not an exact Codex argv', () => {
+    // The test runner is not a Codex process, and only Linux exposes an exact argv.
+    expect(() => nodeConfigIo().parentArgv()).toThrow(ConfigError);
   });
 
   it.runIf(posix)('lists only regular rule files', () => {
@@ -207,6 +227,8 @@ describe('command line parsing', () => {
     symlinkSync(path.join(dir, 'a.rules'), path.join(dir, 'b.rules'));
     expect(nodeConfigIo().listFiles(dir)).toEqual(['a.rules']);
     expect(nodeConfigIo().listFiles(path.join(dir, 'missing'))).toEqual([]);
+    // A file where the rules folder should be is invalid, not empty.
+    expect(() => nodeConfigIo().listFiles(path.join(dir, 'a.rules'))).toThrow(ConfigError);
     rmSync(dir, { recursive: true, force: true });
   });
 });

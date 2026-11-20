@@ -204,7 +204,7 @@ describe.runIf(posix)('Codex hooks', () => {
   it('refuses required hooks it cannot load and plugin hooks of an unverifiable installation', async () => {
     const required = adapter({ '/etc/codex/requirements.toml': '[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = "prompt"\n' });
     expect(await required.loadPolicy(ctx())).toMatchObject({ error: expect.stringContaining('required hook') });
-    const plugin = adapter({ '/home/u/.codex/config.toml': '[plugins."tool@market"]\nenabled = true\n', '/home/u/.codex/plugins/cache/market/tool/1.0.0/hooks/hooks.json': '{}' });
+    const plugin = adapter({ '/home/u/.codex/config.toml': '[plugins."tool@market"]\nenabled = true\n' });
     expect(await plugin.loadPolicy(ctx())).toMatchObject({ error: expect.stringContaining('active installation') });
   });
 
@@ -424,10 +424,12 @@ describe.runIf(posix)('sandbox mode × tool', () => {
     // env -S splits only its value; later words stay separate argv words.
     expect((await decide('danger-full-access', bash("env -S rm '#' -rf x"))).decision.kind).toBe('ask');
     expect((await decide('danger-full-access', bash("env -S 'ls $X'"), blocked)).decision.kind).toBe('ask');
+    // GNU env also splits on vertical tab and form feed, which are not reproduced.
+    expect((await decide('danger-full-access', bash("env -S 'blocked\vnow'"), blocked)).decision.kind).toBe('ask');
   });
 
   it('asks when run-time expansion could reach a rule or the forced-rm check', async () => {
-    for (const cmd of ['rm $FLAGS x', 'rm -* x', '$CMD -rf x', 'git $SUB']) {
+    for (const cmd of ['rm $FLAGS x', 'rm -* x', '$CMD -rf x', 'git $SUB', 'git ~/x', '~/bin/git push']) {
       expect((await decide('danger-full-access', bash(cmd), { '/home/u/.codex/rules/default.rules': 'prefix_rule(pattern=["git", "push"], decision="prompt")\n' })).decision.kind, cmd).toBe('ask');
     }
     expect((await decide('danger-full-access', bash('echo $HOME'))).decision).toEqual({ kind: 'allow' });
@@ -450,6 +452,9 @@ describe.runIf(posix)('sandbox mode × tool', () => {
   it('lets the turn metadata narrow the sandbox mode, never widen it', async () => {
     expect((await policyOf(adapter({}), ctx({ sandboxMode: 'danger-full-access' }))).bashContainment).toMatchObject({ mode: 'sandbox', readOnly: true });
     expect((await policyOf(adapter({}, { argv: ['codex', '-s', 'danger-full-access'] }), ctx({ sandboxMode: 'read-only' }))).bashContainment).toMatchObject({ readOnly: true });
+    // A narrowed mode the requirements do not allow falls to an allowed one below it.
+    const req = adapter({ '/etc/codex/requirements.toml': 'allowed_sandbox_modes = ["read-only", "danger-full-access"]\n' }, { argv: ['codex', '-s', 'danger-full-access'] });
+    expect((await policyOf(req, ctx({ sandboxMode: 'workspace-write' }))).bashContainment).toMatchObject({ mode: 'sandbox', readOnly: true });
   });
 
   it('fails the load when a listed rule file disappears', async () => {
