@@ -632,6 +632,38 @@ describe('QuickJsSandbox: out of memory is fatal', () => {
     const { outcome } = await run('return "x".repeat(1e9).length;', { memoryBytes: MEMORY });
     expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError', message: 'out of memory' } });
   });
+
+  it('(5) delivers the logs and calls made before the refused growth, in order, while the parent is slow to read', async () => {
+    const lines = 4_000;
+    const pad = 'p'.repeat(200);
+    const logs: string[] = [];
+    const calls: string[] = [];
+    let stalled = false;
+    const outcome = await new QuickJsSandbox().run(
+      `for (let i = 0; i < ${lines}; i++) console.log("line " + i + "${pad}"); read({ path: "before-oom" }); let a = []; ${objectBomb}`,
+      {
+        timeoutMs: 10_000,
+        memoryBytes: MEMORY,
+        signal: new AbortController().signal,
+        onCall: (tool) => {
+          calls.push(tool);
+          return Promise.resolve(ok(null));
+        },
+        onLog: (_level, text) => {
+          // The parent stops reading for a moment, so the child's output backs up while the script fills the heap.
+          if (!stalled) {
+            stalled = true;
+            const until = Date.now() + 300;
+            while (Date.now() < until);
+          }
+          logs.push(text);
+        },
+      },
+    );
+    expect(failure(outcome)).toMatchObject({ kind: 'oom', error: { name: 'InternalError' } });
+    expect(logs).toEqual(Array.from({ length: lines }, (_, i) => `line ${i}${pad}`));
+    expect(calls).toEqual(['read']);
+  });
 });
 
 describe('QuickJsSandbox: reply buffering', () => {

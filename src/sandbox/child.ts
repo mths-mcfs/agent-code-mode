@@ -14,6 +14,7 @@
  */
 import { newQuickJSWASMModuleFromVariant, newVariant, type QuickJSContext, type QuickJSDeferredPromise, type QuickJSHandle, type QuickJSRuntime, type QuickJSSyncVariant, type QuickJSWASMModule } from 'quickjs-emscripten-core';
 import * as variantModule from '@jitl/quickjs-ng-wasmfile-release-sync';
+import { writeSync } from 'node:fs';
 import { z } from 'zod';
 import type { ChildMessage, SandboxLimits, StartMessage } from './protocol.js';
 
@@ -78,9 +79,30 @@ const ParentMessageSchema = z.discriminatedUnion('type', [
 ]);
 type IncomingMessage = z.infer<typeof ParentMessageSchema>;
 
-/** Writes the final message, outside the cap of `#send`, and exits once it is flushed. */
+const retryWait = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Writes one message to stdout and returns only once the pipe holds all of it. No message ever waits in this
+ * process, so exiting at any point, even from inside a refused memory growth, loses none written before. While the
+ * parent does not read, the child blocks here instead of queuing; the parent's deadline still ends the run.
+ */
+function writeMessage(message: ChildMessage): void {
+  const bytes = Buffer.from(`${JSON.stringify(message)}\n`, 'utf8');
+  let offset = 0;
+  while (offset < bytes.length) {
+    try {
+      offset += writeSync(1, bytes, offset);
+    } catch (err) {
+      if (!(err instanceof Error && 'code' in err && err.code === 'EAGAIN')) fatal(`could not write to the parent: ${err instanceof Error ? err.message : String(err)}`);
+      Atomics.wait(retryWait, 0, 0, 1);
+    }
+  }
+}
+
+/** Writes the final message and exits. */
 function exitWith(outcome: DoneOutcome): void {
-  process.stdout.write(`${JSON.stringify({ type: 'done', outcome } satisfies ChildMessage)}\n`, () => process.exit(0));
+  writeMessage({ type: 'done', outcome });
+  process.exit(0);
 }
 
 function fatal(message: string): never {
@@ -494,7 +516,7 @@ class VmRun {
       } else {
         const id = this.#nextId++;
         this.#pending.set(id, deferred);
-        this.#send({ type: 'call', id, tool, args });
+        writeMessage({ type: 'call', id, tool, args });
       }
       return handle;
     });
@@ -525,11 +547,11 @@ class VmRun {
       const bytes = Buffer.byteLength(text, 'utf8') + 1;
       if (this.#logBytes + bytes > this.#limits.maxLogBytes) {
         this.#logCapped = true;
-        this.#send({ type: 'log', level: 'warn', text: `[console output truncated: the limit of ${this.#limits.maxLogBytes} bytes was reached]` });
+        writeMessage({ type: 'log', level: 'warn', text: `[console output truncated: the limit of ${this.#limits.maxLogBytes} bytes was reached]` });
         return;
       }
       this.#logBytes += bytes;
-      this.#send({ type: 'log', level, text });
+      writeMessage({ type: 'log', level, text });
     });
   }
 
@@ -600,14 +622,6 @@ class VmRun {
     }
     const oom = /out of memory/i.test(message);
     this.#finish({ ok: false, kind: oom ? 'oom' : 'error', error: { name: oom ? 'InternalError' : 'SandboxError', message: oom ? 'out of memory' : message.slice(0, MAX_ERROR_CHARS) } });
-  }
-
-  /** Writes one message, or ends the run when the bytes queued on stdout (not read by the parent yet) would pass the cap. */
-  #send(message: ChildMessage): void {
-    const line = `${JSON.stringify(message)}\n`;
-    const cap = this.#limits.maxPendingOutputBytes;
-    if (process.stdout.writableLength + Buffer.byteLength(line, 'utf8') <= cap) process.stdout.write(Buffer.from(line, 'utf8'));
-    else this.#finish({ ok: false, kind: 'oom', error: { name: 'OutputBufferFull', message: `messages the parent has not read yet exceeded ${cap} bytes` } });
   }
 
   /**
