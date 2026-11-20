@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "sh-syntax": "^0.8.7",
     "zod": "^4.6.7"
   },
   "devDependencies": {
