@@ -33,8 +33,6 @@ export interface SandboxLimits {
   readonly maxResultChars: number;
   /** Maximum length of the JSON-serialized arguments of one call, in characters. */
   readonly maxArgsChars: number;
-  /** Accepted but unused: the child writes each message synchronously, so nothing queues on its stdout. */
-  readonly maxPendingOutputBytes: number;
 }
 
 /** First message of a run: what to execute and with which limits. */

@@ -11,7 +11,6 @@ const LIMITS: SandboxLimits = {
   maxLogLineChars: 50,
   maxResultChars: 500,
   maxArgsChars: 200,
-  maxPendingOutputBytes: 10_000,
 };
 
 function setup(onCall?: (tool: string, args: unknown) => Promise<CallReply>, maxTotalBytes = 100_000, deadline = Infinity) {

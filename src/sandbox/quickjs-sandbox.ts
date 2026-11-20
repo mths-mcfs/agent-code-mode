@@ -55,8 +55,6 @@ const DEFAULTS = {
 
 /** Most bytes the child may send in one run (calls, logs and the outcome), unless one frame needs more; past it the run ends with outcome `oom`. */
 const MAX_CHILD_OUTPUT_BYTES = 64 * 1024 * 1024;
-/** Most bytes of messages the child may queue on its stdout while the parent has not read them. */
-const CHILD_PENDING_OUTPUT_BYTES = 64 * 1024 * 1024;
 /** Largest `start` message: the longest accepted script, JSON-escaped, plus the limits. */
 const MAX_START_BYTES = 6 * MAX_CODE_CHARS + 64 * 1024;
 
@@ -213,7 +211,7 @@ export class QuickJsSandbox implements Sandbox {
     const startedAt = performance.now();
     if (opts.signal.aborted) return Promise.resolve(killedOutcome('the run was stopped before the script started'));
     const o = this.#options;
-    const sized = {
+    const limits: SandboxLimits = {
       memoryBytes: positive(opts.memoryBytes, DEFAULT_SANDBOX_MEMORY_BYTES),
       stackBytes: positive(o.stackBytes, DEFAULTS.stackBytes),
       maxCalls: positive(o.maxCalls, DEFAULTS.maxCalls),
@@ -225,8 +223,7 @@ export class QuickJsSandbox implements Sandbox {
     const timeoutMs = positive(opts.timeoutMs, 1);
     const deadline = startedAt + timeoutMs;
     // Each string field is bounded in characters; JSON escaping turns one character into at most 6 bytes.
-    const maxFrameBytes = 6 * Math.max(sized.maxArgsChars, sized.maxResultChars, sized.maxLogLineChars + 200) + 64 * 1024;
-    const limits: SandboxLimits = { ...sized, maxPendingOutputBytes: Math.max(CHILD_PENDING_OUTPUT_BYTES, maxFrameBytes) };
+    const maxFrameBytes = 6 * Math.max(limits.maxArgsChars, limits.maxResultChars, limits.maxLogLineChars + 200) + 64 * 1024;
 
     let execArgv: string[];
     try {

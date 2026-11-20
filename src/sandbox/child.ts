@@ -58,7 +58,6 @@ const LimitsSchema = z.strictObject({
   maxLogLineChars: int,
   maxResultChars: int,
   maxArgsChars: int,
-  maxPendingOutputBytes: int,
 });
 const BindingErrorSchema = z.strictObject({
   name: z.enum(['PermissionDenied', 'ToolError']),
@@ -82,9 +81,8 @@ type IncomingMessage = z.infer<typeof ParentMessageSchema>;
 const retryWait = new Int32Array(new SharedArrayBuffer(4));
 
 /**
- * Writes one message to stdout and returns only once the pipe holds all of it. No message ever waits in this
- * process, so exiting at any point, even from inside a refused memory growth, loses none written before. While the
- * parent does not read, the child blocks here instead of queuing; the parent's deadline still ends the run.
+ * Writes a complete message to stdout before returning. The child can then exit during a memory growth
+ * failure without dropping earlier messages. If the pipe is full, the parent can still enforce its deadline.
  */
 function writeMessage(message: ChildMessage): void {
   const bytes = Buffer.from(`${JSON.stringify(message)}\n`, 'utf8');
