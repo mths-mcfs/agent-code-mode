@@ -293,19 +293,36 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
         error = {
           kind: 'internal',
           name: 'TransactionNotFinalized',
-          message: 'some writes were still running after the script ended, so the transaction could not be finalized; it is rolled back once they end',
+          message: 'the transaction could not be finalized because some writes were still running after the script ended',
         };
       } else {
+        const journal = tx;
+        const finalizing = Promise.resolve().then(() => journal.dispose());
         try {
-          await tx.dispose();
+          // Bounded like the rest of the run: the script's deadline plus the stop grace, and cancellation.
+          const r = await bounded(() => finalizing, { signal: controller.signal, ms: deadline + graceMs - now() });
           finalized = true;
+          if (!r.done) {
+            const why = r.why === 'aborted' ? 'the run was cancelled' : 'the run reached its time limit';
+            error = {
+              kind: 'internal',
+              name: 'TransactionIndeterminate',
+              message: `${why} while the transaction was being finalized; the outcome is not known yet`,
+            };
+            warnings.push('the writes of this run are kept if the finalization still completes, and rolled back if it fails.');
+            // Not a rollback: the finalization is left to end, and only a failed commit is undone.
+            void finalizing.catch((err: unknown) => {
+              if (err instanceof TransactionFinalizeError && err.committed) return undefined;
+              return journal.rollback();
+            }).catch(() => undefined);
+          }
         } catch (err) {
           if (err instanceof TransactionFinalizeError && err.committed) {
             finalized = true;
             error = { kind: 'internal', name: 'TransactionIndeterminate', message: err.message };
             warnings.push('the writes of this run are on disk and were not rolled back, but they may not survive a power loss or crash.');
           } else {
-            error = { kind: 'internal', name: 'TransactionNotFinalized', message: `the transaction could not be finalized and is rolled back: ${errorMessage(err)}` };
+            error = { kind: 'internal', name: 'TransactionNotFinalized', message: `the transaction could not be finalized: ${errorMessage(err)}` };
           }
         }
       }

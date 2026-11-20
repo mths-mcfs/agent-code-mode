@@ -14,13 +14,12 @@ import type {
   ToolRuntime,
   Transaction,
 } from '../core/types.js';
-import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
+import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace, type MatchHow } from './edit-match.js';
 import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
-import { containmentUnavailableReason } from './sandbox.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
 
 /** Default number of lines `read` returns. */
@@ -96,14 +95,23 @@ class MetaStore {
 }
 
 /**
- * Literal paths from protected patterns that the OS sandbox can enforce:
- * patterns without wildcards, and `dir/**` patterns as `dir`.
+ * Paths the OS sandbox denies writing, covering every protected pattern:
+ * a literal pattern as itself, `dir/**` as `dir`, and any other wildcard
+ * pattern as the directory its literal prefix names (more than the pattern
+ * protects, never less). Throws `containment-unavailable` for a pattern with
+ * no absolute directory prefix, rather than running a command that could
+ * write what the pattern protects.
  */
 function sandboxDenyWrite(patterns: readonly string[]): string[] {
   const out: string[] = [];
   for (const p of patterns) {
     const base = p.endsWith('/**') ? p.slice(0, -3) : p;
-    if (!/[*?[]/.test(base) && path.isAbsolute(base)) out.push(base);
+    const wild = base.search(/[*?[]/);
+    const literal = wild === -1 ? base : base.slice(0, base.lastIndexOf('/', wild));
+    if (!path.isAbsolute(literal) || path.dirname(literal) === literal) {
+      throw new ToolError('containment-unavailable', `the bash sandbox cannot enforce the protected path pattern ${p}`);
+    }
+    if (!out.includes(literal)) out.push(literal);
   }
   return out;
 }
@@ -171,9 +179,6 @@ export class NodeToolRuntime implements ToolRuntime {
   ): Promise<PreparedCall> {
     switch (call.tool) {
       case 'bash': {
-        if (findBash() === null) {
-          throw new ToolError('tool-error', process.platform === 'win32' ? 'bash requires Git Bash, which was not found' : 'bash was not found');
-        }
         let cwd = jail.cwd;
         if (call.args.cwd !== undefined) {
           cwd = await jail.resolve(call.args.cwd);
@@ -182,21 +187,19 @@ export class NodeToolRuntime implements ToolRuntime {
           if (!st.isDirectory()) throw new ToolError('invalid-args', `bash cwd ${call.args.cwd} is not a directory`);
         }
         // What hooks see is exactly what runs: another cwd becomes part of the command.
-        const command = cwd === jail.cwd ? call.args.command : `cd -- ${shellQuote(cwd)} && ${call.args.command}`;
+        // A cd that fails ends the whole command, whatever operators the command uses.
+        const command = cwd === jail.cwd ? call.args.command : `cd -- ${shellQuote(cwd)} || exit 1\n${call.args.command}`;
         const timeoutMs = Math.min(call.args.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
         const containment = policy.bashContainment;
         assertContainmentShape(containment);
-        if (containment.mode === 'sandbox') {
-          const reason = await containmentUnavailableReason();
-          if (reason !== null) throw new ToolError('containment-unavailable', reason);
-        }
+        const denyWrite = containment.mode === 'sandbox' && !containment.readOnly ? sandboxDenyWrite(jail.protectedPaths) : [];
         const prepared: PreparedCallOf<'bash'> = {
           id: call.id,
           tool: 'bash',
           args: { command, timeoutMs },
           effect: { command, cwd: jail.cwd, timeoutMs, containment },
         };
-        this.#meta.put(prepared, meta(jail.cwd, sandboxDenyWrite(jail.protectedPaths)));
+        this.#meta.put(prepared, meta(jail.cwd, denyWrite));
         return prepared;
       }
       case 'read': {
@@ -244,10 +247,13 @@ export class NodeToolRuntime implements ToolRuntime {
         if (call.args.oldString === call.args.newString) {
           throw new ToolError('invalid-args', 'oldString and newString are the same; the edit would change nothing');
         }
-        const outcome = applySearchReplace(text, call.args.oldString, call.args.newString, call.args.replaceAll === true);
+        const outcome = applySearchReplace(text, call.args.oldString, call.args.newString, call.args.replaceAll === true, MAX_FILE_BYTES);
         if (!outcome.ok) {
-          const code = outcome.kind === 'not-found' ? 'not-found' : 'invalid-args';
-          throw new ToolError(code, `${m.display}: ${outcome.message}`);
+          // Nothing of the file's content is shown: the call is not authorized yet.
+          if (outcome.kind === 'not-found') {
+            throw new ToolError('not-found', `${m.display}: search text not found; read the file and write oldString from what is there`);
+          }
+          throw new ToolError(outcome.kind === 'too-large' ? 'tool-error' : 'invalid-args', `${m.display}: ${outcome.message}`);
         }
         const prepared: PreparedCallOf<'edit'> = {
           id: call.id,
@@ -267,7 +273,7 @@ export class NodeToolRuntime implements ToolRuntime {
         return prepared;
       }
       case 'grep': {
-        const absRoot = await jail.resolve(call.args.path ?? '.');
+        const absRoot = await jail.resolveSearchRoot(call.args.path ?? '.');
         await this.#assertExists(absRoot, call.args.path ?? '.');
         const ignoreCase = call.args.ignoreCase ?? false;
         compileGrep(call.args.pattern, ignoreCase);
@@ -283,7 +289,7 @@ export class NodeToolRuntime implements ToolRuntime {
         return prepared;
       }
       case 'glob': {
-        const absRoot = await jail.resolve(call.args.path ?? '.');
+        const absRoot = await jail.resolveSearchRoot(call.args.path ?? '.');
         const st = await this.#assertExists(absRoot, call.args.path ?? '.');
         if (!st.isDirectory()) throw new ToolError('invalid-args', `glob path ${call.args.path ?? '.'} is not a directory`);
         normalizeGlob(call.args.pattern, absRoot);
@@ -316,8 +322,13 @@ export class NodeToolRuntime implements ToolRuntime {
     return readRegularFile(abs, MAX_FILE_BYTES);
   }
 
-  #metaOf(prepared: PreparedCall, fallbackPath: string): CallMeta {
-    return this.#meta.take(prepared) ?? { root: path.dirname(fallbackPath), display: fallbackPath, denyWrite: [] };
+  /** What prepare recorded for the call; a call this runtime did not prepare (or already committed) is refused. */
+  #metaOf(prepared: PreparedCall): CallMeta {
+    const meta = this.#meta.take(prepared);
+    if (meta === undefined) {
+      throw new ToolError('tool-error', `this ${prepared.tool} call was not prepared by this tool runtime (or was already committed); prepare it again`);
+    }
+    return meta;
   }
 
   async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
@@ -332,24 +343,27 @@ export class NodeToolRuntime implements ToolRuntime {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before commit');
     switch (prepared.tool) {
       case 'bash': {
-        const m = this.#metaOf(prepared, prepared.effect.cwd);
+        const m = this.#metaOf(prepared);
         return runBash(prepared.effect, signal, {
           ...(this.#opts.bashOutputCapBytes !== undefined ? { outputCapBytes: this.#opts.bashOutputCapBytes } : {}),
           denyWrite: m.denyWrite,
         });
       }
       case 'read':
+        this.#metaOf(prepared);
         return this.#commitRead(prepared);
       case 'write':
       case 'edit':
         return this.#commitWrite(prepared, signal, tx);
       case 'grep': {
+        const { root } = this.#metaOf(prepared);
         await assertDirUnchanged(prepared.effect.absRoot);
-        return runGrep(prepared.effect, this.#metaOf(prepared, prepared.effect.absRoot).root, signal, this.#opts.grepFileBudgetMs);
+        return runGrep(prepared.effect, root, signal, this.#opts.grepFileBudgetMs);
       }
       case 'glob': {
+        const { root } = this.#metaOf(prepared);
         await assertDirUnchanged(prepared.effect.absRoot);
-        return runGlob(prepared.effect, this.#metaOf(prepared, prepared.effect.absRoot).root, signal);
+        return runGlob(prepared.effect, root, signal);
       }
     }
   }
@@ -399,7 +413,7 @@ export class NodeToolRuntime implements ToolRuntime {
       identity: m.identity,
       ...(tx ? { beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs) } : {}),
     });
-    tx?.written(absPath, nextHash);
+    tx?.written(absPath, nextHash, outcome.createdDirs);
     if (prepared.tool === 'write') return { path: absPath, created: outcome.before === null, diff: prepared.effect.diff };
     return {
       path: absPath,

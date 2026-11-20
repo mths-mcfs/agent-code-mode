@@ -61,7 +61,7 @@ export interface EditApplied {
 
 export interface EditMiss {
   ok: false;
-  kind: "empty" | "not-found" | "ambiguous";
+  kind: "empty" | "not-found" | "ambiguous" | "too-large";
   /** Complete, model-readable explanation, without the file name. */
   message: string;
 }
@@ -181,14 +181,18 @@ function leadingWhitespace(value: string): string {
  * extrapolated from the step between two matched depths, and failing that keeps its extra
  * indentation on top of the nearest known depth.
  */
-function reindentLike(replaceLines: string[], searchLines: string[], fileLines: string[]): string[] {
+function reindentLike(replaceLines: string[], searchLines: string[], fileLines: string[]): string[] | null {
   const known = new Map<string, string>();
   for (let k = 0; k < searchLines.length; k++) {
     const searchLine = searchLines[k] ?? "";
     const fileLine = fileLines[k] ?? "";
     if (searchLine.trim() === "" || fileLine.trim() === "") continue;
     const indent = leadingWhitespace(searchLine);
-    if (!known.has(indent)) known.set(indent, leadingWhitespace(fileLine));
+    const fileIndent = leadingWhitespace(fileLine);
+    const seen = known.get(indent);
+    // One indent of the search standing for two of the file: no translation is right for both.
+    if (seen !== undefined && seen !== fileIndent) return null;
+    known.set(indent, fileIndent);
   }
   if (known.size === 0 || [...known].every(([from, to]) => from === to)) return replaceLines;
 
@@ -250,7 +254,7 @@ const RUNGS: Rung[] = [
   { how: "punctuation", normalize: (line) => foldPunctuation(line).trim(), reindent: true },
 ];
 
-function findLineMatches(fileNorm: string[], wanted: string[]): number[] {
+function findLineMatches(fileNorm: string[], wanted: string[], overlapping: boolean): number[] {
   const hits: number[] = [];
   const n = wanted.length;
   const first = wanted[0];
@@ -265,7 +269,8 @@ function findLineMatches(fileNorm: string[], wanted: string[]): number[] {
     }
     if (same) {
       hits.push(i);
-      i += n - 1; // matches may not overlap
+      // Replacements may not overlap; counting places for uniqueness, they may.
+      if (!overlapping) i += n - 1;
     }
   }
   return hits;
@@ -279,10 +284,16 @@ export function applySearchReplace(
   search: string,
   replace: string,
   replaceAll: boolean,
+  maxResultLength = Number.MAX_SAFE_INTEGER,
 ): EditOutcome {
   if (!search) {
     return { ok: false, kind: "empty", message: "the search text is empty" };
   }
+  const tooLarge = (): EditMiss => ({
+    ok: false,
+    kind: "too-large",
+    message: `the edited file would be longer than ${maxResultLength} characters`,
+  });
 
   // Rung 1: the text exactly as written.
   let exact = occurrences(text, search);
@@ -313,10 +324,14 @@ export function applySearchReplace(
   let fileLines: FileLine[] | undefined;
   const linesOfFile = (): FileLine[] => (fileLines ??= splitLines(text));
 
+  // A second occurrence overlapping the first still names another place.
+  const overlap = exact.length === 1 && !replaceAll ? text.indexOf(exactSearch, (exact[0] ?? 0) + 1) : -1;
+  if (overlap !== -1) exact.push(overlap);
   if (exact.length > 1 && !replaceAll) {
     return ambiguous(exact.map((offset) => lineNumberAt(linesOfFile(), offset)));
   }
   if (exact.length > 0) {
+    if (text.length + exact.length * (exactReplace.length - exactSearch.length) > maxResultLength) return tooLarge();
     return { ok: true, text: text.split(exactSearch).join(exactReplace), how, count: exact.length, matched: exactSearch };
   }
 
@@ -347,7 +362,7 @@ export function applySearchReplace(
     const wanted = searchLines.map(rung.normalize);
     // A search that normalises to nothing would match every blank line.
     if (wanted.every((line) => line === "")) continue;
-    const hits = findLineMatches(bodies.map(rung.normalize), wanted);
+    const hits = findLineMatches(bodies.map(rung.normalize), wanted, !replaceAll);
     if (hits.length === 0) continue;
     const label = rung.how;
     if (hits.length > 1 && !replaceAll) {
@@ -359,6 +374,7 @@ export function applySearchReplace(
 
     const pieces: string[] = [];
     let cursor = 0;
+    let length = 0;
     let matched: string | undefined;
     for (const index of hits) {
       const firstLine = file[index];
@@ -367,10 +383,24 @@ export function applySearchReplace(
       const lines = rung.reindent
         ? reindentLike(replaceLines, searchLines, bodies.slice(index, index + searchLines.length))
         : replaceLines;
-      pieces.push(text.slice(cursor, firstLine.start), lines.join(eol));
+      if (lines === null) {
+        return {
+          ok: false,
+          kind: "ambiguous",
+          message:
+            `search text matches at line ${index + 1} when ${HOW_LABEL[label]} is ignored, but one indentation of oldString ` +
+            "stands for two different indentations of the file there. Write oldString with the file's indentation.",
+        };
+      }
+      const before = text.slice(cursor, firstLine.start);
+      const replaced = lines.join(eol);
+      length += before.length + replaced.length;
+      if (length > maxResultLength) return tooLarge();
+      pieces.push(before, replaced);
       cursor = coversLastEnding ? lastLine.end : lastLine.bodyEnd;
       matched ??= text.slice(firstLine.start, cursor);
     }
+    if (length + text.length - cursor > maxResultLength) return tooLarge();
     pieces.push(text.slice(cursor));
     return { ok: true, text: pieces.join(""), how: label, count: hits.length, matched: matched ?? "" };
   }

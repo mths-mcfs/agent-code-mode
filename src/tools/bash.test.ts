@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
+import { bootstrapEnv } from './bash.js';
 import { NodeToolRuntime } from './runtime.js';
 import { containmentUnavailableReason } from './sandbox.js';
 
@@ -107,6 +108,16 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     expect(r.stdout).toBe('a'.repeat(1000));
     expect(r.stderr).toBe('b'.repeat(1000));
     expect(r.truncated).toBe(true);
+  });
+
+  it('does not report a timeout when the shell exited and only its output was draining', async () => {
+    const r = await bash('sleep 5 & exit 0', { timeoutMs: 100 });
+    expect([r.exitCode, r.timedOut]).toEqual([0, false]);
+  });
+
+  it('gives the sandbox bootstrap shell no startup files, exported functions or shell options', () => {
+    const env = bootstrapEnv({ PATH: '/bin', BASH_ENV: '/x', ENV: '/y', SHELLOPTS: 'xtrace', BASHOPTS: 'extglob', 'BASH_FUNC_example%%': 'unused' });
+    expect(env).toEqual({ PATH: '/bin' });
   });
 
   it('refuses a containment with a relative writable root', async () => {

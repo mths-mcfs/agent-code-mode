@@ -124,11 +124,11 @@ export function unifiedDiff(file: string, before: string | null, after: string):
   const a = before === null ? [] : splitLines(before);
   const b = splitLines(after);
   const ops = editScript(a, b);
-  const header = `--- ${before === null ? '/dev/null' : `a/${file}`}\n+++ b/${file}\n`;
   if (ops.every((op) => op.kind === ' ')) {
-    // Only possible when before is null and after is empty.
-    return `${header}`;
+    // Only possible when before is null and after is empty: a creation has no hunk, so git's header says it.
+    return `diff --git ${quotePath(`a/${file}`)} ${quotePath(`b/${file}`)}\nnew file mode 100644\n`;
   }
+  const header = `--- ${before === null ? '/dev/null' : quotePath(`a/${file}`)}\n+++ ${quotePath(`b/${file}`)}\n`;
 
   let out = header;
   let i = 0;
@@ -174,5 +174,25 @@ export function unifiedDiff(file: string, before: string | null, after: string):
 
 /** Diff header for a binary change. */
 export function binaryDiff(file: string, existed: boolean): string {
-  return `--- ${existed ? `a/${file}` : '/dev/null'}\n+++ b/${file}\nBinary files differ\n`;
+  return `--- ${existed ? quotePath(`a/${file}`) : '/dev/null'}\n+++ ${quotePath(`b/${file}`)}\nBinary files differ\n`;
+}
+
+const ESCAPES: Record<string, string> = { '"': '\\"', '\\': '\\\\', '\t': '\\t', '\n': '\\n', '\r': '\\r', '\b': '\\b', '\f': '\\f', '\v': '\\v', '\x07': '\\a' };
+
+/**
+ * A path as git writes it in a patch header: unchanged when plain, else in
+ * double quotes with C escapes, so a quote, a backslash, a control character
+ * or a trailing space cannot change which file the header names.
+ */
+export function quotePath(p: string): string {
+  if (!/["\\\x00-\x1f\x7f]|\s$/.test(p)) return p;
+  let out = '';
+  for (const ch of p) {
+    const code = ch.charCodeAt(0);
+    const escaped = ESCAPES[ch];
+    if (escaped !== undefined) out += escaped;
+    else if (code < 0x20 || code === 0x7f) out += `\\${code.toString(8).padStart(3, '0')}`;
+    else out += ch;
+  }
+  return `"${out}"`;
 }

@@ -368,6 +368,69 @@ describe('runScript', () => {
     expect(d.tools.read('a.txt')).toBe('changed');
   });
 
+  /** A transaction whose finalization waits for `gate` and then ends as `end` says. */
+  function slowFinalization(d: ReturnType<typeof deps>, gate: Promise<void>, end: () => Promise<void>, onDispose = (): void => undefined) {
+    const rollbacks = vi.fn();
+    const begin = d.tools.beginTransaction.bind(d.tools);
+    d.tools.beginTransaction = () => {
+      const tx = begin();
+      const rollback = tx.rollback.bind(tx);
+      const dispose = tx.dispose.bind(tx);
+      tx.dispose = async () => {
+        onDispose();
+        await gate;
+        await end();
+        await dispose();
+      };
+      tx.rollback = () => (rollbacks(), rollback());
+      return tx;
+    };
+    return rollbacks;
+  }
+
+  it('stops waiting for a finalization that outlasts the run, and reports neither success nor a rollback', async () => {
+    const d = { ...deps({}, { 'a.txt': 'original' }), stopGraceMs: 20 };
+    let release = (): void => undefined;
+    const rollbacks = slowFinalization(d, new Promise<void>((r) => (release = r)), async () => undefined);
+    const result = await runScript({ code: script([{ tool: 'write', args: { path: 'a.txt', content: 'changed' } }]), transaction: true, timeoutMs: 50 }, d);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ kind: 'internal', name: 'TransactionIndeterminate' });
+    expect(result.error?.message).toContain('time limit');
+    expect(result.rolledBack).toBeUndefined();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rollbacks).not.toHaveBeenCalled();
+    expect(d.tools.read('a.txt')).toBe('changed');
+  });
+
+  it('rolls back once a finalization that outlasted the run fails to commit', async () => {
+    const d = { ...deps({}, { 'a.txt': 'original' }), stopGraceMs: 20 };
+    let release = (): void => undefined;
+    const rollbacks = slowFinalization(d, new Promise<void>((r) => (release = r)), async () => {
+      throw new TransactionFinalizeError(false, 'rename failed');
+    });
+    const result = await runScript({ code: script([{ tool: 'write', args: { path: 'a.txt', content: 'changed' } }]), transaction: true, timeoutMs: 50 }, d);
+    expect(result.error).toMatchObject({ kind: 'internal', name: 'TransactionIndeterminate' });
+    release();
+    await vi.waitFor(() => expect(rollbacks).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(d.tools.read('a.txt')).toBe('original'));
+  });
+
+  it('does not report success when the client cancels while the journal is being finalized', async () => {
+    const controller = new AbortController();
+    const d = deps({}, { 'a.txt': 'original' });
+    let release = (): void => undefined;
+    slowFinalization(d, new Promise<void>((r) => (release = r)), async () => undefined, () => controller.abort());
+    const result = await runScript(
+      { code: script([{ tool: 'write', args: { path: 'a.txt', content: 'changed' } }]), transaction: true, timeoutMs: 5_000 },
+      { ...d, signal: controller.signal },
+    );
+    release();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ kind: 'internal', name: 'TransactionIndeterminate' });
+    expect(result.error?.message).toContain('cancelled');
+  });
+
   it('fails and rolls back a successful script whose write is still running after the grace', async () => {
     const tools = new MemoryToolRuntime({ root: '/ws', commitDelayMs: 60, honorAbortInCommit: false });
     const sandbox: Sandbox = {

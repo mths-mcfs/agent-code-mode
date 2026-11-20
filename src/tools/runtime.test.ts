@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -375,12 +376,132 @@ describe.skipIf(IS_WINDOWS)('bash cwd', () => {
     const prepared = await prep('bash', { command: 'pwd', cwd: "it's here" });
     if (prepared.tool !== 'bash') throw new Error('unreachable');
     expect(prepared.effect.cwd).toBe(ws);
-    expect(prepared.effect.command).toBe(`cd -- '${ws}/it'\\''s here' && pwd`);
+    expect(prepared.effect.command).toBe(`cd -- '${ws}/it'\\''s here' || exit 1\npwd`);
     expect(prepared.args.command).toBe(prepared.effect.command);
     expect(prepared.effect.timeoutMs).toBe(120_000);
     const result = await rt.commit(prepared, new AbortController().signal);
     expect('stdout' in result && result.stdout.trim()).toBe(path.join(ws, "it's here"));
     const same = await prep('bash', { command: 'pwd', cwd: '.' });
     expect(same.tool === 'bash' && same.effect.command).toBe('pwd');
+  });
+
+  it('runs nothing of the command when its cwd is gone at commit', async () => {
+    mkdirSync(path.join(ws, 'gone'));
+    const prepared = await prep('bash', { command: 'echo first; echo second', cwd: 'gone' });
+    rmSync(path.join(ws, 'gone'), { recursive: true });
+    const result = await rt.commit(prepared, new AbortController().signal);
+    expect('exitCode' in result && [result.exitCode, result.stdout]).toEqual([1, '']);
+  });
+});
+
+describe('protected paths and policy metadata', () => {
+  it('refuses a write that would create a protected directory', async () => {
+    policy = { ...policy, protectedPaths: [path.join(ws, 'locked')] };
+    expect(await code(prep('write', { path: 'locked/inner/x.txt', content: 'x' }))).toBe('protected-path');
+    expect(existsSync(path.join(ws, 'locked'))).toBe(false);
+  });
+
+  it.skipIf(IS_WINDOWS)('protects the target of a protected literal path that is a link', async () => {
+    writeFileSync(path.join(ws, 'real.json'), '{}');
+    link(path.join(ws, 'real.json'), path.join(ws, 'config.json'));
+    policy = { ...policy, protectedPaths: [path.join(ws, 'config.json')] };
+    expect(await code(prep('write', { path: 'real.json', content: 'x' }))).toBe('protected-path');
+  });
+
+  it('refuses to commit a call it did not prepare', async () => {
+    const prepared = await prep('grep', { pattern: 'x' });
+    await rt.commit(prepared, new AbortController().signal);
+    expect(await code(rt.commit(prepared, new AbortController().signal))).toBe('tool-error');
+  });
+
+  it('refuses a sandboxed bash when a protected pattern has no directory the sandbox can deny', async () => {
+    policy = {
+      ...policy,
+      protectedPaths: ['**/.env'],
+      bashContainment: { mode: 'sandbox', readOnly: false, writableRoots: [ws], network: false },
+    };
+    await expect(prep('bash', { command: 'true' })).rejects.toMatchObject({ code: 'containment-unavailable', message: expect.stringContaining('**/.env') });
+  });
+});
+
+describe('file names', () => {
+  it('keeps leading spaces as part of the name', async () => {
+    await run('write', { path: ' spaced.txt', content: 'x' });
+    expect(readFileSync(path.join(ws, ' spaced.txt'), 'utf8')).toBe('x');
+    expect(existsSync(path.join(ws, 'spaced.txt'))).toBe(false);
+  });
+
+  it.skipIf(IS_WINDOWS)('writes a file whose name is close to the length limit', async () => {
+    const name = `${'n'.repeat(250)}.txt`;
+    await run('write', { path: name, content: 'x' });
+    expect(readFileSync(path.join(ws, name), 'utf8')).toBe('x');
+  });
+
+  it.skipIf(IS_WINDOWS)('refuses to search through a link given as the search path', async () => {
+    mkdirSync(path.join(ws, 'dir'));
+    link(path.join(ws, 'dir'), path.join(ws, 'alias'));
+    expect(await code(prep('grep', { pattern: 'x', path: 'alias' }))).toBe('invalid-args');
+    expect(await code(prep('glob', { pattern: '*', path: 'alias' }))).toBe('invalid-args');
+  });
+
+  it('shows none of the file when an edit does not match', async () => {
+    writeFileSync(path.join(ws, 'code.ts'), 'const token = "abc123";\nexport default token;\n');
+    const err = await prep('edit', { path: 'code.ts', oldString: 'const token = "abc124";', newString: 'x' }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ code: 'not-found' });
+    expect(String(err)).not.toContain('abc123');
+  });
+});
+
+describe('search filters', () => {
+  const grepFiles = async (args: ToolArgsMap['grep']): Promise<string[]> => {
+    const r = await run('grep', args);
+    return 'matches' in r ? r.matches.map((m) => path.relative(ws, m.file)) : [];
+  };
+
+  it('applies gitignore rules to names that begin with two dots', async () => {
+    writeFileSync(path.join(ws, '.gitignore'), '..cache\n');
+    writeFileSync(path.join(ws, '..cache'), 'hit\n');
+    writeFileSync(path.join(ws, 'kept.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit' })).toEqual(['kept.txt']);
+  });
+
+  it('keeps ignoring files a directory negation does not re-include', async () => {
+    mkdirSync(path.join(ws, 'logs'));
+    writeFileSync(path.join(ws, 'logs', '.gitignore'), '*.log\n!sub/\n');
+    mkdirSync(path.join(ws, 'logs', 'sub'));
+    writeFileSync(path.join(ws, 'logs', 'sub', 'x.log'), 'hit\n');
+    writeFileSync(path.join(ws, 'logs', 'sub', 'x.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit' })).toEqual([path.join('logs', 'sub', 'x.txt')]);
+  });
+
+  it('skips a .git file of a worktree', async () => {
+    writeFileSync(path.join(ws, '.git'), 'gitdir: hit\n');
+    writeFileSync(path.join(ws, 'a.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit' })).toEqual(['a.txt']);
+    const r = await run('glob', { pattern: '*' });
+    expect('files' in r && r.files).toEqual([path.join(ws, 'a.txt')]);
+  });
+
+  it('applies the glob filter to a file given as the path', async () => {
+    writeFileSync(path.join(ws, 'a.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit', path: 'a.txt', glob: '*.ts' })).toEqual([]);
+    expect(await grepFiles({ pattern: 'hit', path: 'a.txt', glob: '*.txt' })).toEqual(['a.txt']);
+  });
+
+  it('skips files that are not valid UTF-8', async () => {
+    writeFileSync(path.join(ws, 'latin1.txt'), Buffer.from([0x68, 0x69, 0x74, 0x0a, 0xe9, 0xff, 0x0a]));
+    writeFileSync(path.join(ws, 'utf8.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit' })).toEqual(['utf8.txt']);
+  });
+
+  it.skipIf(IS_WINDOWS || spawnSync('mkfifo', ['--help']).error !== undefined)('does not wait on a FIFO named .gitignore or written to', async () => {
+    spawnSync('mkfifo', [path.join(ws, '.gitignore')]);
+    spawnSync('mkfifo', [path.join(ws, 'pipe')]);
+    writeFileSync(path.join(ws, 'a.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit' })).toEqual(['a.txt']);
+    expect(await code(prep('write', { path: 'pipe', content: 'x' }))).toBe('invalid-args');
   });
 });
