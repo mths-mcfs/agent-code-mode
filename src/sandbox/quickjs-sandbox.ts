@@ -92,10 +92,8 @@ const ManifestSchema = z.object({ dependencies: z.record(packageName, z.string()
 type ProbedEntry = 'absent' | 'file' | 'other';
 
 /**
- * Classifies a path the child's Node may look up. `absent` (lstat fails with ENOENT) and `file` (a regular file that
- * is not a link) may be granted: neither can send a read elsewhere. Anything else is `other` and is never granted:
- * a link, dangling or not, could point at any file now or later, and a directory grant would cover its whole tree.
- * If Node does read such a path, it gets ERR_ACCESS_DENIED. Every read grant of a probed path goes through here.
+ * Classifies a path the child's Node may look up. A manifest may be a regular file, and an absent path may
+ * need a grant for Node's lookup. Links, directories and other unexpected entries must stay outside the grants.
  */
 function probeEntry(path: string): ProbedEntry {
   let stat: Stats;
@@ -116,11 +114,13 @@ function probeEntry(path: string): ProbedEntry {
 export function readGrants(from: string = here, packages: readonly string[] = CHILD_PACKAGES): { readonly dirs: string[]; readonly files: string[] } {
   const dirs = new Set([from]);
   const files = new Set<string>();
+  const excluded = new Set<string>();
   // The nearest package.json above the entry; the walk ends at the first path that exists in any form.
   for (let dir = from; ; dir = dirname(dir)) {
     const path = join(dir, 'package.json');
     const entry = probeEntry(path);
-    if (entry !== 'other') files.add(path);
+    if (entry === 'other') excluded.add(path);
+    else files.add(path);
     if (entry !== 'absent' || dirname(dir) === dir) break;
   }
   const visit = (start: string, name: string): void => {
@@ -134,13 +134,17 @@ export function readGrants(from: string = here, packages: readonly string[] = CH
         return;
       }
       // Not a package: Node's lookup goes on to the parent directory.
-      if (probeEntry(candidate) !== 'other') files.add(candidate);
+      if (probeEntry(candidate) === 'absent') files.add(candidate);
+      else excluded.add(candidate);
       if (dirname(dir) === dir) return;
     }
   };
   for (const name of packages) visit(from, name);
   // A grant inside a granted directory is redundant, and Node's permission tree can lose a shorter grant added after a longer one.
   const outside = (path: string): boolean => ![...dirs].some((dir) => path.startsWith(dir + sep));
+  if ([...excluded].some((path) => dirs.has(path) || !outside(path))) {
+    throw new SandboxUnavailableError('An unexpected lookup entry is covered by a sandbox directory grant');
+  }
   return { dirs: [...dirs].filter(outside), files: [...files].filter(outside) };
 }
 
@@ -301,7 +305,7 @@ export class QuickJsSandbox implements Sandbox {
     child.on('close', (exitCode, signal) => active.exited(exitCode, signal));
 
     const timer = setTimeout(() => active.timeOut(), Math.max(0, deadline - performance.now()));
-    if (!active.finished) {
+    if (!active.finished && !active.expired()) {
       // `start` has its own size limit; the reply quotas count only binding results. The writer checks the deadline.
       const start = Buffer.from(`${JSON.stringify({ type: 'start', code, timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), limits } satisfies ParentMessage)}\n`, 'utf8');
       if (start.length > MAX_START_BYTES) active.kill(`the script is larger than ${MAX_START_BYTES} bytes`);

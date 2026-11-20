@@ -145,6 +145,7 @@ export class ChildSession {
   exited(code: number | null, signal: string | null): void {
     if (this.#finished) return;
     if (code === OOM_EXIT_CODE && signal === null) {
+      if (this.expired()) return;
       return this.finish({ ok: false, kind: 'oom', error: { name: 'InternalError', message: 'out of memory: the script needed more memory than memoryBytes allows' } });
     }
     const how = signal !== null ? `signal ${signal}` : `code ${String(code)}`;

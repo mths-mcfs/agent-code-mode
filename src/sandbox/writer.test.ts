@@ -86,18 +86,26 @@ describe('BoundedWriter', () => {
     expect(writer.pendingBytes).toBe(0);
   });
 
-  it('writes nothing when the deadline passes while a reply is being serialized', () => {
+  it.each([
+    ['sizing', 1],
+    ['serializing', 2],
+  ] as const)('discards a reply under backpressure if the deadline passes while %s it', (_phase, readAtExpiry) => {
     const stream = new StalledStream();
     const clock = fakeClock();
     const writer = new BoundedWriter(stream, options(clock));
+    const initial = 'first reply\n';
+    expect(writer.write(initial)).toBe(true);
+    let reads = 0;
     const reply = {
       get content(): string {
-        clock.cross();
+        if (++reads === readAtExpiry) clock.cross();
         return 'late';
       },
     };
     expect(writer.writeJson(reply)).toBe(false);
-    expect(stream.written).toEqual([]);
+    expect(reads).toBe(readAtExpiry);
+    expect(stream.written).toEqual([initial]);
+    expect(writer.pendingBytes).toBe(stream.writableLength);
     expect(clock.expirations()).toBe(1);
   });
 

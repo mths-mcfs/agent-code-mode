@@ -54,13 +54,14 @@ export class BoundedWriter {
 
   /** Writes or queues `line`, counted against both caps. Returns false when the writer is closed, a cap was hit or the deadline passed. */
   write(line: string): boolean {
-    if (this.#closed) return false;
+    if (!this.#canWrite()) return false;
     const bytes = Buffer.byteLength(line, 'utf8');
     if (!this.#fits(bytes)) return false;
     // Buffers live outside the V8 heap, so pending replies do not count against the server's heap limit.
     const chunk = Buffer.from(line, 'utf8');
     this.#totalBytes += bytes;
     if (this.#waitingForDrain || this.#queue.length > 0) {
+      if (!this.#canWrite()) return false;
       this.#queue.push(chunk);
       this.#queuedBytes += bytes;
       return true;
@@ -70,10 +71,10 @@ export class BoundedWriter {
 
   /** Writes `value` as one JSON line, sized first so that a line over a cap is never built. */
   writeJson(value: unknown): boolean {
-    if (this.#closed) return false;
+    if (!this.#canWrite()) return false;
     const room = Math.min(this.#options.maxTotalBytes - this.#totalBytes, this.#options.maxPendingBytes - this.pendingBytes);
     const bytes = jsonBytes(value, room) + 1;
-    return this.#fits(bytes) && this.write(`${JSON.stringify(value)}\n`);
+    return this.#canWrite() && this.#fits(bytes) && this.write(`${JSON.stringify(value)}\n`);
   }
 
   /** Writes `chunk` outside both caps: the sandbox's `start` message, sent before any reply, whose size the caller limits. */
@@ -90,14 +91,17 @@ export class BoundedWriter {
 
   /** The single call of `stream.write`. */
   #emit(chunk: Buffer): boolean {
-    if (this.#closed || this.#stream.destroyed) return false;
-    if (this.#expired()) {
-      this.close();
-      this.#options.onExpired();
-      return false;
-    }
+    if (!this.#canWrite()) return false;
     if (!this.#stream.write(chunk)) this.#waitForDrain();
     return true;
+  }
+
+  #canWrite(): boolean {
+    if (this.#closed || this.#stream.destroyed) return false;
+    if (!this.#expired()) return true;
+    this.close();
+    this.#options.onExpired();
+    return false;
   }
 
   #expired(): boolean {

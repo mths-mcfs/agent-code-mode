@@ -393,6 +393,20 @@ describe('QuickJsSandbox: no ambient authority', () => {
       expect([...files, ...dirs]).not.toContain(probed);
     });
 
+    it('refuses a directory grant that covers an unexpected manifest entry', () => {
+      const { entry } = layout();
+      mkdirSync(join(entry, 'package.json'));
+      expect(() => readGrants(entry, [])).toThrow(SandboxUnavailableError);
+    });
+
+    it('omits a regular file found where a dependency directory was expected', () => {
+      const { entry } = layout();
+      const candidate = join(root, 'a', 'b', 'node_modules', 'dep');
+      mkdirSync(dirname(candidate), { recursive: true });
+      writeFileSync(candidate, 'not a package');
+      expect(readGrants(entry, ['dep']).files).not.toContain(candidate);
+    });
+
     it('never grants a node_modules lookup entry that is a link without a package, and still finds the package above it', () => {
       const { entry } = layout();
       const linked = join(root, 'a', 'b', 'node_modules', 'dep');

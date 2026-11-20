@@ -261,6 +261,12 @@ describe('ChildSession: hostile child messages', () => {
     expect(await killed(signalled.session)).toContain('signal SIGKILL');
   });
 
+  it('times out when the child exits with the out-of-memory code after the deadline', async () => {
+    const t = setup(undefined, 100_000, performance.now() - 1);
+    t.session.exited(OOM_EXIT_CODE, null);
+    expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'timeout', error: { name: 'Timeout' } });
+  });
+
   it('answers a throwing onCall with a tool error instead of crashing', async () => {
     const t = setup(() => {
       throw new Error('dispatcher bug');
