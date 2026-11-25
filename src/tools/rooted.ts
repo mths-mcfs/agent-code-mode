@@ -119,18 +119,34 @@ export const cwdAnchor: Anchor = (dir, fn) => {
     }
     return fn((name) => name);
   } finally {
-    if (orig !== undefined) returnToCwdIfItExists(orig);
+    leaveWorkspace(orig, dir.root);
   }
 };
 
-function returnToCwdIfItExists(dir: string): void {
-  try {
-    process.chdir(dir);
-  } catch {
-    return;
+let cwdLossReported = false;
+
+/**
+ * Returns to the cwd the block started from. When that directory is gone,
+ * the process moves to the file system root instead of staying inside the
+ * workspace, and says so once.
+ */
+function leaveWorkspace(orig: string | undefined, root: string): void {
+  if (orig !== undefined) {
+    try {
+      process.chdir(orig);
+      return;
+    } catch {
+      // Gone or renamed: fall through to the file system root.
+    }
   }
+  const top = path.parse(root).root;
+  process.chdir(top);
+  if (cwdLossReported) return;
+  cwdLossReported = true;
+  process.emitWarning(`the server's working directory ${orig ?? '(unknown)'} no longer exists; it now works from ${top}`, { code: 'ACM_CWD_LOST' });
 }
 
+/** Until a Windows backend lands (#28). */
 const windowsAnchor: Anchor = () => {
   throw new ToolError(
     'containment-unavailable',

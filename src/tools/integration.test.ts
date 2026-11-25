@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runScript } from '../core/run.js';
 import { FakeSandbox, StaticHostAdapter, makeContext } from '../testing/index.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 /** The real tool runtime behind the P0 dispatcher and run pipeline. */
 let base: string;
@@ -26,7 +27,7 @@ function deps(adapter = new StaticHostAdapter({ protectedPaths: [] })) {
 }
 
 describe('NodeToolRuntime in the run pipeline', () => {
-  it('commits writes and edits and reports the diff', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('commits writes and edits and reports the diff', async () => {
     const code = JSON.stringify([
       { tool: 'edit', args: { path: 'a.txt', oldString: 'alpha', newString: 'beta' } },
       { tool: 'write', args: { path: 'b/c.txt', content: 'new\n' } },
@@ -40,7 +41,7 @@ describe('NodeToolRuntime in the run pipeline', () => {
     expect(readFileSync(path.join(ws, 'a.txt'), 'utf8')).toBe('beta\n');
   });
 
-  it('rolls a transactional run back when a call is denied', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('rolls a transactional run back when a call is denied', async () => {
     const adapter = new StaticHostAdapter({
       protectedPaths: [],
       rules: [(p) => (p.tool === 'write' && p.effect.absPath.endsWith('denied.txt') ? { kind: 'deny', reason: 'no' } : undefined)],

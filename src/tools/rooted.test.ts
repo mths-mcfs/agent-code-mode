@@ -79,9 +79,37 @@ describe.each(anchors)('%s anchor', (_name, anchor) => {
   });
 });
 
+describe.skipIf(IS_WINDOWS)('working directory anchor when the server cwd disappears', () => {
+  it('moves the process to the file system root and reports it once, never staying in the workspace', async () => {
+    const before = process.cwd();
+    const serverCwd = path.join(base, 'server-cwd');
+    mkdirSync(serverCwd);
+    const warnings: Error[] = [];
+    const onWarning = (w: Error): void => {
+      if ('code' in w && w.code === 'ACM_CWD_LOST') warnings.push(w);
+    };
+    process.on('warning', onWarning);
+    process.chdir(serverCwd);
+    try {
+      cwdAnchor(rooted(ws, path.join(ws, 'a')), () => renameSync(serverCwd, `${serverCwd}-moved`));
+      expect(process.cwd()).toBe(path.parse(ws).root);
+      cwdAnchor(rooted(ws, path.join(ws, 'a')), () => undefined);
+      expect(process.cwd()).toBe(path.parse(ws).root);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.message).toContain(serverCwd);
+    } finally {
+      process.off('warning', onWarning);
+      process.chdir(before);
+    }
+  });
+});
+
 describe.skipIf(!IS_WINDOWS)('Windows', () => {
   it('refuses rooted operations with the reason', () => {
-    expect(() => within(rooted(ws, path.join(ws, 'a')), () => undefined)).toThrow(/not available on Windows/);
+    expect(() => within(rooted(ws, path.join(ws, 'a')), () => undefined)).toThrow(
+      'read, write, edit, grep and glob are not available on Windows: Node cannot open a file relative to a directory handle there',
+    );
   });
 
   it('refuses read, write, edit, grep and glob through the runtime', async () => {
@@ -107,16 +135,17 @@ const ATTACKER = `
 const fs = require('node:fs');
 const [ws, outside, counter] = process.argv.slice(1);
 const pause = new Int32Array(new SharedArrayBuffer(4));
-const hold = () => Atomics.wait(pause, 0, 0, Math.random() * 0.5);
+const hold = (ms) => Atomics.wait(pause, 0, 0, Math.random() * ms);
 fs.symlinkSync(outside + '/a', ws + '/a.lnk', 'dir');
 for (let swaps = 1; ; swaps++) {
   try {
     fs.renameSync(ws + '/a', ws + '/a.real');
     fs.renameSync(ws + '/a.lnk', ws + '/a');
-    hold();
+    hold(0.5);
     fs.renameSync(ws + '/a', ws + '/a.lnk');
     fs.renameSync(ws + '/a.real', ws + '/a');
-    hold();
+    // Longer in the real state, so calls still land inside under load and the test cannot pass vacuously.
+    hold(2);
   } catch {}
   if (swaps % 256 === 0) fs.writeFileSync(counter, String(swaps));
 }
@@ -159,7 +188,7 @@ describe.skipIf(IS_WINDOWS)('racing symlink swap', () => {
     expect(readdirSync(path.join(outside, 'a'))).toEqual(['f.txt']);
     const attackerSwaps = Number(readFileSync(counter, 'utf8'));
     const callsThatLandedInside = done.write + done.edit;
-    expect(attackerSwaps).toBeGreaterThan(1000);
+    expect(attackerSwaps).toBeGreaterThan(500);
     expect(callsThatLandedInside).toBeGreaterThan(0);
   });
 });

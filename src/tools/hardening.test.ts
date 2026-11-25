@@ -9,6 +9,7 @@ import type { PolicySnapshot, PreparedCall, SessionContext, ToolCall } from '../
 import { makeContext } from '../testing/context.js';
 import { FileTransaction, journalRoot, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 /**
  * One test per defect found by the correctness review of the first version:
@@ -173,7 +174,7 @@ describe.skipIf(IS_WINDOWS)('3. protected paths are checked on every path the re
 });
 
 describe('4. abort stops a write that already entered commit', () => {
-  it('refuses the rename after the signal aborted', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses the rename after the signal aborted', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const prepared = await prepWrite('f', 'new');
     const ac = new AbortController();
@@ -185,7 +186,7 @@ describe('4. abort stops a write that already entered commit', () => {
 });
 
 describe('5. concurrent commits on one path', () => {
-  it('lets only the first of two writes prepared against the same content succeed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('lets only the first of two writes prepared against the same content succeed', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const a = await prepWrite('f', 'first');
     const b = await prepWrite('f', 'second');
@@ -237,7 +238,7 @@ describe('7. a pathological grep pattern can be stopped', () => {
     writeFileSync(path.join(ws, 'f'), `${'a'.repeat(40)}!\n`);
   });
 
-  it('fails with a ToolError when the per-file budget runs out', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('fails with a ToolError when the per-file budget runs out', async () => {
     const budgeted = new NodeToolRuntime({ stateDir: path.join(base, 'state'), grepFileBudgetMs: 200 });
     const prepared = await budgeted.prepare({ id: 'g', tool: 'grep', args: { pattern: '(a+)+$' } }, ctx, policy);
     const started = Date.now();
@@ -250,7 +251,7 @@ describe('7. a pathological grep pattern can be stopped', () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
-  it('stops on abort', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('stops on abort', async () => {
     const prepared = await rt.prepare({ id: 'g', tool: 'grep', args: { pattern: '(a+)+$' } }, ctx, policy);
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
@@ -308,7 +309,7 @@ describe.skipIf(IS_WINDOWS)('8. path oracle: accepted iff the real path is insid
 });
 
 describe('commit works on the copy the dispatcher hands it', () => {
-  it('commits a structured clone of the prepared call once', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('commits a structured clone of the prepared call once', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const copy = structuredClone(await prepWrite('f', 'new'));
     await rt.commit(copy, new AbortController().signal);

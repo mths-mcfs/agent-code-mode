@@ -9,6 +9,7 @@ import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
 import { syncDirStrict } from './fs-ops.js';
 import { cutBeforeRename, pinTempMtime } from '../testing/install-faults.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 let base: string;
 let workspace: string;
@@ -64,7 +65,7 @@ class UnconfirmedInstall extends FileTransaction {
   }
 }
 
-it('reports the temp left by a crash immediately before rename and preserves old target', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('reports the temp left by a crash immediately before rename and preserves old target', async () => {
   const tx = new FileTransaction(state);
   const cut = cutBeforeRename(vi, target, 'cut immediately before rename', (temp) => {
     expect(readFileSync(path.join(tx.dir, 'manifest.json'), 'utf8')).toContain(installId(temp));
@@ -82,7 +83,7 @@ it('reports the temp left by a crash immediately before rename and preserves old
   expect(existsSync(temp)).toBe(true);
 });
 
-it('preserves later unrelated bytes on reuse of a temp inode with the same coarse mtime', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('preserves later unrelated bytes on reuse of a temp inode with the same coarse mtime', async () => {
   coarseMtime();
   const tx = new UnconfirmedInstall(state);
   await write(tx);
@@ -105,7 +106,7 @@ it('preserves later unrelated bytes on reuse of a temp inode with the same coars
   expect(bytes()).toBe('pending');
 });
 
-it.each([
+it.skipIf(ROOTED_OPS_REFUSED).each([
   { confirmed: true, constructor: FileTransaction },
   { confirmed: false, constructor: UnconfirmedInstall },
 ])('preserves same-byte in-place rewrite with same mtime (confirmed=$confirmed)', async ({ constructor }) => {
@@ -127,7 +128,7 @@ it.each([
 });
 
 // Adjusted for the strict rule: only the newest journal is undone; the older ones report conflicts.
-it('undoes the newest of three consecutive pending journals and reports the others as conflicts', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('undoes the newest of three consecutive pending journals and reports the others as conflicts', async () => {
   const one = new FileTransaction(state);
   const two = new FileTransaction(state);
   const three = new FileTransaction(state);
@@ -141,7 +142,7 @@ it('undoes the newest of three consecutive pending journals and reports the othe
   expect(bytes()).toBe('two');
 });
 
-it('reports conflict after creation of a second hard link to a confirmed inode', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('reports conflict after creation of a second hard link to a confirmed inode', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   const before = statSync(target, { bigint: true });
@@ -157,7 +158,7 @@ it('reports conflict after creation of a second hard link to a confirmed inode',
   expect(readFileSync(alias, 'utf8')).toBe('pending');
 });
 
-it('reports a legacy journal without install identities even if bytes equal original', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('reports a legacy journal without install identities even if bytes equal original', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   writeFileSync(target, 'original');
@@ -166,7 +167,7 @@ it('reports a legacy journal without install identities even if bytes equal orig
   expect(bytes()).toBe('original');
 });
 
-it('refuses finalization when directory is replaced before the flush actually opens it', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('refuses finalization when directory is replaced before the flush actually opens it', async () => {
   let finalizing = false;
   const moved = path.join(base, 'moved');
   const tx = new FileTransaction(state, {
@@ -185,7 +186,7 @@ it('refuses finalization when directory is replaced before the flush actually op
 });
 
 // Adjusted for the strict rule: the middle journal's equal bytes do not make the older journals' files theirs.
-it('undoes only the newest of three pending journals when the middle journal wrote the same bytes', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('undoes only the newest of three pending journals when the middle journal wrote the same bytes', async () => {
   const one = new FileTransaction(state);
   const two = new FileTransaction(state);
   const three = new FileTransaction(state);

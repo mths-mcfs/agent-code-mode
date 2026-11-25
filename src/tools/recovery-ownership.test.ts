@@ -9,6 +9,7 @@ import type { PolicySnapshot, Sandbox, ToolCall, Transaction } from '../core/typ
 import { FakeSandbox, makeContext, StaticHostAdapter } from '../testing/index.js';
 import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 const policy: PolicySnapshot = { host: 'generic', bashContainment: { mode: 'none' }, protectedPaths: [], payload: null };
 const signal = new AbortController().signal;
@@ -73,7 +74,7 @@ function abandon(tx: FileTransaction): void {
 const recover = () => recoverStaleJournals(stateDir, [workspace], []);
 
 // Adjusted for the strict rule: the newest journal is undone, and the older one then sees a file it did not install.
-it('undoes the newest of two unfinished journals on the same file and reports the older one as a conflict', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('undoes the newest of two unfinished journals on the same file and reports the older one as a conflict', async () => {
   writeFileSync(ws('a'), 'original');
   const one = start();
   await write('a', 'first', one);
@@ -88,7 +89,7 @@ it('undoes the newest of two unfinished journals on the same file and reports th
 });
 
 // Adjusted for the strict rule: equal bytes in another file are a conflict, and the file is left as it is.
-it('leaves a manual restoration of the original bytes in place and reports it as a conflict', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('leaves a manual restoration of the original bytes in place and reports it as a conflict', async () => {
   writeFileSync(ws('a'), 'original');
   const one = start();
   await write('a', 'first', one);
@@ -101,7 +102,7 @@ it('leaves a manual restoration of the original bytes in place and reports it as
   expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
 });
 
-it('reports conflict when the bytes match but the inode was replaced', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('reports conflict when the bytes match but the inode was replaced', async () => {
   writeFileSync(ws('a'), 'original');
   const one = start();
   await write('a', 'first', one);
@@ -114,7 +115,7 @@ it('reports conflict when the bytes match but the inode was replaced', async () 
   expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
 });
 
-it('preserves a committed write between two unfinished journals with matching bytes', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('preserves a committed write between two unfinished journals with matching bytes', async () => {
   writeFileSync(ws('a'), 'original');
   const one = start();
   await write('a', 'first', one);
@@ -131,7 +132,7 @@ it('preserves a committed write between two unfinished journals with matching by
   expect(read('a')).toBe('first');
 });
 
-it('preserves later committed bytes after an earlier prepared write failed to land', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('preserves later committed bytes after an earlier prepared write failed to land', async () => {
   const one = start();
   vi.spyOn(nodeFs, 'linkSync').mockImplementationOnce(() => {
     throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
@@ -147,7 +148,7 @@ it('preserves later committed bytes after an earlier prepared write failed to la
   expect(read('a')).toBe('first');
 });
 
-it('refuses finalization when the changed directory was moved and replaced', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('refuses finalization when the changed directory was moved and replaced', async () => {
   mkdirSync(ws('nested'));
   const one = start();
   await write('nested/file', 'first', one);
