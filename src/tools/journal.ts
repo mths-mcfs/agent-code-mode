@@ -88,6 +88,9 @@ const defaultIo: JournalIo = {
   removeDir: (dir) => fs.rm(dir, { recursive: true, force: true }),
 };
 
+/** Per journal root, the first directory a `mkdir` created whose parents are not yet known to be flushed. */
+const unflushedAncestors = new Map<string, string>();
+
 /** Ids of transactions this process still has open; a recovery pass leaves them alone. */
 const openTransactions = new Set<string>();
 
@@ -178,9 +181,11 @@ export class FileTransaction implements Transaction {
   async #persist(): Promise<void> {
     if (!this.#created) {
       const root = path.dirname(this.dir);
-      const firstCreated = await fs.mkdir(root, { recursive: true, mode: 0o700 });
+      const firstCreated = (await fs.mkdir(root, { recursive: true, mode: 0o700 })) ?? unflushedAncestors.get(root);
       await assertPrivateDir(root);
+      if (firstCreated !== undefined) unflushedAncestors.set(root, firstCreated);
       await syncParentsOfCreated(root, firstCreated, this.#io.syncDir);
+      unflushedAncestors.delete(root);
       await fs.mkdir(this.dir, { mode: 0o700 });
       this.#created = true;
       await this.#io.syncDir(root);
@@ -373,7 +378,10 @@ export class FileTransaction implements Transaction {
  * elsewhere (a link was swapped in), so nothing outside is read or touched.
  */
 async function currentContent(abs: string): Promise<RegularFile | null> {
-  const parent = await fs.lstat(path.dirname(abs)).catch(() => null);
+  const parent = await fs.lstat(path.dirname(abs)).catch((err: unknown) => {
+    if (isGone(err)) return null;
+    throw err;
+  });
   if (!parent) return null;
   await assertDirUnchanged(path.dirname(abs));
   return readRegularFile(abs);
@@ -392,6 +400,11 @@ async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: str
 
 function touchedDirs(files: readonly string[], createdDirs: readonly string[]): string[] {
   return [...new Set([...files, ...createdDirs].map((p) => path.dirname(p)))];
+}
+
+function isGone(err: unknown): boolean {
+  const code = errnoCode(err);
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 async function syncParentsOfCreated(dir: string, firstCreated: string | undefined, sync: (dir: string) => Promise<void>): Promise<void> {
@@ -415,8 +428,7 @@ async function syncExisting(dirs: readonly string[], sync: (dir: string) => Prom
     try {
       await sync(dir);
     } catch (err) {
-      const code = errnoCode(err);
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      if (!isGone(err)) throw err;
     }
   }
 }
@@ -474,11 +486,13 @@ interface Claimed {
   readonly dir: string;
   readonly manifest: Manifest;
   readonly restored: string[];
+  /** Files that hold their original again, restored by this pass or an earlier one. */
+  readonly settled: string[];
   readonly skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[];
 }
 
 async function undoEntry(record: Claimed, entry: Entry, roots: readonly string[], protectedPaths: readonly string[]): Promise<void> {
-  const { manifest, dir, restored, skipped } = record;
+  const { manifest, dir, restored, settled, skipped } = record;
   try {
     // The record is data on disk: each path is checked like a tool argument.
     if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
@@ -497,7 +511,10 @@ async function undoEntry(record: Claimed, entry: Entry, roots: readonly string[]
     const current = await currentContent(entry.path);
     const currentHash = current ? sha256(current.bytes) : null;
     const originalHash = entry.existed ? entry.original : null;
-    if (currentHash === originalHash) return;
+    if (currentHash === originalHash) {
+      settled.push(entry.path);
+      return;
+    }
     if (currentHash === null || !entry.written.includes(currentHash)) {
       skipped.push({ path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what the crashed run wrote' });
       return;
@@ -505,6 +522,7 @@ async function undoEntry(record: Claimed, entry: Entry, roots: readonly string[]
     const bytes = await readOriginal(dir, entry);
     await restoreEntry(entry, bytes, currentHash);
     restored.push(entry.path);
+    settled.push(entry.path);
   } catch (err) {
     skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
   }
@@ -528,6 +546,7 @@ export async function recoverStaleJournals(
   stateDir: string,
   roots: readonly string[],
   protectedPaths: readonly string[],
+  syncDir: (dir: string) => Promise<void> = syncDirStrict,
 ): Promise<RecoveredJournal[]> {
   const base = journalRoot(stateDir);
   let names: string[];
@@ -576,7 +595,7 @@ export async function recoverStaleJournals(
           continue;
         }
       }
-      claimed.push({ id: record.id, dir: target, manifest, restored: [], skipped: [] });
+      claimed.push({ id: record.id, dir: target, manifest, restored: [], settled: [], skipped: [] });
     } catch {
       // One bad record must not stop the others.
     }
@@ -589,7 +608,7 @@ export async function recoverStaleJournals(
   for (const record of claimed) {
     try {
       // The journal contains planned directory names and cannot establish ownership after a crash.
-      const restoresOnDisk = await flushes(touchedDirs(record.restored, []), syncDirStrict);
+      const restoresOnDisk = await flushes(touchedDirs(record.settled, []), syncDir);
       const needsRecovery = !restoresOnDisk || record.skipped.some((s) => s.reason === 'error');
       if (!needsRecovery) await fs.rm(record.dir, { recursive: true, force: true });
       out.push({ id: record.id, report: { restored: record.restored, skipped: record.skipped } });

@@ -168,7 +168,8 @@ export function windowsPathProblem(target: string): string | null {
 /** Expands a leading `~` or `~/` to the home directory. */
 export function expandTilde(p: string, home: string = os.homedir()): string {
   if (p === '~') return home;
-  if (p.startsWith('~/') || (IS_WINDOWS && p.startsWith('~\\'))) return path.join(home, p.slice(2));
+  // Not path.join: a `..` after a link must be resolved from the link's target, not removed lexically.
+  if (p.startsWith('~/') || (IS_WINDOWS && p.startsWith('~\\'))) return `${home.endsWith(path.sep) ? home : home + path.sep}${p.slice(2)}`;
   return p;
 }
 

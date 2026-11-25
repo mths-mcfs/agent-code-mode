@@ -431,8 +431,48 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     expect((await tx.rollback()).restored).toEqual([path.join(ws, 'a.txt')]);
     expect(read('a.txt')).toBe('a0\n');
     expect(existsSync(path.join(tx.dir, 'manifest.json'))).toBe(true);
-    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([{ id: tx.id, report: { restored: [], skipped: [] } }]);
+    const io = workspaceFlushFails('EIO', () => failing);
+    // The restore is already visible, so recovery has nothing to undo, but it still flushes it before deleting the record.
+    expect(await recoverStaleJournals(stateDir, [ws], [], io.syncDir)).toEqual([{ id: tx.id, report: { restored: [], skipped: [] } }]);
+    expect(readdirSync(journalRoot(stateDir))).toHaveLength(1);
+    failing = false;
+    expect(await recoverStaleJournals(stateDir, [ws], [], io.syncDir)).toEqual([{ id: tx.id, report: { restored: [], skipped: [] } }]);
     expect(readdirSync(journalRoot(stateDir))).toEqual([]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('keeps the record when a file cannot be inspected, instead of taking it for absent', async () => {
+    const tx = rt.beginTransaction();
+    await write('sub/new.txt', 'n1\n', tx);
+    chmodSync(ws, 0o600);
+    try {
+      const report = await tx.rollback();
+      expect(report.skipped).toEqual([expect.objectContaining({ path: path.join(ws, 'sub', 'new.txt'), reason: 'error' })]);
+    } finally {
+      chmodSync(ws, 0o755);
+    }
+    expect(readdirSync(journalRoot(stateDir))).toHaveLength(1);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([
+      { id: expect.any(String), report: { restored: [path.join(ws, 'sub', 'new.txt')], skipped: [] } },
+    ]);
+    expect(existsSync(path.join(ws, 'sub', 'new.txt'))).toBe(false);
+  });
+
+  it('flushes the journal ancestors again after a flush of them failed', async () => {
+    let failing = true;
+    const flushed: string[] = [];
+    const io: JournalIo = {
+      syncDir: async (dir) => {
+        flushed.push(dir);
+        if (failing && dir === base) throw new Error('EIO: flush failed');
+        await syncDirStrict(dir);
+      },
+      removeDir: held,
+    };
+    await expect(write('a.txt', 'a1\n', new FileTransaction(stateDir, io))).rejects.toThrow(/EIO/);
+    failing = false;
+    flushed.length = 0;
+    await write('a.txt', 'a1\n', new FileTransaction(stateDir, io));
+    expect(flushed).toContain(base);
   });
 
   it('flushes every directory it creates for the journal, so a crash cannot lose the record', async () => {

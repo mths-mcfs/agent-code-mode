@@ -252,6 +252,21 @@ describe('protected paths', () => {
   });
 });
 
+it.skipIf(IS_WINDOWS)('resolves ~/link/.. from the link target, as the operating system does', async () => {
+  const home = path.join(ws, 'home');
+  mkdirSync(home);
+  mkdirSync(path.join(ws, 'other'));
+  link(path.join(ws, 'other'), path.join(home, 'link'));
+  const prevHome = process.env['HOME'];
+  process.env['HOME'] = home;
+  try {
+    const prepared = await prep('write', { path: '~/link/../note.txt', content: 'x' });
+    expect(prepared.tool === 'write' && prepared.effect.absPath).toBe(path.join(ws, 'note.txt'));
+  } finally {
+    process.env['HOME'] = prevHome;
+  }
+});
+
 describe('write and edit', () => {
   it('refuses an ambiguous edit without writing', async () => {
     writeFileSync(path.join(ws, 'a.ts'), 'x = 1\ny = 2\nx = 1\n');
