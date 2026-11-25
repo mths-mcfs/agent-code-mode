@@ -2,14 +2,16 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import fsp from 'node:fs/promises';
+import nodeFs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolError, TransactionFinalizeError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
 import { COMMITTED, FileTransaction, type JournalIo, journalRoot, recoverStaleJournals } from './journal.js';
 import { atomicWrite, sha256, syncDirStrict } from './fs-ops.js';
+import { rooted } from './rooted.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 let base: string;
 let ws: string;
@@ -55,7 +57,7 @@ afterEach(() => {
 });
 
 describe('transactions', () => {
-  it('rolls back three writes (two edits and a create in a new directory)', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('rolls back three writes (two edits and a create in a new directory)', async () => {
     const tx = rt.beginTransaction();
     await write('a.txt', 'a1\n', tx);
     await write('a.txt', 'a2\n', tx);
@@ -71,7 +73,7 @@ describe('transactions', () => {
     expect(readdirSync(journalRoot(stateDir))).toEqual([]);
   });
 
-  it('does not clobber a file changed externally after our write, and reports it', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('does not clobber a file changed externally after our write, and reports it', async () => {
     const tx = rt.beginTransaction();
     await write('a.txt', 'a1\n', tx);
     await write('b.txt', 'b1\n', tx);
@@ -83,7 +85,7 @@ describe('transactions', () => {
     expect(read('b.txt')).toBe('b0\n');
   });
 
-  it('keeps changes and deletes the journal on dispose, and refuses writes afterwards', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps changes and deletes the journal on dispose, and refuses writes afterwards', async () => {
     const tx = rt.beginTransaction();
     await write('a.txt', 'a1\n', tx);
     await tx.dispose();
@@ -94,7 +96,7 @@ describe('transactions', () => {
     expect(read('b.txt')).toBe('b0\n');
   });
 
-  it('refuses a write that would push the journal past its size cap', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses a write that would push the journal past its size cap', async () => {
     const big = Buffer.alloc(33 * 1024 * 1024, 0x61);
     writeFileSync(path.join(ws, 'big1.txt'), big);
     writeFileSync(path.join(ws, 'big2.txt'), big);
@@ -112,7 +114,7 @@ describe('transactions', () => {
     expect(readFileSync(path.join(ws, 'big1.txt')).equals(big)).toBe(true);
   });
 
-  it('refuses to write again a file another writer changed since this transaction wrote it', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses to write again a file another writer changed since this transaction wrote it', async () => {
     const mine = rt.beginTransaction();
     const other = rt.beginTransaction();
     await write('a.txt', 'mine\n', mine);
@@ -123,7 +125,7 @@ describe('transactions', () => {
     expect(read('a.txt')).toBe('other\n');
   });
 
-  it('rolls back only the directory it created, not one a user put at the same name', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('rolls back only the directory it created, not one a user put at the same name', async () => {
     const tx = rt.beginTransaction();
     await write('fresh/file.txt', 'x', tx);
     renameSync(path.join(ws, 'fresh'), path.join(ws, 'moved'));
@@ -133,21 +135,23 @@ describe('transactions', () => {
     expect(existsSync(path.join(ws, 'fresh'))).toBe(true);
   });
 
-  it('rolls back the directories a write created before it failed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('rolls back the directories a write created before it failed', async () => {
     const tx = rt.beginTransaction();
-    vi.spyOn(fsp, 'link').mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    vi.spyOn(nodeFs, 'linkSync').mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    });
     await expect(write('fresh/deep/file.txt', 'x', tx)).rejects.toThrow(/ENOSPC/);
     await tx.rollback();
     expect(existsSync(path.join(ws, 'fresh'))).toBe(false);
   });
 
-  it('rolls back only directories its own writes created', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('rolls back only directories its own writes created', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
     const dir = path.join(ws, 'shared');
     const abs = path.join(dir, 'x.txt');
     const bytes = Buffer.from('x\n');
-    const outcome = await atomicWrite(abs, bytes, { kind: 'absent' }, {
+    const outcome = await atomicWrite(rooted(ws, abs), bytes, { kind: 'absent' }, {
       beforeWrite: async (before, dirs) => {
         await tx.record(abs, ws, before, dirs);
         // Another writer creates the directory between the checks and the write.
@@ -161,7 +165,7 @@ describe('transactions', () => {
     expect(existsSync(dir)).toBe(true);
   });
 
-  it('refuses a transaction it did not start', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses a transaction it did not start', async () => {
     const foreign: Transaction = { rollback: async () => ({ restored: [], skipped: [] }), dispose: async () => undefined };
     await expect(write('a.txt', 'a1\n', foreign)).rejects.toThrow(/not started by this tool runtime/);
     expect(read('a.txt')).toBe('a0\n');
@@ -183,7 +187,7 @@ describe('crash recovery', () => {
     return moved;
   }
 
-  it('never restores by bytes alone a record without install identities, and preserves directories with unknown ownership', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('never restores by bytes alone a record without install identities, and preserves directories with unknown ownership', async () => {
     const pid = deadPid();
     const dir = path.join(journalRoot(stateDir), `old-${pid}-abcd`);
     const shared = path.join(ws, 'shared');
@@ -209,7 +213,7 @@ describe('crash recovery', () => {
     expect(existsSync(shared)).toBe(true);
   });
 
-  it('restores a journal whose process is gone, and leaves a live one alone', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('restores a journal whose process is gone, and leaves a live one alone', async () => {
     const crashed = rt.beginTransaction();
     if (!(crashed instanceof FileTransaction)) throw new Error('unreachable');
     await write('a.txt', 'a1\n', crashed);
@@ -235,7 +239,7 @@ describe('crash recovery', () => {
     await live.dispose();
   });
 
-  it('ignores journals of other workspaces and never restores outside the roots', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('ignores journals of other workspaces and never restores outside the roots', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
     await write('a.txt', 'a1\n', tx);
@@ -259,7 +263,7 @@ describe('crash recovery', () => {
     expect(readdirSync(journalRoot(stateDir))).toHaveLength(1);
   });
 
-  it('undoes the newest write across journals and reports the older journal as a conflict', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('undoes the newest write across journals and reports the older journal as a conflict', async () => {
     const first = rt.beginTransaction();
     const second = rt.beginTransaction();
     if (!(first instanceof FileTransaction) || !(second instanceof FileTransaction)) throw new Error('unreachable');
@@ -274,7 +278,7 @@ describe('crash recovery', () => {
     expect(read('a.txt')).toBe('second\n');
   });
 
-  it('keeps a later acknowledged write of the same file, and the record, reporting a conflict', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps a later acknowledged write of the same file, and the record, reporting a conflict', async () => {
     const earlier = rt.beginTransaction();
     if (!(earlier instanceof FileTransaction)) throw new Error('unreachable');
     await write('a.txt', 'one', earlier);
@@ -292,7 +296,7 @@ describe('crash recovery', () => {
     expect(readdirSync(journalRoot(stateDir)).filter((n) => !n.endsWith(COMMITTED))).toHaveLength(1);
   });
 
-  it('never restores a protected path', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('never restores a protected path', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
     await write('a.txt', 'a1\n', tx);
@@ -302,7 +306,7 @@ describe('crash recovery', () => {
     expect(read('a.txt')).toBe('a1\n');
   });
 
-  it('never restores a path a protected pattern names after ~, whatever its spelling', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('never restores a path a protected pattern names after ~, whatever its spelling', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
     await write('a.txt', 'a1\n', tx);
@@ -363,7 +367,7 @@ describe('recovery restores only files the crashed run installed', () => {
   };
   const recover = () => recoverStaleJournals(stateDir, [ws], []);
 
-  it('reports a write the crash cut between its install and its confirmation as a conflict, and leaves it', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('reports a write the crash cut between its install and its confirmation as a conflict, and leaves it', async () => {
     class CutBeforeConfirmation extends FileTransaction {
       override written(): Promise<void> {
         return Promise.resolve();
@@ -378,7 +382,7 @@ describe('recovery restores only files the crashed run installed', () => {
     expect(read('new.txt')).toBe('created');
   });
 
-  it('reports a conflict when the file was rewritten in place with the same bytes', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('reports a conflict when the file was rewritten in place with the same bytes', async () => {
     const one = start();
     await write('a.txt', 'first', one);
     await new Promise((r) => setTimeout(r, 20));
@@ -394,7 +398,7 @@ describe('finalization', () => {
   /** Keeps the delete of a finalized journal pending, as if the process died right after the commit. */
   const held = (): Promise<void> => new Promise(() => undefined);
 
-  it('commits by renaming the journal, so recovery never undoes a finalized run', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('commits by renaming the journal, so recovery never undoes a finalized run', async () => {
     const tx = new FileTransaction(stateDir, { syncDir: syncDirStrict, removeDir: held });
     await write('a.txt', 'a1\n', tx);
     await write('new.txt', 'n1\n', tx);
@@ -410,7 +414,7 @@ describe('finalization', () => {
     expect(readdirSync(journalRoot(stateDir))).toEqual([]);
   });
 
-  it('reports a committed but not flushed journal and never rolls it back', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('reports a committed but not flushed journal and never rolls it back', async () => {
     let failing = false;
     const io: JournalIo = {
       syncDir: async (dir) => {
@@ -436,7 +440,7 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a1\n');
   });
 
-  it('refuses the write when its journal record cannot be flushed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses the write when its journal record cannot be flushed', async () => {
     const tx = new FileTransaction(stateDir, {
       syncDir: async () => {
         throw new Error('EIO: flush failed');
@@ -447,7 +451,7 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
-  it('keeps the journal open for a rollback when the commit rename fails', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps the journal open for a rollback when the commit rename fails', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
     await write('a.txt', 'a1\n', tx);
@@ -477,7 +481,7 @@ describe('finalization', () => {
     };
   }
 
-  it('refuses a transactional write, before the file changes, where its directory cannot be flushed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses a transactional write, before the file changes, where its directory cannot be flushed', async () => {
     const tx = new FileTransaction(stateDir, workspaceFlushFails('EINVAL', () => true));
     await expect(write('a.txt', 'a1\n', tx)).rejects.toThrow(/refused to write .*cannot flush a directory to disk/);
     await expect(write('sub/new.txt', 'n1\n', tx)).rejects.toThrow(/refused to write/);
@@ -485,7 +489,7 @@ describe('finalization', () => {
     expect(existsSync(path.join(ws, 'sub'))).toBe(false);
   });
 
-  it('flushes every directory the run changed before the commit makes the journal unrecoverable', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('flushes every directory the run changed before the commit makes the journal unrecoverable', async () => {
     const flushed: { dir: string; committed: boolean }[] = [];
     let txDir = '';
     const tx = new FileTransaction(stateDir, {
@@ -506,7 +510,7 @@ describe('finalization', () => {
     expect(atDispose.at(-1)).toEqual({ dir: journalRoot(stateDir), committed: true });
   });
 
-  it('does not commit when a directory the run changed was moved before the flush, and leaves the move alone', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('does not commit when a directory the run changed was moved before the flush, and leaves the move alone', async () => {
     mkdirSync(path.join(ws, 'nested'));
     const tx = rt.beginTransaction();
     await write('a.txt', 'a1\n', tx);
@@ -518,7 +522,7 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
-  it('keeps the journal open for a rollback when a changed directory cannot be flushed at finalization', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps the journal open for a rollback when a changed directory cannot be flushed at finalization', async () => {
     let failing = false;
     const tx = new FileTransaction(stateDir, workspaceFlushFails('EIO', () => failing));
     await write('a.txt', 'a1\n', tx);
@@ -530,7 +534,7 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
-  it('keeps the record of a rollback whose restore cannot be flushed, which recovery then reports as a conflict', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps the record of a rollback whose restore cannot be flushed, which recovery then reports as a conflict', async () => {
     let failing = false;
     const tx = new FileTransaction(stateDir, workspaceFlushFails('EIO', () => failing));
     await write('a.txt', 'a1\n', tx);
@@ -562,7 +566,7 @@ describe('finalization', () => {
     expect(existsSync(path.join(ws, 'sub', 'new.txt'))).toBe(false);
   });
 
-  it('flushes the journal root again when the flush after creating the journal failed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('flushes the journal root again when the flush after creating the journal failed', async () => {
     let failing = true;
     const flushed: string[] = [];
     const tx = new FileTransaction(stateDir, {
@@ -581,7 +585,7 @@ describe('finalization', () => {
     expect(flushed).toContain(journalRoot(stateDir));
   });
 
-  it('flushes the journal ancestors again after a flush of them failed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('flushes the journal ancestors again after a flush of them failed', async () => {
     let failing = true;
     const flushed: string[] = [];
     const io: JournalIo = {
@@ -599,7 +603,7 @@ describe('finalization', () => {
     expect(flushed).toContain(base);
   });
 
-  it('flushes every directory it creates for the journal, so a crash cannot lose the record', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('flushes every directory it creates for the journal, so a crash cannot lose the record', async () => {
     const flushed: string[] = [];
     const tx = new FileTransaction(stateDir, {
       syncDir: async (dir) => {

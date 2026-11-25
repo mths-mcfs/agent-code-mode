@@ -17,10 +17,11 @@ import type {
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace, type MatchHow } from './edit-match.js';
-import { type DirId, type InstallId, type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
+import { type DirId, type InstallId, type PathIdentity, type RegularFile, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
-import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
+import { rooted } from './rooted.js';
+import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, type SearchTop, compileGrep, normalizeGlob, runGlob, runGrep, searchTop } from './search.js';
 
 /** Default number of lines `read` returns. */
 export const DEFAULT_READ_LIMIT = 2000;
@@ -63,6 +64,8 @@ interface CallMeta {
   readonly denyWrite: readonly string[];
   /** For write and edit: identity of the file and its directories at prepare. */
   readonly identity?: PathIdentity;
+  /** For grep and glob: the search path and what it named at prepare. */
+  readonly searchTop?: SearchTop;
 }
 
 /** Most prepared calls whose metadata is kept while they wait for commit. */
@@ -221,7 +224,7 @@ export class NodeToolRuntime implements ToolRuntime {
       case 'write': {
         const absPath = await jail.resolveForWrite(call.args.path);
         const m = { ...meta(absPath), identity: await captureIdentity(absPath, jail.rootOf(absPath) ?? jail.cwd) };
-        const current = await this.#readExisting(absPath);
+        const current = await readRegularFile(rooted(m.root, absPath), MAX_FILE_BYTES);
         const diff =
           current !== null && isBinary(current.bytes)
             ? binaryDiff(m.display, true)
@@ -243,7 +246,7 @@ export class NodeToolRuntime implements ToolRuntime {
       case 'edit': {
         const absPath = await jail.resolveForWrite(call.args.path);
         const m = { ...meta(absPath), identity: await captureIdentity(absPath, jail.rootOf(absPath) ?? jail.cwd) };
-        const current = await this.#readExisting(absPath);
+        const current = await readRegularFile(rooted(m.root, absPath), MAX_FILE_BYTES);
         if (current === null) throw new ToolError('not-found', `${m.display} does not exist`);
         const text = decodeText(m.display, current.bytes);
         if (call.args.oldString === call.args.newString) {
@@ -287,7 +290,7 @@ export class NodeToolRuntime implements ToolRuntime {
           maxResults: call.args.maxResults ?? DEFAULT_GREP_MAX_RESULTS,
         };
         const prepared: PreparedCallOf<'grep'> = { id: call.id, tool: 'grep', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, meta(absRoot));
+        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot) });
         return prepared;
       }
       case 'glob': {
@@ -297,7 +300,7 @@ export class NodeToolRuntime implements ToolRuntime {
         normalizeGlob(call.args.pattern, absRoot);
         const effect = { absRoot, pattern: call.args.pattern, maxResults: call.args.maxResults ?? DEFAULT_GLOB_MAX_RESULTS };
         const prepared: PreparedCallOf<'glob'> = { id: call.id, tool: 'glob', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, meta(absRoot));
+        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot) });
         return prepared;
       }
     }
@@ -318,12 +321,6 @@ export class NodeToolRuntime implements ToolRuntime {
     if (!st.isFile()) throw new ToolError('invalid-args', `${shown} is not a regular file`);
   }
 
-  async #readExisting(abs: string): Promise<{ bytes: Buffer; mode: number } | null> {
-    const st = await fs.lstat(abs).catch(() => null);
-    if (st?.isDirectory()) throw new ToolError('invalid-args', `${abs} is a directory`);
-    return readRegularFile(abs, MAX_FILE_BYTES);
-  }
-
   /** What prepare recorded for the call; a call this runtime did not prepare (or already committed) is refused. */
   #metaOf(prepared: PreparedCall): CallMeta {
     const meta = this.#meta.take(prepared);
@@ -331,6 +328,12 @@ export class NodeToolRuntime implements ToolRuntime {
       throw new ToolError('tool-error', `this ${prepared.tool} call was not prepared by this tool runtime (or was already committed); prepare it again`);
     }
     return meta;
+  }
+
+  #searchTopOf(prepared: PreparedCall): SearchTop {
+    const { searchTop: top } = this.#metaOf(prepared);
+    if (top === undefined) throw new ToolError('tool-error', `this ${prepared.tool} call was not prepared by this tool runtime; prepare it again`);
+    return top;
   }
 
   async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
@@ -352,28 +355,22 @@ export class NodeToolRuntime implements ToolRuntime {
         });
       }
       case 'read':
-        this.#metaOf(prepared);
-        return this.#commitRead(prepared);
+        return this.#commitRead(prepared, this.#metaOf(prepared).root);
       case 'write':
       case 'edit':
         return this.#commitWrite(prepared, signal, tx);
       case 'grep': {
-        const { root } = this.#metaOf(prepared);
-        await assertDirUnchanged(prepared.effect.absRoot);
-        return runGrep(prepared.effect, root, signal, this.#opts.grepFileBudgetMs);
+        return runGrep(prepared.effect, this.#searchTopOf(prepared), signal, this.#opts.grepFileBudgetMs);
       }
       case 'glob': {
-        const { root } = this.#metaOf(prepared);
-        await assertDirUnchanged(prepared.effect.absRoot);
-        return runGlob(prepared.effect, root, signal);
+        return runGlob(prepared.effect, this.#searchTopOf(prepared), signal);
       }
     }
   }
 
-  async #commitRead(prepared: PreparedCallOf<'read'>): Promise<ReadResult> {
+  async #commitRead(prepared: PreparedCallOf<'read'>, root: string): Promise<ReadResult> {
     const { absPath, offset, limit } = prepared.effect;
-    await assertDirUnchanged(path.dirname(absPath));
-    const file = await readRegularFile(absPath, MAX_FILE_BYTES);
+    const file = await readRegularFile(rooted(root, absPath), MAX_FILE_BYTES);
     if (file === null) throw new ToolError('not-found', `${absPath} does not exist`);
     const text = decodeText(absPath, file.bytes);
     const lines = text === '' ? [] : text.split('\n');
@@ -410,7 +407,7 @@ export class NodeToolRuntime implements ToolRuntime {
     }
     const bytes = Buffer.from(afterContent, 'utf8');
     const nextHash = sha256(bytes);
-    const outcome = await atomicWrite(absPath, bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {
+    const outcome = await atomicWrite(rooted(m.root, absPath), bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {
       signal,
       identity: m.identity,
       ...(tx

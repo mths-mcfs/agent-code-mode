@@ -7,8 +7,9 @@ import { runScript } from '../core/run.js';
 import { FakeSandbox, StaticHostAdapter, makeContext } from '../testing/index.js';
 import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
-it('keeps an acknowledged write when recovering an older unfinished run', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('keeps an acknowledged write when recovering an older unfinished run', async () => {
   const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-overlap-')));
   try {
     const ws = path.join(base, 'workspace');

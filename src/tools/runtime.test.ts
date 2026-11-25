@@ -8,6 +8,7 @@ import type { PolicySnapshot, PreparedCall, SessionContext, ToolArgsMap, ToolCal
 import { makeContext } from '../testing/context.js';
 import { windowsPathProblem } from './jail.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -109,15 +110,15 @@ describe('path traversal', () => {
     expect(await code(prep('write', { path: 'a\0b', content: 'x' }))).toBe('invalid-args');
     const long = `${'a'.repeat(250)}/`.repeat(40) + 'f.txt';
     const result = await code(run('write', { path: long, content: 'x' }));
-    // Windows with long-path support accepts it; it must then be inside the workspace.
+    // Windows with long-path support accepts it; it must then be inside the workspace. Rooted operations refuse it there for now.
     if (result === 'resolved') expect(readFileSync(path.join(ws, long), 'utf8')).toBe('x');
     else {
-      expect(['invalid-args', 'tool-error']).toContain(result);
+      expect(['invalid-args', 'tool-error', ...(ROOTED_OPS_REFUSED ? ['containment-unavailable'] : [])]).toContain(result);
       expect(readdirSync(ws)).toEqual([]);
     }
   });
 
-  it('keeps unicode lookalikes of .. inside the workspace', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps unicode lookalikes of .. inside the workspace', async () => {
     for (const p of ['\u2025/outside/x.txt', '\uff0e\uff0e/outside/x.txt', '.\u2024/outside/x.txt']) {
       const prepared = await prep('write', { path: p, content: 'x' });
       expect(prepared.tool === 'write' && prepared.effect.absPath.startsWith(`${ws}${path.sep}`)).toBe(true);
@@ -211,7 +212,7 @@ describe.skipIf(IS_WINDOWS)('symlinks', () => {
 });
 
 describe('protected paths', () => {
-  it('refuses writes and edits to host config and .git, but allows reads', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses writes and edits to host config and .git, but allows reads', async () => {
     mkdirSync(path.join(ws, '.git'));
     writeFileSync(path.join(ws, '.git', 'config'), '[core]\n');
     mkdirSync(path.join(ws, '.claude'));
@@ -268,14 +269,14 @@ it.skipIf(IS_WINDOWS)('resolves ~/link/.. from the link target, as the operating
 });
 
 describe('write and edit', () => {
-  it('refuses an ambiguous edit without writing', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses an ambiguous edit without writing', async () => {
     writeFileSync(path.join(ws, 'a.ts'), 'x = 1\ny = 2\nx = 1\n');
     expect(await code(prep('edit', { path: 'a.ts', oldString: 'x = 1', newString: 'x = 3' }))).toBe('invalid-args');
     expect(await code(prep('edit', { path: 'a.ts', oldString: 'nothing like it', newString: 'z' }))).toBe('not-found');
     expect(readFileSync(path.join(ws, 'a.ts'), 'utf8')).toBe('x = 1\ny = 2\nx = 1\n');
   });
 
-  it('refuses a commit when the file changed after prepare', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses a commit when the file changed after prepare', async () => {
     writeFileSync(path.join(ws, 'a.ts'), 'x = 1\n');
     const edit = await prep('edit', { path: 'a.ts', oldString: 'x = 1', newString: 'x = 2' });
     const write = await prep('write', { path: 'a.ts', content: 'overwritten\n' });
@@ -290,7 +291,7 @@ describe('write and edit', () => {
     expect(readFileSync(path.join(ws, 'b.ts'), 'utf8')).toBe('theirs\n');
   });
 
-  it('applies a tolerant edit and carries the exact matched text and diff', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('applies a tolerant edit and carries the exact matched text and diff', async () => {
     writeFileSync(path.join(ws, 'f.js'), 'function f() {\n    if (x) {\n        return 1;\n    }\n}\n');
     const prepared = await prep('edit', { path: 'f.js', oldString: 'if (x) {\n    return 1;\n}', newString: 'if (x) {\n    return 2;\n}' });
     if (prepared.tool !== 'edit') throw new Error('unreachable');
@@ -315,7 +316,7 @@ describe('write and edit', () => {
     expect(readdirSync(path.join(ws, 'new/deep'))).toEqual(['file.txt']);
   });
 
-  it('refuses edits of binary files and directories', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses edits of binary files and directories', async () => {
     writeFileSync(path.join(ws, 'b.bin'), Buffer.from([0, 1, 2, 3]));
     mkdirSync(path.join(ws, 'd'));
     expect(await code(prep('edit', { path: 'b.bin', oldString: 'a', newString: 'b' }))).toBe('tool-error');
@@ -325,7 +326,7 @@ describe('write and edit', () => {
 });
 
 describe('read', () => {
-  it('returns a window of lines and the total', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('returns a window of lines and the total', async () => {
     writeFileSync(path.join(ws, 'r.txt'), 'l1\nl2\nl3\nl4\n');
     const all = await run('read', { path: 'r.txt' });
     expect(all).toEqual({ path: path.join(ws, 'r.txt'), content: 'l1\nl2\nl3\nl4', startLine: 1, totalLines: 4, truncated: false });
@@ -333,7 +334,7 @@ describe('read', () => {
     expect(part).toEqual({ path: path.join(ws, 'r.txt'), content: 'l2\nl3', startLine: 2, totalLines: 4, truncated: true });
   });
 
-  it('caps the bytes returned and refuses binary files', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('caps the bytes returned and refuses binary files', async () => {
     writeFileSync(path.join(ws, 'big.txt'), `${'x'.repeat(1000)}\n`.repeat(1000));
     const big = await run('read', { path: 'big.txt' });
     expect('content' in big && big.truncated).toBe(true);
@@ -361,7 +362,7 @@ describe('grep and glob', () => {
     writeFileSync(path.join(ws, '.git', 'HEAD'), 'needle git\n');
   });
 
-  it('grep skips .git, node_modules and gitignored files', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('grep skips .git, node_modules and gitignored files', async () => {
     const r = await run('grep', { pattern: 'needle' });
     if (!('matches' in r)) throw new Error('unreachable');
     expect(r.matches.map((m) => path.relative(ws, m.file)).sort()).toEqual(['keep.log', path.join('src', 'a.ts'), path.join('src', 'b.js')]);
@@ -376,7 +377,7 @@ describe('grep and glob', () => {
     expect(await code(prep('grep', { pattern: '(' }))).toBe('invalid-args');
   });
 
-  it('glob lists sorted files with the same ignores', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('glob lists sorted files with the same ignores', async () => {
     const r = await run('glob', { pattern: '**/*.{ts,js}' });
     expect('files' in r && r.files).toEqual([path.join(ws, 'src', 'a.ts'), path.join(ws, 'src', 'b.js'), path.join(ws, 'src', 'nested.ts')]);
     const capped = await run('glob', { pattern: '**/*', maxResults: 2 });
@@ -423,7 +424,7 @@ describe('protected paths and policy metadata', () => {
     expect(await code(prep('write', { path: 'real.json', content: 'x' }))).toBe('protected-path');
   });
 
-  it('refuses to commit a call it did not prepare', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses to commit a call it did not prepare', async () => {
     const prepared = await prep('grep', { pattern: 'x' });
     await rt.commit(prepared, new AbortController().signal);
     expect(await code(rt.commit(prepared, new AbortController().signal))).toBe('tool-error');
@@ -440,7 +441,7 @@ describe('protected paths and policy metadata', () => {
 });
 
 describe('file names', () => {
-  it('keeps leading spaces as part of the name', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps leading spaces as part of the name', async () => {
     await run('write', { path: ' spaced.txt', content: 'x' });
     expect(readFileSync(path.join(ws, ' spaced.txt'), 'utf8')).toBe('x');
     expect(existsSync(path.join(ws, 'spaced.txt'))).toBe(false);
@@ -459,7 +460,7 @@ describe('file names', () => {
     expect(await code(prep('glob', { pattern: '*', path: 'alias' }))).toBe('invalid-args');
   });
 
-  it('shows none of the file when an edit does not match', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('shows none of the file when an edit does not match', async () => {
     writeFileSync(path.join(ws, 'code.ts'), 'const token = "abc123";\nexport default token;\n');
     const err = await prep('edit', { path: 'code.ts', oldString: 'const token = "abc124";', newString: 'x' }).then(
       () => undefined,
@@ -476,14 +477,14 @@ describe('search filters', () => {
     return 'matches' in r ? r.matches.map((m) => path.relative(ws, m.file)) : [];
   };
 
-  it('applies gitignore rules to names that begin with two dots', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('applies gitignore rules to names that begin with two dots', async () => {
     writeFileSync(path.join(ws, '.gitignore'), '..cache\n');
     writeFileSync(path.join(ws, '..cache'), 'hit\n');
     writeFileSync(path.join(ws, 'kept.txt'), 'hit\n');
     expect(await grepFiles({ pattern: 'hit' })).toEqual(['kept.txt']);
   });
 
-  it('applies the root .gitignore to a search started inside a directory whose name begins with two dots', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('applies the root .gitignore to a search started inside a directory whose name begins with two dots', async () => {
     writeFileSync(path.join(ws, '.gitignore'), '*.log\n');
     mkdirSync(path.join(ws, '..app', 'x'), { recursive: true });
     writeFileSync(path.join(ws, '..app', 'x', 'a.log'), 'hit\n');
@@ -491,7 +492,7 @@ describe('search filters', () => {
     expect(await grepFiles({ pattern: 'hit', path: '..app/x' })).toEqual([path.join('..app', 'x', 'a.txt')]);
   });
 
-  it('keeps ignoring files a directory negation does not re-include', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('keeps ignoring files a directory negation does not re-include', async () => {
     mkdirSync(path.join(ws, 'logs'));
     writeFileSync(path.join(ws, 'logs', '.gitignore'), '*.log\n!sub/\n');
     mkdirSync(path.join(ws, 'logs', 'sub'));
@@ -500,7 +501,7 @@ describe('search filters', () => {
     expect(await grepFiles({ pattern: 'hit' })).toEqual([path.join('logs', 'sub', 'x.txt')]);
   });
 
-  it('skips a .git file of a worktree', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('skips a .git file of a worktree', async () => {
     writeFileSync(path.join(ws, '.git'), 'gitdir: hit\n');
     writeFileSync(path.join(ws, 'a.txt'), 'hit\n');
     expect(await grepFiles({ pattern: 'hit' })).toEqual(['a.txt']);
@@ -508,13 +509,13 @@ describe('search filters', () => {
     expect('files' in r && r.files).toEqual([path.join(ws, 'a.txt')]);
   });
 
-  it('applies the glob filter to a file given as the path', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('applies the glob filter to a file given as the path', async () => {
     writeFileSync(path.join(ws, 'a.txt'), 'hit\n');
     expect(await grepFiles({ pattern: 'hit', path: 'a.txt', glob: '*.ts' })).toEqual([]);
     expect(await grepFiles({ pattern: 'hit', path: 'a.txt', glob: '*.txt' })).toEqual(['a.txt']);
   });
 
-  it('skips files that are not valid UTF-8', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('skips files that are not valid UTF-8', async () => {
     writeFileSync(path.join(ws, 'latin1.txt'), Buffer.from([0x68, 0x69, 0x74, 0x0a, 0xe9, 0xff, 0x0a]));
     writeFileSync(path.join(ws, 'utf8.txt'), 'hit\n');
     expect(await grepFiles({ pattern: 'hit' })).toEqual(['utf8.txt']);

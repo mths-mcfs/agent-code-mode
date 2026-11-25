@@ -1,12 +1,11 @@
-import { constants as FS } from 'node:fs';
+import fs, { type Dirent } from 'node:fs';
 import { Worker } from 'node:worker_threads';
 import { z } from 'zod';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
 import { DEFAULT_CASE_INSENSITIVE, matchesPathPattern } from '../core/paths.js';
 import { isBinary, readFileInside } from './fs-ops.js';
-import { isInsideDir } from './jail.js';
+import { type RootedPath, childOf, lstatRooted, rooted, within } from './rooted.js';
 import type { GlobEffect, GlobResult, GrepEffect, GrepMatch, GrepResult } from '../core/types.js';
 
 /** Default `grep` result count. */
@@ -136,36 +135,15 @@ function isIgnored(layers: readonly IgnoreLayer[], abs: string, isDir: boolean):
   return ignored || parentIgnored;
 }
 
-async function loadIgnore(dir: string): Promise<IgnoreLayer | null> {
-  try {
-    // Non-blocking, so a FIFO named .gitignore cannot stall the open before the type check.
-    const handle = await fs.open(path.join(dir, '.gitignore'), FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
-    try {
-      const st = await handle.stat();
-      if (!st.isFile() || st.size > 1024 * 1024) return null;
-      return { base: dir, rules: parseGitignore(await handle.readFile('utf8')) };
-    } finally {
-      await handle.close();
-    }
-  } catch {
-    return null;
-  }
+async function loadIgnore(dir: RootedPath): Promise<IgnoreLayer | null> {
+  const bytes = await readFileInside(childOf(dir, '.gitignore'), 1024 * 1024);
+  return bytes === null ? null : { base: dir.abs, rules: parseGitignore(bytes.toString('utf8')) };
 }
 
-/** `.gitignore` layers of the directories from `top` down to `dir` (inclusive). */
-async function ancestorLayers(top: string, dir: string): Promise<IgnoreLayer[]> {
-  const chain: string[] = [];
-  let cursor = dir;
-  for (;;) {
-    chain.push(cursor);
-    if (cursor === top) break;
-    const parent = path.dirname(cursor);
-    if (parent === cursor || !isInsideDir(top, parent)) break;
-    cursor = parent;
-  }
+async function ancestorLayers(dir: RootedPath): Promise<IgnoreLayer[]> {
   const layers: IgnoreLayer[] = [];
-  for (const d of chain.reverse()) {
-    const layer = await loadIgnore(d);
+  for (let depth = 0; depth <= dir.parts.length; depth++) {
+    const layer = await loadIgnore(rooted(dir.root, path.join(dir.root, ...dir.parts.slice(0, depth))));
     if (layer) layers.push(layer);
   }
   return layers;
@@ -175,57 +153,60 @@ async function ancestorLayers(top: string, dir: string): Promise<IgnoreLayer[]> 
 // Walking
 // ---------------------------------------------------------------------------
 
-async function isRealDir(dir: string): Promise<boolean> {
-  const st = await fs.lstat(dir).catch(() => null);
-  if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
-  const real = await fs.realpath(dir).catch(() => null);
-  return real !== null && (process.platform === 'win32' ? real.toLowerCase() === dir.toLowerCase() : real === dir);
+/** A directory that is gone, or reached only through a link (its names could come from outside), lists as null. */
+function listUnlessGoneOrLinked(dir: RootedPath): Dirent[] | null {
+  try {
+    return within(dir, (at) => fs.readdirSync(at('.'), { withFileTypes: true }));
+  } catch {
+    return null;
+  }
 }
 
-/**
- * Lists regular files below `absRoot` (real path, inside the jail), sorted,
- * skipping `.git`, `node_modules` and gitignored entries. Symbolic links are
- * never followed, whether they point inside or outside the workspace.
- * `jailRoot` is the workspace root above it whose `.gitignore` files apply.
- */
-async function* walkFiles(absRoot: string, jailRoot: string, signal: AbortSignal): AsyncGenerator<string> {
-  const rootStat = await fs.lstat(absRoot);
+/** The path a search was prepared for, and the `dev:ino` it named then. */
+export interface SearchTop {
+  readonly path: RootedPath;
+  readonly id: string;
+}
+
+export function searchTop(jailRoot: string, absRoot: string): SearchTop {
+  const top = rooted(jailRoot, absRoot);
+  const st = lstatRooted(top);
+  return { path: top, id: `${st.dev}:${st.ino}` };
+}
+
+async function* walkFiles({ path: top, id }: SearchTop, signal: AbortSignal): AsyncGenerator<RootedPath> {
+  const rootStat = lstatRooted(top);
+  if (rootStat.isSymbolicLink()) throw new ToolError('stale', `file changed since prepared: ${top.abs} is now a symbolic link`);
+  if (`${rootStat.dev}:${rootStat.ino}` !== id) throw new ToolError('stale', `file changed since prepared: ${top.abs} was replaced`);
   if (rootStat.isFile()) {
-    yield absRoot;
+    yield top;
     return;
   }
   if (!rootStat.isDirectory()) return;
-  const startLayers = await ancestorLayers(jailRoot, absRoot);
+  const startLayers = await ancestorLayers(top);
   let visited = 0;
-  const stack: { dir: string; layers: IgnoreLayer[] }[] = [{ dir: absRoot, layers: startLayers }];
+  const stack: { dir: RootedPath; layers: IgnoreLayer[] }[] = [{ dir: top, layers: startLayers }];
   while (stack.length > 0) {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped');
-    const { dir, layers } = stack.pop() as { dir: string; layers: IgnoreLayer[] };
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    // A directory swapped for a link while it was listed is skipped whole:
-    // its names may come from outside the workspace.
-    if (!(await isRealDir(dir))) continue;
-    const own = dir === absRoot ? null : await loadIgnore(dir);
+    const { dir, layers } = stack.pop() as { dir: RootedPath; layers: IgnoreLayer[] };
+    const entries = listUnlessGoneOrLinked(dir);
+    if (entries === null) continue;
+    const own = dir === top ? null : await loadIgnore(dir);
     const here = own ? [...layers, own] : layers;
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    const subdirs: string[] = [];
+    const subdirs: RootedPath[] = [];
     for (const entry of entries) {
-      if (++visited > MAX_VISITED) throw new ToolError('tool-error', `too many files under ${absRoot} (more than ${MAX_VISITED}); narrow the path`);
-      const abs = path.join(dir, entry.name);
+      if (++visited > MAX_VISITED) throw new ToolError('tool-error', `too many files under ${top.abs} (more than ${MAX_VISITED}); narrow the path`);
+      const child = childOf(dir, entry.name);
       if (entry.isSymbolicLink()) continue;
       // `.git` is also a file, in worktrees and submodules.
       if (ALWAYS_IGNORED.has(entry.name)) continue;
       if (entry.isDirectory()) {
-        if (isIgnored(here, abs, true)) continue;
-        subdirs.push(abs);
+        if (isIgnored(here, child.abs, true)) continue;
+        subdirs.push(child);
       } else if (entry.isFile()) {
-        if (isIgnored(here, abs, false)) continue;
-        yield abs;
+        if (isIgnored(here, child.abs, false)) continue;
+        yield child;
       }
     }
     // Depth first, in name order: push in reverse so the first name pops first.
@@ -402,7 +383,7 @@ export const DEFAULT_GREP_FILE_BUDGET_MS = 10_000;
 
 export async function runGrep(
   effect: GrepEffect,
-  jailRoot: string,
+  top: SearchTop,
   signal: AbortSignal,
   fileBudgetMs: number = DEFAULT_GREP_FILE_BUDGET_MS,
 ): Promise<GrepResult> {
@@ -411,16 +392,14 @@ export async function runGrep(
   const matches: GrepMatch[] = [];
   const worker = new MatchWorker(effect.pattern, effect.ignoreCase ? 'i' : '');
   try {
-    for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
-      const rel = file === effect.absRoot ? path.basename(file) : toRel(effect.absRoot, file);
+    for await (const file of walkFiles(top, signal)) {
+      const rel = file.abs === effect.absRoot ? path.basename(file.abs) : toRel(effect.absRoot, file.abs);
       if (globs && !matchesFileGlob(rel, globs)) continue;
-      // Opened without following links and checked to be the file at this path,
-      // so a directory swapped for a link mid-walk cannot lead outside.
       const bytes = await readFileInside(file, MAX_GREP_FILE_BYTES);
       if (bytes === null || isBinary(bytes)) continue;
       const room = effect.maxResults - matches.length;
-      const found = await worker.match(file, bytes.toString('utf8'), room, fileBudgetMs, signal);
-      for (const [line, text] of found.hits) matches.push({ file, line, text });
+      const found = await worker.match(file.abs, bytes.toString('utf8'), room, fileBudgetMs, signal);
+      for (const [line, text] of found.hits) matches.push({ file: file.abs, line, text });
       if (found.more) return { matches, truncated: true };
     }
   } finally {
@@ -429,13 +408,13 @@ export async function runGrep(
   return { matches, truncated: false };
 }
 
-export async function runGlob(effect: GlobEffect, jailRoot: string, signal: AbortSignal): Promise<GlobResult> {
+export async function runGlob(effect: GlobEffect, top: SearchTop, signal: AbortSignal): Promise<GlobResult> {
   const patterns = expandBraces(normalizeGlob(effect.pattern, effect.absRoot));
   const all: string[] = [];
-  for await (const file of walkFiles(effect.absRoot, jailRoot, signal)) {
-    if (file === effect.absRoot) continue;
-    const rel = toRel(effect.absRoot, file);
-    if (patterns.some((p) => matchesPathPattern(rel, p))) all.push(file);
+  for await (const file of walkFiles(top, signal)) {
+    if (file.abs === effect.absRoot) continue;
+    const rel = toRel(effect.absRoot, file.abs);
+    if (patterns.some((p) => matchesPathPattern(rel, p))) all.push(file.abs);
   }
   all.sort();
   return { files: all.slice(0, effect.maxResults), truncated: all.length > effect.maxResults };

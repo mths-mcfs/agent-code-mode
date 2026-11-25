@@ -1,13 +1,15 @@
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { linkSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import nodeFs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { PolicySnapshot, PreparedCall, SessionContext, ToolCall } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
 import { FileTransaction, journalRoot, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 /**
  * One test per defect found by the correctness review of the first version:
@@ -53,29 +55,20 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-describe.skipIf(IS_WINDOWS)('1. grep and glob re-check every directory and file they open', () => {
-  /** Swaps `ws/sub` for a link to `outside` around the walk's listing of it. */
-  async function withSwap<T>(when: 'before-list' | 'after-list', fn: () => Promise<T>): Promise<T> {
+describe.skipIf(IS_WINDOWS)('1. grep and glob reach every directory and file without a link', () => {
+  function swapAfterListing(name: string): void {
     const sub = path.join(ws, 'sub');
-    const original = fsp.readdir;
+    const readdirSync = nodeFs.readdirSync;
     let swapped = false;
-    const swap = async (): Promise<void> => {
-      swapped = true;
-      renameSync(sub, `${sub}-old`);
-      symlinkSync(outside, sub, 'dir');
-    };
-    const patched = async function (this: unknown, ...args: Parameters<typeof fsp.readdir>): Promise<unknown> {
-      if (args[0] === sub && !swapped && when === 'before-list') await swap();
-      const result: unknown = await Reflect.apply(original, this, args);
-      if (args[0] === sub && !swapped && when === 'after-list') await swap();
-      return result;
-    };
-    Object.assign(fsp, { readdir: patched });
-    try {
-      return await fn();
-    } finally {
-      Object.assign(fsp, { readdir: original });
-    }
+    vi.spyOn(nodeFs, 'readdirSync').mockImplementation(((dir: string, options: { withFileTypes: true }) => {
+      const entries = readdirSync(dir, options);
+      if (!swapped && entries.some((e) => e.name === name)) {
+        swapped = true;
+        renameSync(sub, `${sub}-old`);
+        symlinkSync(outside, sub, 'dir');
+      }
+      return entries;
+    }) as typeof readdirSync);
   }
 
   beforeEach(() => {
@@ -83,15 +76,21 @@ describe.skipIf(IS_WINDOWS)('1. grep and glob re-check every directory and file 
     writeFileSync(path.join(ws, 'sub', 'secret'), 'inside\n');
   });
 
-  it('grep does not read a file through a parent swapped for a link mid-walk', async () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('grep does not read a file through a parent swapped for a link after the parent was listed', async () => {
     const prepared = await rt.prepare({ id: 'g', tool: 'grep', args: { pattern: 'SECRET' } }, ctx, policy);
-    const result = await withSwap('after-list', () => rt.commit(prepared, new AbortController().signal));
+    swapAfterListing('secret');
+    const result = await rt.commit(prepared, new AbortController().signal);
     expect('matches' in result ? result.matches : null).toEqual([]);
   });
 
-  it('glob does not list names from a directory swapped for a link before it is listed', async () => {
+  it('glob does not list names from a directory swapped for a link after it was queued', async () => {
     const prepared = await rt.prepare({ id: 'g', tool: 'glob', args: { pattern: '**/*' } }, ctx, policy);
-    const result = await withSwap('before-list', () => rt.commit(prepared, new AbortController().signal));
+    swapAfterListing('sub');
+    const result = await rt.commit(prepared, new AbortController().signal);
     expect('files' in result ? result.files : null).toEqual([]);
   });
 });
@@ -108,6 +107,51 @@ describe.skipIf(IS_WINDOWS)('2. crash recovery never deletes through a link', ()
     );
     await recoverStaleJournals(path.join(base, 'state'), [ws], []);
     expect(existsSync(path.join(outside, 'empty'))).toBe(true);
+  });
+});
+
+describe.skipIf(IS_WINDOWS)('2b. rollback never changes a file through a parent swapped for a link', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Swaps `ws/sub` for a link to `outside` right before each `name` syscall, and back right after. */
+  function swapAround(name: 'unlinkSync' | 'renameSync'): void {
+    const original = nodeFs[name] as (...args: unknown[]) => void;
+    vi.spyOn(nodeFs, name).mockImplementation(((...args: unknown[]) => {
+      renameSync(path.join(ws, 'sub'), path.join(ws, 'sub-real'));
+      symlinkSync(outside, path.join(ws, 'sub'), 'dir');
+      try {
+        original(...args);
+      } finally {
+        rmSync(path.join(ws, 'sub'));
+        renameSync(path.join(ws, 'sub-real'), path.join(ws, 'sub'));
+      }
+    }) as never);
+  }
+
+  beforeEach(() => {
+    mkdirSync(path.join(ws, 'sub'));
+    writeFileSync(path.join(ws, 'sub', 'old.txt'), 'original\n');
+    // Outside holds exactly what the run writes, so content and name alone would match.
+    writeFileSync(path.join(outside, 'new.txt'), 'run bytes\n');
+    writeFileSync(path.join(outside, 'old.txt'), 'run bytes\n');
+  });
+
+  it.each([
+    ['removes the created file', 'unlinkSync', 'sub/new.txt'],
+    ['restores the edited file', 'renameSync', 'sub/old.txt'],
+  ] as const)('%s inside the workspace when the swap lands inside the final syscall', async (_label, syscall, rel) => {
+    const tx = rt.beginTransaction();
+    await rt.commit(await prepWrite(rel, 'run bytes\n'), new AbortController().signal, tx);
+    swapAround(syscall);
+    await tx.rollback();
+    vi.restoreAllMocks();
+    expect(readFileSync(path.join(outside, 'new.txt'), 'utf8')).toBe('run bytes\n');
+    expect(readFileSync(path.join(outside, 'old.txt'), 'utf8')).toBe('run bytes\n');
+    expect(readdirSync(outside).sort()).toEqual(['new.txt', 'old.txt', 'secret']);
+    expect(existsSync(path.join(ws, 'sub', 'new.txt'))).toBe(false);
+    expect(readFileSync(path.join(ws, 'sub', 'old.txt'), 'utf8')).toBe('original\n');
   });
 });
 
@@ -130,7 +174,7 @@ describe.skipIf(IS_WINDOWS)('3. protected paths are checked on every path the re
 });
 
 describe('4. abort stops a write that already entered commit', () => {
-  it('refuses the rename after the signal aborted', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses the rename after the signal aborted', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const prepared = await prepWrite('f', 'new');
     const ac = new AbortController();
@@ -142,7 +186,7 @@ describe('4. abort stops a write that already entered commit', () => {
 });
 
 describe('5. concurrent commits on one path', () => {
-  it('lets only the first of two writes prepared against the same content succeed', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('lets only the first of two writes prepared against the same content succeed', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const a = await prepWrite('f', 'first');
     const b = await prepWrite('f', 'second');
@@ -194,7 +238,7 @@ describe('7. a pathological grep pattern can be stopped', () => {
     writeFileSync(path.join(ws, 'f'), `${'a'.repeat(40)}!\n`);
   });
 
-  it('fails with a ToolError when the per-file budget runs out', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('fails with a ToolError when the per-file budget runs out', async () => {
     const budgeted = new NodeToolRuntime({ stateDir: path.join(base, 'state'), grepFileBudgetMs: 200 });
     const prepared = await budgeted.prepare({ id: 'g', tool: 'grep', args: { pattern: '(a+)+$' } }, ctx, policy);
     const started = Date.now();
@@ -207,7 +251,7 @@ describe('7. a pathological grep pattern can be stopped', () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
-  it('stops on abort', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('stops on abort', async () => {
     const prepared = await rt.prepare({ id: 'g', tool: 'grep', args: { pattern: '(a+)+$' } }, ctx, policy);
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
@@ -265,7 +309,7 @@ describe.skipIf(IS_WINDOWS)('8. path oracle: accepted iff the real path is insid
 });
 
 describe('commit works on the copy the dispatcher hands it', () => {
-  it('commits a structured clone of the prepared call once', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('commits a structured clone of the prepared call once', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const copy = structuredClone(await prepWrite('f', 'new'));
     await rt.commit(copy, new AbortController().signal);

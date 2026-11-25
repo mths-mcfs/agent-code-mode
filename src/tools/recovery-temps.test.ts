@@ -10,6 +10,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { makeContext } from '../testing/index.js';
 import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { cutBeforeRename, pinTempMtime } from '../testing/install-faults.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 let base: string;
 let workspace: string;
@@ -64,35 +66,11 @@ const partialId = (st: ReturnType<typeof stats>) => `${st.dev}:${st.ino}:${st.si
 const id = (st: ReturnType<typeof stats>) => `${partialId(st)}:${st.ctimeNs}`;
 const oldTime = 1_700_000_000;
 
-function pinTempMtime() {
-  const open = fs.open.bind(fs);
-  vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
-    const handle = await open(file, flags, mode);
-    if (typeof file === 'string' && path.dirname(file) === folder && file.endsWith('.tmp')) {
-      const sync = handle.sync.bind(handle);
-      vi.spyOn(handle, 'sync').mockImplementation(async () => {
-        await handle.utimes(oldTime, oldTime);
-        await sync();
-      });
-    }
-    return handle;
-  });
-}
-
 async function crashBeforeRename(tx: FileTransaction) {
-  let temp = '';
-  const rename = fs.rename.bind(fs);
-  vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-    if (to !== target) return rename(from, to);
-    temp = String(from);
-    throw new Error('simulated process stop before rename');
-  });
-  const rm = fs.rm.bind(fs);
-  vi.spyOn(fs, 'rm').mockImplementation(async (file, options) => {
-    if (file !== temp) await rm(file, options);
-  });
+  const cut = cutBeforeRename(vi, target, 'simulated process stop before rename');
   await expect(write(tx)).rejects.toThrow('simulated process stop before rename');
   vi.restoreAllMocks();
+  const temp = cut.temp();
   expect(existsSync(temp)).toBe(true);
   abandon(tx);
   return temp;
@@ -105,7 +83,7 @@ async function expectConflict(tx: FileTransaction) {
   expect(isKept(tx)).toBe(true);
 }
 
-it('keeps a later separately installed file with identical bytes', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('keeps a later separately installed file with identical bytes', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   const previous = stats(target);
@@ -118,8 +96,8 @@ it('keeps a later separately installed file with identical bytes', async () => {
   expect(read(target)).toBe('pending');
 });
 
-it('keeps a same-size rewrite with the same mtime and different ctime', async () => {
-  pinTempMtime();
+it.skipIf(ROOTED_OPS_REFUSED)('keeps a same-size rewrite with the same mtime and different ctime', async () => {
+  pinTempMtime(vi, oldTime);
   const tx = new FileTransaction(state);
   await write(tx);
   vi.restoreAllMocks();
@@ -134,7 +112,7 @@ it('keeps a same-size rewrite with the same mtime and different ctime', async ()
   expect(read(target)).toBe('pending');
 });
 
-it('keeps the target when the user added a hard link', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('keeps the target when the user added a hard link', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   const before = stats(target);
@@ -148,8 +126,8 @@ it('keeps the target when the user added a hard link', async () => {
   expect([read(target), read(alias)]).toEqual(['pending', 'pending']);
 });
 
-it('keeps a replacement on an inode recorded as reused, with the same mtime', async () => {
-  pinTempMtime();
+it.skipIf(ROOTED_OPS_REFUSED)('keeps a replacement on an inode recorded as reused, with the same mtime', async () => {
+  pinTempMtime(vi, oldTime);
   const tx = new FileTransaction(state);
   await write(tx);
   vi.restoreAllMocks();
@@ -169,7 +147,7 @@ it('keeps a replacement on an inode recorded as reused, with the same mtime', as
   expect(read(target)).toBe('pending');
 });
 
-it('keeps a directory placed where the file was', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('keeps a directory placed where the file was', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   rmSync(target);
@@ -181,7 +159,7 @@ it('keeps a directory placed where the file was', async () => {
   expect(read(userFile)).toBe('user');
 });
 
-it('keeps a symlink placed where the file was', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('keeps a symlink placed where the file was', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   const userFile = path.join(base, 'user-file');
@@ -194,7 +172,7 @@ it('keeps a symlink placed where the file was', async () => {
   expect(read(userFile)).toBe('pending');
 });
 
-it('keeps a replacement user file at a recorded temp path', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('keeps a replacement user file at a recorded temp path', async () => {
   const tx = new FileTransaction(state);
   const temp = await crashBeforeRename(tx);
   const userFile = path.join(folder, 'user-file');
@@ -207,8 +185,8 @@ it('keeps a replacement user file at a recorded temp path', async () => {
   expect(read(target)).toBe('original');
 });
 
-it('keeps later user content written in place at the recorded temp path', async () => {
-  pinTempMtime();
+it.skipIf(ROOTED_OPS_REFUSED)('keeps later user content written in place at the recorded temp path', async () => {
+  pinTempMtime(vi, oldTime);
   const tx = new FileTransaction(state);
   const temp = await crashBeforeRename(tx);
   const before = stats(temp);
@@ -223,7 +201,7 @@ it('keeps later user content written in place at the recorded temp path', async 
     .toEqual({ leftover: [{ path: temp, identityMatches: true }], bytes: 'usernew' });
 });
 
-it('leaves a changed directory and its files alone when its old path is a symlink', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('leaves a changed directory and its files alone when its old path is a symlink', async () => {
   const tx = new FileTransaction(state);
   const temp = await crashBeforeRename(tx);
   const moved = path.join(base, 'elsewhere');
@@ -238,7 +216,7 @@ it('leaves a changed directory and its files alone when its old path is a symlin
   expect(existsSync(path.join(moved, path.basename(temp)))).toBe(true);
 });
 
-it.each([{ middle: 'two' }, { middle: 'one' }])('restores only the newest record when the middle wrote $middle', async ({ middle }) => {
+it.skipIf(ROOTED_OPS_REFUSED).each([{ middle: 'two' }, { middle: 'one' }])('restores only the newest record when the middle wrote $middle', async ({ middle }) => {
   const first = new FileTransaction(state);
   const second = new FileTransaction(state);
   const third = new FileTransaction(state);
@@ -260,7 +238,7 @@ it.each([{ middle: 'two' }, { middle: 'one' }])('restores only the newest record
 });
 
 
-it('fstats and syncs the same directory handle during finalization', async () => {
+it.skipIf(ROOTED_OPS_REFUSED)('fstats and syncs the same directory handle during finalization', async () => {
   const tx = new FileTransaction(state);
   await write(tx);
   const open = fs.open.bind(fs);

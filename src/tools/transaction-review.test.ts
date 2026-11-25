@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import fs from 'node:fs/promises';
+import nodeFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ import type { PolicySnapshot, Sandbox, ToolCall, Transaction } from '../core/typ
 import { FakeSandbox, makeContext, StaticHostAdapter } from '../testing/index.js';
 import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 const policy: PolicySnapshot = { host: 'generic', bashContainment: { mode: 'none' }, protectedPaths: [], payload: null };
 const signal = new AbortController().signal;
@@ -140,7 +141,9 @@ describe.skipIf(windows)('transaction journal', () => {
   it('removes new directories after the filesystem refuses to install the new file', async () => {
     const tx = tools.beginTransaction();
     const noSpace = Object.assign(new Error('simulated filesystem out of space'), { code: 'ENOSPC' });
-    vi.spyOn(fs, 'link').mockRejectedValueOnce(noSpace);
+    vi.spyOn(nodeFs, 'linkSync').mockImplementationOnce(() => {
+      throw noSpace;
+    });
 
     await expect(write('fresh/deep/file.txt', 'new bytes', tx)).rejects.toThrow(/out of space/);
     await tx.rollback();
@@ -189,7 +192,7 @@ describe.skipIf(windows)('transaction journal', () => {
 });
 
 describe('workspace paths', () => {
-  it('resolves an existing parent segment but refuses one after a missing directory', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('resolves an existing parent segment but refuses one after a missing directory', async () => {
     mkdirSync(ws('sub'));
     writeFileSync(ws('file.txt'), 'workspace document');
 
@@ -209,7 +212,7 @@ describe('workspace paths', () => {
     expect(readFileSync(sibling, 'utf8')).toBe('sibling fixture');
   });
 
-  it('follows the workspace volume’s filename case rules', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('follows the workspace volume’s filename case rules', async () => {
     writeFileSync(ws('Report.txt'), 'mixed case');
     if (!existsSync(ws('report.txt'))) writeFileSync(ws('report.txt'), 'lower case');
     const actual = read('report.txt');
@@ -222,7 +225,7 @@ describe('workspace paths', () => {
 });
 
 describe('tolerant edit', () => {
-  it('refuses two loose CRLF matches and keeps the original bytes', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('refuses two loose CRLF matches and keeps the original bytes', async () => {
     const source = 'one\r\n  option  \r\ntwo\r\n  option \r\n';
     writeFileSync(ws('options.txt'), source);
 
@@ -232,7 +235,7 @@ describe('tolerant edit', () => {
     expect(read('options.txt')).toBe(source);
   });
 
-  it('preserves CRLF and replaces only the original matches when the replacement repeats the search text', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('preserves CRLF and replaces only the original matches when the replacement repeats the search text', async () => {
     writeFileSync(ws('options.txt'), 'name\r\nvalue\r\nseparator\r\nname\r\nvalue\r\n');
 
     await expect(runtimeCall({ id: 'edit', tool: 'edit', args: {
@@ -243,7 +246,7 @@ describe('tolerant edit', () => {
 });
 
 describe('output limits', () => {
-  it('counts UTF-8 bytes for read and lets the next window retrieve the rest', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('counts UTF-8 bytes for read and lets the next window retrieve the rest', async () => {
     const line = 'é'.repeat(50_000);
     writeFileSync(ws('lines.txt'), `${line}\n${line}\n${line}\n`);
     await expect(runtimeCall({ id: 'read-1', tool: 'read', args: { path: 'lines.txt' } }))
@@ -252,7 +255,7 @@ describe('output limits', () => {
       .resolves.toMatchObject({ content: line, startLine: 3, totalLines: 3, truncated: false });
   });
 
-  it('sets the grep truncation flag only when a further match exists', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('sets the grep truncation flag only when a further match exists', async () => {
     writeFileSync(ws('a.txt'), 'needle\n');
     writeFileSync(ws('b.txt'), 'unrelated\nneedle\n');
     const args = { pattern: 'needle', maxResults: 2 };
@@ -267,7 +270,7 @@ describe('output limits', () => {
     });
   });
 
-  it('caps glob after sorting and distinguishes exact fit from truncation', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('caps glob after sorting and distinguishes exact fit from truncation', async () => {
     for (const name of ['z.txt', 'a.txt', 'b.txt']) writeFileSync(ws(name), '');
     await expect(runtimeCall({ id: 'fit', tool: 'glob', args: { pattern: '*.txt', maxResults: 3 } }))
       .resolves.toEqual({ files: [ws('a.txt'), ws('b.txt'), ws('z.txt')], truncated: false });

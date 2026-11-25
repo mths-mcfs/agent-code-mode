@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readRegularFile, syncDirStrict } from './fs-ops.js';
+import { rooted } from './rooted.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 
 const failWith = (code: string) => async (): Promise<void> => {
   throw Object.assign(new Error(`${code}: directory fsync`), { code });
@@ -20,8 +22,8 @@ describe('syncDirStrict', () => {
 });
 
 describe.skipIf(process.platform !== 'linux')('readRegularFile', () => {
-  it('stops at the byte limit even when the file is larger than its reported size', async () => {
+  it.skipIf(ROOTED_OPS_REFUSED)('stops at the byte limit even when the file is larger than its reported size', async () => {
     // A /proc file reports size 0 and holds more.
-    await expect(readRegularFile(`/proc/${process.pid}/status`, 16)).rejects.toThrow(/more than the 16-byte limit/);
+    await expect(readRegularFile(rooted(`/proc/${process.pid}`, `/proc/${process.pid}/status`), 16)).rejects.toThrow(/more than the 16-byte limit/);
   });
 });

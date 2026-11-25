@@ -22,7 +22,6 @@ import {
   currentDirId,
   installIdFrom,
   tempLeftover,
-  assertDirUnchanged,
   atomicWrite,
   errnoCode,
   readRegularFile,
@@ -34,6 +33,7 @@ import {
 } from './fs-ops.js';
 import { findMatchingPattern } from '../core/paths.js';
 import { expandTilde, isInsideDir, isInsideGitDir } from './jail.js';
+import { type RootedPath, rooted } from './rooted.js';
 
 /** Above this many bytes of originals a transaction refuses further writes. */
 export const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
@@ -128,6 +128,7 @@ async function assertPrivateDir(dir: string): Promise<void> {
 
 interface LiveEntry {
   readonly entry: Entry;
+  readonly root: string;
   /** Original bytes, kept in memory for the in-process rollback. */
   readonly bytes: Buffer | null;
   /** What this transaction last wrote, or null after a failed write. */
@@ -270,6 +271,7 @@ export class FileTransaction implements Transaction {
           originalId: before?.id ?? null,
           installs: [],
         },
+        root,
         bytes: before?.bytes ?? null,
         last: null,
       });
@@ -327,7 +329,8 @@ export class FileTransaction implements Transaction {
       for (const live of [...this.#entries.values()].reverse()) {
         const { entry } = live;
         try {
-          const current = await currentContent(entry.path);
+          const file = rooted(live.root, entry.path);
+          const current = await readRegularFile(file);
           const currentHash = current ? sha256(current.bytes) : null;
           const originalHash = entry.existed ? entry.original : null;
           if (currentHash === originalHash) continue;
@@ -335,7 +338,7 @@ export class FileTransaction implements Transaction {
             skipped.push({ path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what this run wrote' });
             continue;
           }
-          await restoreEntry(entry, live.bytes, currentHash);
+          await restoreEntry(file, entry, live.bytes, currentHash);
           restored.push(entry.path);
         } catch (err) {
           skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
@@ -417,30 +420,15 @@ export class FileTransaction implements Transaction {
   }
 }
 
-/**
- * Content at `abs`, read only through real directories: null when the file
- * (or its directory) is gone; `stale` when its directory now resolves
- * elsewhere (a link was swapped in), so nothing outside is read or touched.
- */
-async function currentContent(abs: string): Promise<RegularFile | null> {
-  const parent = await fs.lstat(path.dirname(abs)).catch((err: unknown) => {
-    if (isGone(err)) return null;
-    throw err;
-  });
-  if (!parent) return null;
-  await assertDirUnchanged(path.dirname(abs));
-  return readRegularFile(abs);
-}
-
-async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: string | null): Promise<void> {
+async function restoreEntry(file: RootedPath, entry: Entry, bytes: Buffer | null, currentHash: string | null): Promise<void> {
   if (isInsideGitDir(entry.path)) throw new ToolError('protected-path', 'inside a .git directory');
   if (!entry.existed) {
-    if (currentHash !== null) await removeRegularFile(entry.path, currentHash);
+    if (currentHash !== null) await removeRegularFile(file, currentHash);
     return;
   }
   if (bytes === null || sha256(bytes) !== entry.original) throw new ToolError('tool-error', 'the saved original is damaged');
   const expect = currentHash === null ? ({ kind: 'absent' } as const) : ({ kind: 'hash', sha256: currentHash } as const);
-  await atomicWrite(entry.path, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {});
+  await atomicWrite(file, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {});
 }
 
 function touchedDirs(files: readonly string[], createdDirs: readonly string[]): string[] {
@@ -570,7 +558,8 @@ async function undoEntry(
   const { manifest, dir, restored, skipped, leftoverTemps } = record;
   try {
     // The record is data on disk: each path is checked like a tool argument.
-    if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
+    const root = path.isAbsolute(entry.path) ? roots.find((r) => isInsideDir(r, entry.path)) : undefined;
+    if (root === undefined) {
       skipped.push({ path: entry.path, reason: 'error', detail: 'outside the workspace roots; not touched' });
       return;
     }
@@ -587,7 +576,8 @@ async function undoEntry(
       const left = install.temp === undefined ? undefined : await tempLeftover(install.temp, install.id);
       if (install.temp !== undefined && left !== undefined) leftoverTemps.push({ path: install.temp, ...left });
     }
-    const current = await currentContent(entry.path);
+    const file = rooted(root, entry.path);
+    const current = await readRegularFile(file);
     const untouched = current === null ? !entry.existed : current.id === entry.originalId;
     if (untouched) return;
     const lastConfirmed = (entry.installs ?? []).findLast((install) => install.confirmed !== undefined)?.confirmed;
@@ -600,7 +590,7 @@ async function undoEntry(
       return;
     }
     const bytes = await readOriginal(dir, entry);
-    await restoreEntry(entry, bytes, sha256(current.bytes));
+    await restoreEntry(file, entry, bytes, sha256(current.bytes));
     restored.push(entry.path);
   } catch (err) {
     skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
