@@ -1,5 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
+import type { Socket } from 'node:net';
 import path from 'node:path';
 import { errorMessage } from '../core/errors.js';
 
@@ -251,7 +252,8 @@ class JobHelper {
     const encoded = Buffer.from(HELPER_SCRIPT, 'utf16le').toString('base64');
     this.#child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true });
     this.#child.unref();
-    for (const s of [this.#child.stdin, this.#child.stdout, this.#child.stderr]) (s as unknown as { unref?: () => void }).unref?.();
+    // Child stdio pipes are sockets; unref'd, the idle helper never keeps the process alive.
+    for (const s of [this.#child.stdin, this.#child.stdout, this.#child.stderr]) (s as Socket).unref();
     this.#child.stdout.setEncoding('utf8');
     this.#child.stdout.on('data', (chunk: string) => this.#onData(chunk));
     this.#child.stderr.setEncoding('utf8');

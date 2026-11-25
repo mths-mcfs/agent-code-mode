@@ -134,8 +134,7 @@ export function spawnAndWait(
     let killing = false;
     let job: Promise<WindowsJob | undefined> = Promise.resolve(undefined);
     if (windows && child.pid !== undefined) {
-      const pid = child.pid;
-      job = attachWindowsJob(pid).then(
+      job = attachWindowsJob(child.pid).then(
         (j) => {
           // A call stopped while the job was made never runs its command.
           if (killing) child.stdin?.destroy();

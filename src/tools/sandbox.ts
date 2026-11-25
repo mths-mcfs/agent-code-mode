@@ -113,7 +113,39 @@ export function withSandbox<T>(
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
     const m = await loadManager();
     try {
-      return await runInSandbox(m, command, shell, cwd, containment, denyWrite, signal, fn);
+      try {
+        await m.initialize(
+          { network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
+          async () => containment.network,
+        );
+        if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
+        if (!probed) {
+          await probe(m, shell, signal);
+          probed = true;
+        }
+      } catch (err) {
+        if (err instanceof ToolError && err.code === 'cancelled') throw err;
+        throw new ToolError('containment-unavailable', `sandbox runtime failed to start: ${errorMessage(err)}`);
+      }
+      let wrapped: WrappedCommand;
+      try {
+        wrapped = await m.wrapWithSandboxArgv(
+          command,
+          shell,
+          {
+            filesystem: {
+              denyRead: [],
+              allowWrite: containment.readOnly ? [] : [...containment.writableRoots],
+              denyWrite: [...denyWrite],
+            },
+          },
+          undefined,
+          cwd,
+        );
+      } catch (err) {
+        throw new ToolError('containment-unavailable', `sandbox runtime could not wrap the command: ${errorMessage(err)}`);
+      }
+      return await fn(wrapped);
     } finally {
       try {
         m.cleanupAfterCommand();
@@ -124,50 +156,4 @@ export function withSandbox<T>(
       await m.reset().catch(() => undefined);
     }
   });
-}
-
-async function runInSandbox<T>(
-  m: Manager,
-  command: string,
-  shell: string,
-  cwd: string,
-  containment: Extract<BashContainment, { mode: 'sandbox' }>,
-  denyWrite: readonly string[],
-  signal: AbortSignal,
-  fn: (wrapped: WrappedCommand) => Promise<T>,
-): Promise<T> {
-  const network = containment.network;
-  try {
-    await m.initialize(
-      { network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
-      async () => network,
-    );
-    if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-    if (!probed) {
-      await probe(m, shell, signal);
-      probed = true;
-    }
-  } catch (err) {
-    if (err instanceof ToolError && err.code === 'cancelled') throw err;
-    throw new ToolError('containment-unavailable', `sandbox runtime failed to start: ${errorMessage(err)}`);
-  }
-  let wrapped: WrappedCommand;
-  try {
-    wrapped = await m.wrapWithSandboxArgv(
-      command,
-      shell,
-      {
-        filesystem: {
-          denyRead: [],
-          allowWrite: containment.readOnly ? [] : [...containment.writableRoots],
-          denyWrite: [...denyWrite],
-        },
-      },
-      undefined,
-      cwd,
-    );
-  } catch (err) {
-    throw new ToolError('containment-unavailable', `sandbox runtime could not wrap the command: ${errorMessage(err)}`);
-  }
-  return fn(wrapped);
 }
