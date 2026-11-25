@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { PolicySnapshot, ToolCall } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
+import { stopProcess } from '../testing/processes.js';
 import { cwdAnchor, procFdAnchor, rooted, within } from './rooted.js';
 import { NodeToolRuntime } from './runtime.js';
 
@@ -80,9 +81,15 @@ describe.each(anchors)('%s anchor', (_name, anchor) => {
 });
 
 describe.skipIf(IS_WINDOWS)('working directory anchor when the server cwd disappears', () => {
-  it('moves the process to the file system root and reports it once, never staying in the workspace', async () => {
+  it.each([
+    ['renamed', (dir: string) => renameSync(dir, `${dir}-moved`)],
+    ['replaced by another directory at the same path', (dir: string) => {
+      renameSync(dir, `${dir}-moved`);
+      mkdirSync(dir);
+    }],
+  ] as const)('moves the process to the file system root when the cwd is %s, reports it once, and never stays in the workspace', async (_how, lose) => {
     const before = process.cwd();
-    const serverCwd = path.join(base, 'server-cwd');
+    const serverCwd = path.join(base, `server-cwd-${_how.length}`);
     mkdirSync(serverCwd);
     const warnings: Error[] = [];
     const onWarning = (w: Error): void => {
@@ -91,7 +98,7 @@ describe.skipIf(IS_WINDOWS)('working directory anchor when the server cwd disapp
     process.on('warning', onWarning);
     process.chdir(serverCwd);
     try {
-      cwdAnchor(rooted(ws, path.join(ws, 'a')), () => renameSync(serverCwd, `${serverCwd}-moved`));
+      cwdAnchor(rooted(ws, path.join(ws, 'a')), () => lose(serverCwd));
       expect(process.cwd()).toBe(path.parse(ws).root);
       cwdAnchor(rooted(ws, path.join(ws, 'a')), () => undefined);
       expect(process.cwd()).toBe(path.parse(ws).root);
@@ -133,8 +140,14 @@ describe.skipIf(IS_WINDOWS)('search path that changes between prepare and commit
 
 describe.skipIf(!IS_WINDOWS)('Windows', () => {
   it('refuses rooted operations with the reason', () => {
-    expect(() => within(rooted(ws, path.join(ws, 'a')), () => undefined)).toThrow(
-      'read, write, edit, grep and glob are not available on Windows: Node cannot open a file relative to a directory handle there',
+    let message = '';
+    try {
+      within(rooted(ws, path.join(ws, 'a')), () => undefined);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toBe(
+      'read, write, edit, grep and glob are not available on Windows: Node cannot open a file relative to a directory handle there, so the runtime cannot keep a path from being redirected outside the workspace while it is used (#28)',
     );
   });
 
@@ -205,8 +218,7 @@ describe.skipIf(IS_WINDOWS)('racing symlink swap', () => {
         }
       }
     } finally {
-      attacker.kill('SIGKILL');
-      await new Promise((resolve) => attacker.once('exit', resolve));
+      await stopProcess(attacker);
     }
     const victimAfter = lstatSync(victim, { bigint: true });
     expect(readFileSync(victim, 'utf8')).toBe('same\n');

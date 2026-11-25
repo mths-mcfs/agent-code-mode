@@ -98,12 +98,7 @@ export const cwdAnchor: Anchor = (dir, fn) => {
   if (!isMainThread) {
     throw new ToolError('containment-unavailable', 'rooted file operations on this platform move the working directory, which only the main thread can do');
   }
-  let orig: string | undefined;
-  try {
-    orig = process.cwd();
-  } catch {
-    orig = undefined;
-  }
+  const orig = currentCwd();
   try {
     process.chdir(dir.root);
     for (let i = 0; i < dir.parts.length; i++) {
@@ -123,34 +118,51 @@ export const cwdAnchor: Anchor = (dir, fn) => {
   }
 };
 
-let cwdLossReported = false;
+interface Cwd {
+  readonly path: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+function currentCwd(): Cwd | undefined {
+  try {
+    const st = fs.statSync('.', { bigint: true });
+    return { path: process.cwd(), dev: st.dev, ino: st.ino };
+  } catch {
+    return undefined;
+  }
+}
+
+const lostCwds = new Set<string>();
 
 /**
- * Returns to the cwd the block started from. When that directory is gone,
- * the process moves to the file system root instead of staying inside the
- * workspace, and says so once.
+ * Returns to the directory the block started from. When it is gone, or its
+ * path now names another directory, the process moves to the file system
+ * root instead of staying inside the workspace, and says so once per path.
  */
-function leaveWorkspace(orig: string | undefined, root: string): void {
+function leaveWorkspace(orig: Cwd | undefined, root: string): void {
   if (orig !== undefined) {
     try {
-      process.chdir(orig);
-      return;
+      process.chdir(orig.path);
+      const back = fs.statSync('.', { bigint: true });
+      if (back.dev === orig.dev && back.ino === orig.ino) return;
     } catch {
       // Gone or renamed: fall through to the file system root.
     }
   }
   const top = path.parse(root).root;
   process.chdir(top);
-  if (cwdLossReported) return;
-  cwdLossReported = true;
-  process.emitWarning(`the server's working directory ${orig ?? '(unknown)'} no longer exists; it now works from ${top}`, { code: 'ACM_CWD_LOST' });
+  const lost = orig?.path ?? '(unknown)';
+  if (lostCwds.has(lost)) return;
+  lostCwds.add(lost);
+  process.emitWarning(`the server's working directory ${lost} is gone or was replaced; it now works from ${top}`, { code: 'ACM_CWD_LOST' });
 }
 
 /** Until a Windows backend lands (#28). */
 const windowsAnchor: Anchor = () => {
   throw new ToolError(
     'containment-unavailable',
-    'read, write, edit, grep and glob are not available on Windows: Node cannot open a file relative to a directory handle there, so the runtime cannot keep a path from being redirected outside the workspace while it is used',
+    'read, write, edit, grep and glob are not available on Windows: Node cannot open a file relative to a directory handle there, so the runtime cannot keep a path from being redirected outside the workspace while it is used (#28)',
   );
 };
 
