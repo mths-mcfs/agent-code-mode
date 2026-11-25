@@ -1,9 +1,10 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type { BashEffect, BashResult } from '../core/types.js';
-import { killPosixTree, processClock, sessionLeader, startInWindowsJob } from './process-tree.js';
+import { killPosixTree, processClock, sentinelOf, startInWindowsJob, type SessionLeader } from './process-tree.js';
 import { withSandbox } from './sandbox.js';
 
 /** Default `bash` timeout. */
@@ -110,11 +111,41 @@ export interface SpawnHooks {
   readonly killWaitMs?: number;
 }
 
+/**
+ * Run first on POSIX: starts the call's sentinel, a bash that keeps stopping
+ * itself (ignoring the SIGHUP an orphaned group gets), detached from the
+ * shell's jobs, and reports its pid on fd 3, which it then closes. While the
+ * sentinel lives, the call's process group and session ids cannot go to
+ * another process, so every member is provably the call's.
+ */
+const POSIX_SENTINEL = `(BASH_ENV= ENV= "$BASH" -c 'trap "" HUP; while :; do kill -STOP $$; done' </dev/null >/dev/null 2>&1 3>&- & echo $! >&3); exec 3>&-; `;
+
 function posixTree(child: ChildProcess): CallTree {
   if (child.pid === undefined) return { kill: async () => [], exited: () => undefined };
-  let leader = sessionLeader(child.pid);
+  let leader: SessionLeader = { pid: child.pid };
+  const report = child.stdio[3];
+  const sentinel = new Promise<void>((resolve) => {
+    if (!(report instanceof Readable)) return resolve();
+    let text = '';
+    report.setEncoding('utf8');
+    report.on('data', (chunk: string) => {
+      text += chunk;
+      const pid = Number(text.split('\n')[0]);
+      if (text.includes('\n') && Number.isInteger(pid) && pid > 0) {
+        // Only while the shell is known to run is a process in its group provably the call's.
+        const found = leader.exitedAt === undefined ? sentinelOf(pid, leader.pid) : undefined;
+        if (found) leader = { ...leader, sentinel: found };
+        resolve();
+      }
+    });
+    report.once('close', () => resolve());
+    report.once('error', () => resolve());
+  });
   return {
-    kill: async () => killPosixTree(leader).skipped,
+    kill: async () => {
+      await sentinel;
+      return killPosixTree(leader).skipped;
+    },
     exited: () => {
       leader = { ...leader, exitedAt: leader.exitedAt ?? processClock() };
     },
@@ -137,11 +168,11 @@ export function spawnAndWait(
       return;
     }
     const windows = process.platform === 'win32';
-    const args = windows ? ['-c', WINDOWS_GATE, 'bash', script] : ['-c', script];
+    const args = windows ? ['-c', WINDOWS_GATE, 'bash', script] : ['-c', POSIX_SENTINEL + script];
     const child = spawn(shell, args, {
       cwd,
       env: windows ? bootstrapEnv(env) : env,
-      stdio: [windows ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      stdio: windows ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'pipe'],
       detached: !windows,
       windowsHide: true,
     });
@@ -197,6 +228,7 @@ export function spawnAndWait(
     const stop = (): void => {
       void killAll().then(
         () => {
+          if (settled) return;
           killWait ??= setTimeout(() => giveUp(`bash did not exit within ${hooks.killWaitMs ?? KILL_WAIT_MS} ms of being killed`), hooks.killWaitMs ?? KILL_WAIT_MS);
         },
         (e: unknown) => giveUp(errorMessage(e)),
@@ -212,7 +244,7 @@ export function spawnAndWait(
         () => {
           if (startError) return reject(startError);
           if (signal.aborted && !timedOut) return reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
-          const note = skipped.size === 0 ? '' : `\n[agent-code-mode] cleanup left ${skipped.size} process(es) alone: pid ${[...skipped].join(', ')} now names another process\n`;
+          const note = skipped.size === 0 ? '' : `\n[agent-code-mode] cleanup could not prove that pid ${[...skipped].join(', ')} belonged to this call, so it sent no signal: it may still be running\n`;
           resolve({ exitCode: code, signal: exitSignal, stdout: out.text(), stderr: err.text() + note, truncated: out.truncated || err.truncated, timedOut });
         },
         (e: unknown) => reject(new ToolError('tool-error', `bash could not stop every process of the call: ${errorMessage(e)}`)),

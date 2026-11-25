@@ -22,6 +22,8 @@ export interface ProcessTable {
   startTimes(pids: readonly number[]): Map<number, number>;
   /** The current time on the clock of `start`. */
   now(): number;
+  /** The granularity of `start`, in its units: a start time names that whole interval. */
+  readonly resolution: number;
   /** False when the signal was not delivered. */
   signal(pid: number, sig: NodeJS.Signals): boolean;
 }
@@ -69,9 +71,9 @@ const linuxTable: Omit<ProcessTable, 'signal'> = {
     return out;
   },
   now() {
-    const uptime = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
-    return Math.ceil(uptime * ticksPerSecond());
+    return Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]) * ticksPerSecond();
   },
+  resolution: 1,
 };
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -105,6 +107,7 @@ const psTable: Omit<ProcessTable, 'signal'> = {
     return new Map(psRows([...PS_COLUMNS, '-p', pids.join(',')]).map((r) => [r.pid, r.start]));
   },
   now: () => Date.now(),
+  resolution: 1000,
 };
 
 function sendSignal(pid: number, sig: NodeJS.Signals): boolean {
@@ -121,15 +124,16 @@ const osTable: ProcessTable = { ...(process.platform === 'linux' ? linuxTable : 
 /** The shell a call spawned detached, so it leads its own session and process group. */
 export interface SessionLeader {
   readonly pid: number;
-  /** Its start time, read at spawn; undefined when it could not be read. */
-  readonly start: number | undefined;
-  /** When its exit was seen, on the table's clock; undefined while it runs. */
+  /** When its exit was seen, on the table's clock; undefined while it is not known to have exited. */
   readonly exitedAt?: number;
+  /** A process of the call that keeps its group and session ids reserved while it lives. */
+  readonly sentinel?: { readonly pid: number; readonly start: number };
 }
 
-/** Reads the identity of a just-spawned leader, before Node can reap it. */
-export function sessionLeader(pid: number, table: ProcessTable = osTable): SessionLeader {
-  return { pid, start: table.startTimes([pid]).get(pid) };
+/** Identifies the sentinel `pid` reported, by its start time, if it is in the group `groupId`. */
+export function sentinelOf(pid: number, groupId: number, table: ProcessTable = osTable): { pid: number; start: number } | undefined {
+  const row = table.list().find((p) => p.pid === pid && p.pgid === groupId);
+  return row ? { pid, start: row.start } : undefined;
 }
 
 export function processClock(table: ProcessTable = osTable): number {
@@ -137,27 +141,33 @@ export function processClock(table: ProcessTable = osTable): number {
 }
 
 /**
- * Kills every process of the call that `leader` leads: its process group, its
- * session where the platform reports one, and every descendant of those,
- * until a round finds nothing new.
+ * Kills every process of the call that `leader` leads that can be proven to
+ * belong to it: its process group, its session where the platform reports
+ * one, and every descendant of those, until a round finds nothing new.
  *
  * A pid or group id is only a number, which the OS hands to another process
- * once its own is gone. So:
+ * once its own is gone, and signalling a stranger is worse than leaving a
+ * survivor. So a process whose membership or identity cannot be proven gets
+ * no signal and is returned in `skipped`, for the call to report:
+ * - Until the leader's exit is seen, Node has not reaped it, so its pid and
+ *   ids still name it (alive or a zombie): the group is ours and is
+ *   signalled. Once the exit is seen, the group is signalled by id only while
+ *   the call's sentinel, checked by pid, start time and group, lives in it,
+ *   because then the ids cannot have gone to another process.
+ * - After the exit with no sentinel, a process counts as a member by its group or session id
+ *   only if it started strictly before the clock interval the exit was seen
+ *   in: the ids stay reserved while any member lives, so they could have
+ *   gone to another process only after the exit.
  * - Each process is stopped first and kept only if its start time still
  *   matches the one read with it; a stopped process cannot exit, so its pid
- *   keeps naming it. One that changed is resumed and returned in `skipped`.
- * - The group is signalled by its id only while the leader, checked by start
- *   time right before, still lives in it.
- * - Once the leader is gone, a process counts as a member by its group or
- *   session id only if it started before the leader's exit was seen: the id
- *   stays reserved while any member lives, so it could have gone to another
- *   process only after every member exited.
+ *   keeps naming it. One that changed is resumed.
  */
 export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTable): { readonly skipped: readonly number[] } {
   const id = leader.pid;
-  const leaderAlive = (): boolean => leader.start !== undefined && table.startTimes([id]).get(id) === leader.start;
-  const bound = leader.exitedAt ?? table.now();
-  const groupOurs = leaderAlive();
+  const s = leader.sentinel;
+  const sentinelHolds = (): boolean => s !== undefined && table.list().some((p) => p.pid === s.pid && p.start === s.start && p.pgid === id);
+  const groupOurs = leader.exitedAt === undefined || sentinelHolds();
+  const bound = groupOurs || leader.exitedAt === undefined ? Infinity : Math.floor(leader.exitedAt / table.resolution) * table.resolution;
   if (groupOurs) table.signal(-id, 'SIGSTOP');
   const found = new Map<number, number>();
   const skipped: number[] = [];
@@ -165,8 +175,12 @@ export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTab
     const stopped: ProcessEntry[] = [];
     for (const p of table.list()) {
       if (found.has(p.pid) || p.pid === process.pid || skipped.includes(p.pid)) continue;
-      const member = (p.pgid === id || p.sid === id) && (groupOurs || p.start <= bound);
-      if (!member && !found.has(p.ppid)) continue;
+      const byId = p.pgid === id || p.sid === id;
+      if (!found.has(p.ppid) && !byId) continue;
+      if (!found.has(p.ppid) && p.start >= bound) {
+        skipped.push(p.pid);
+        continue;
+      }
       if (table.signal(p.pid, 'SIGSTOP')) stopped.push(p);
     }
     if (stopped.length === 0) break;
@@ -179,7 +193,7 @@ export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTab
       }
     }
   }
-  if (leaderAlive()) table.signal(-id, 'SIGKILL');
+  if (leader.exitedAt === undefined || sentinelHolds()) table.signal(-id, 'SIGKILL');
   const before = table.startTimes([...found.keys()]);
   for (const [pid, start] of found) {
     if (before.get(pid) === start) table.signal(pid, 'SIGKILL');

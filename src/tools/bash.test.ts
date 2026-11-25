@@ -3,7 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
@@ -112,6 +112,31 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     const r = await bash('set -m; sleep 100 & echo $!');
     const pid = Number(r.stdout.trim());
     expect(await eventually(() => !alive(pid))).toBe(true);
+  });
+
+  it('arms no kill watchdog when the kill confirms only after bash exited and closed', async () => {
+    const ac = new AbortController();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    let confirmed: Promise<readonly number[]> | undefined;
+    const tree: CallTree = {
+      kill: () =>
+        (confirmed ??= new Promise((resolve) => {
+          try {
+            process.kill(-Number(readFileSync(path.join(ws, 'leader.pid'), 'utf8')), 'SIGKILL');
+          } catch {
+            // Already gone.
+          }
+          setTimeout(() => resolve([]), 300);
+        })),
+      exited: () => undefined,
+    };
+    const call = spawnAndWait(findBash() ?? 'bash', 'echo $$ > leader.pid; sleep 30', process.env, ws, 60_000, ac.signal, 1024, { tree: () => tree, killWaitMs: 1234 });
+    expect(await eventually(() => existsSync(path.join(ws, 'leader.pid')))).toBe(true);
+    ac.abort();
+    await expect(call).rejects.toMatchObject({ code: 'cancelled' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(timers.mock.calls.filter(([, ms]) => ms === 1234)).toEqual([]);
+    timers.mockRestore();
   });
 
   describe('when the processes cannot be confirmed dead', () => {
