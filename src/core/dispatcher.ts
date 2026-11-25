@@ -5,6 +5,7 @@ import { findMatchingPattern } from './paths.js';
 import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
 import type {
   BashContainment,
+  BashResult,
   BindingError,
   CallLogEntry,
   CallReply,
@@ -14,6 +15,8 @@ import type {
   PolicyLoadError,
   PolicySnapshot,
   PreparedCall,
+  PreparedCallOf,
+  SearchLowering,
   SessionContext,
   ToolCall,
   ToolResult,
@@ -72,6 +75,19 @@ function containmentEquals(a: BashContainment, b: BashContainment): boolean {
   );
 }
 
+function boundFileMismatch(first: PreparedCall, second: PreparedCall): string | undefined {
+  if ((first.tool !== 'write' && first.tool !== 'edit') || (second.tool !== 'write' && second.tool !== 'edit') || first.tool !== second.tool) {
+    return 'hook bound its rewrite to a file version, but the call has no file effect';
+  }
+  if (second.effect.absPath !== first.effect.absPath) {
+    return `hook rewrite changed the destination after the hook evaluated ${first.effect.absPath}`;
+  }
+  if (second.effect.beforeHash !== first.effect.beforeHash) {
+    return `${first.effect.absPath} changed after the hook evaluated it; the rewrite was not applied`;
+  }
+  return undefined;
+}
+
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
   if (signal.aborted) {
     promise.catch(() => undefined);
@@ -103,7 +119,14 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typ
  *   `authorize`. `ask` becomes deny `ask-unavailable`. A throwing or malformed
  *   adapter becomes deny `hook-error`.
  * - `updatedArgs` are re-parsed, re-prepared and re-checked statically; a
- *   failure there is a deny (source `hook`).
+ *   failure there is a deny (source `hook`). With `bindsPreparedFile`, the
+ *   re-prepared write/edit must keep the first preparation's `absPath` and
+ *   `beforeHash`, or it is denied (source `hook`) and nothing is committed.
+ * - with `HostAdapter.lowerSearch`, a grep/glob is prepared, checked,
+ *   authorized and committed as the exact bash command it lowers to, and
+ *   its result is `parse` of that command's result. A failed lowering
+ *   commits nothing; a hook rewrite of the lowered command is a deny
+ *   (source `hook`); it does not count as a bash commit.
  * - write/edit on a protected path is refused even if the tool runtime missed
  *   it; a bash call whose containment differs from the policy is denied
  *   `containment-unavailable`.
@@ -293,6 +316,15 @@ export class Dispatcher<P = unknown> {
     let prepared = first.prepared;
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
 
+    let lowered: { readonly tool: 'grep' | 'glob'; readonly lowering: SearchLowering } | undefined;
+    if ((prepared.tool === 'grep' || prepared.tool === 'glob') && this.#opts.adapter.lowerSearch) {
+      const bash = await this.#lower(prepared, policy);
+      if ('kind' in bash) return fail(bash);
+      lowered = { tool: prepared.tool, lowering: bash.lowering };
+      prepared = bash.prepared;
+      if (this.#hasStopped()) return fail(this.#stoppedFailure());
+    }
+
     const staticFailure = this.#checkStatic(prepared, policy);
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
     if (staticFailure) return fail(staticFailure);
@@ -304,6 +336,9 @@ export class Dispatcher<P = unknown> {
       return fail({ kind: 'deny', source: 'ask-unavailable', reason: `host would ask the user and no interactive channel exists: ${decision.reason}` });
     }
 
+    if (Object.hasOwn(decision, 'updatedArgs') && lowered !== undefined) {
+      return fail({ kind: 'deny', source: 'hook', reason: `hook rewrote the command ${call.tool} runs as, which cannot be mapped back to ${call.tool}` });
+    }
     if (Object.hasOwn(decision, 'updatedArgs')) {
       const reparsed = parseToolCall(call.tool, decision.updatedArgs, call.id);
       if (reparsed instanceof ToolError) {
@@ -314,6 +349,10 @@ export class Dispatcher<P = unknown> {
         const reason = second.kind === 'deny' ? second.reason : second.error.message;
         return fail({ kind: 'deny', source: second.kind === 'deny' ? second.source : 'hook', reason: `hook updated input was refused: ${reason}` });
       }
+      if (decision.bindsPreparedFile === true) {
+        const unbound = boundFileMismatch(prepared, second.prepared);
+        if (unbound !== undefined) return fail({ kind: 'deny', source: 'hook', reason: unbound });
+      }
       const recheck = this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);
       prepared = second.prepared;
@@ -322,7 +361,28 @@ export class Dispatcher<P = unknown> {
     }
 
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
-    return this.#commit(slot, prepared, summary, policy, started);
+    return this.#commit(slot, prepared, summary, policy, started, lowered);
+  }
+
+  async #lower(
+    search: PreparedCallOf<'grep'> | PreparedCallOf<'glob'>,
+    policy: PolicySnapshot<P>,
+  ): Promise<{ prepared: PreparedCall; lowering: SearchLowering } | Failure> {
+    let lowering: SearchLowering;
+    try {
+      const returned: unknown = this.#opts.adapter.lowerSearch?.(search, this.#opts.ctx, policy);
+      if (!isLowering(returned)) return { kind: 'deny', source: 'rule', reason: `the host adapter returned no shell form for ${search.tool}` };
+      lowering = returned;
+    } catch (err) {
+      if (err instanceof ToolError) return { kind: 'error', error: err };
+      return { kind: 'deny', source: 'rule', reason: `the host adapter failed to build the shell form of ${search.tool}: ${errorMessage(err)}` };
+    }
+    const bash = await this.#prepareChecked({ id: search.id, tool: 'bash', args: { command: lowering.command } }, policy);
+    if ('kind' in bash) return bash;
+    if (bash.prepared.tool !== 'bash' || bash.prepared.effect.command !== lowering.command) {
+      return { kind: 'error', error: new ToolError('tool-error', `the tool runtime would not run the exact command ${search.tool} runs as`) };
+    }
+    return { prepared: bash.prepared, lowering };
   }
 
   async #prepareChecked(call: ToolCall, policy: PolicySnapshot<P>): Promise<{ prepared: PreparedCall } | Failure> {
@@ -393,8 +453,10 @@ export class Dispatcher<P = unknown> {
     summary: string,
     policy: PolicySnapshot<P>,
     started: number,
+    lowered?: { readonly tool: 'grep' | 'glob'; readonly lowering: SearchLowering },
   ): Promise<CallReply> {
     const signal = this.#abort.signal;
+    const tool = lowered?.tool ?? prepared.tool;
     const transaction = this.#opts.transaction;
     const journaled = transaction !== undefined && (prepared.tool === 'write' || prepared.tool === 'edit');
     let result: ToolResult;
@@ -409,7 +471,7 @@ export class Dispatcher<P = unknown> {
         );
         if (prepared.tool === 'write' || prepared.tool === 'edit') this.#addChanged(prepared.effect.absPath);
       }
-      return this.#fail(slot, prepared.id, prepared.tool, summary, started, this.#toolFailure(err));
+      return this.#fail(slot, prepared.id, tool, summary, started, this.#toolFailure(err));
     } finally {
       if (journaled) this.#journalWrite = undefined;
     }
@@ -423,8 +485,17 @@ export class Dispatcher<P = unknown> {
       this.#addChanged(prepared.effect.absPath);
       const diff = 'diff' in result && typeof result.diff === 'string' ? result.diff : prepared.effect.diff;
       this.#diffs.push(diff.endsWith('\n') || diff === '' ? diff : `${diff}\n`);
-    } else if (prepared.tool === 'bash') {
+    } else if (prepared.tool === 'bash' && lowered === undefined) {
       this.#bashCommits++;
+    }
+    let value: ToolResult = result;
+    if (lowered !== undefined) {
+      if (!isBashResult(result)) return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error: new ToolError('tool-error', 'the tool runtime returned no bash result') });
+      try {
+        value = lowered.lowering.parse(result);
+      } catch (err) {
+        return this.#fail(slot, prepared.id, tool, summary, started, this.#toolFailure(err));
+      }
     }
 
     const post = this.#opts.adapter.postToolUse;
@@ -437,8 +508,8 @@ export class Dispatcher<P = unknown> {
       }
     }
 
-    this.#calls[slot] = { id: prepared.id, tool: prepared.tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
-    return { ok: true, value: result };
+    this.#calls[slot] = { id: prepared.id, tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+    return { ok: true, value };
   }
 
   #toolFailure(err: unknown): Failure {
@@ -495,6 +566,14 @@ export class Dispatcher<P = unknown> {
   #elapsed(started: number): number {
     return Math.max(0, Math.round(this.#now() - started));
   }
+}
+
+function isBashResult(r: ToolResult): r is BashResult {
+  return 'stdout' in r && 'exitCode' in r;
+}
+
+function isLowering(v: unknown): v is SearchLowering {
+  return typeof v === 'object' && v !== null && 'command' in v && typeof v.command === 'string' && v.command !== '' && 'parse' in v && typeof v.parse === 'function';
 }
 
 /** Path relative to `cwd` when inside it, else the absolute path. */
