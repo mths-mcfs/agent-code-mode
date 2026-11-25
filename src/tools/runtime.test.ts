@@ -483,6 +483,14 @@ describe('search filters', () => {
     expect(await grepFiles({ pattern: 'hit' })).toEqual(['kept.txt']);
   });
 
+  it('applies the root .gitignore to a search started inside a directory whose name begins with two dots', async () => {
+    writeFileSync(path.join(ws, '.gitignore'), '*.log\n');
+    mkdirSync(path.join(ws, '..app', 'x'), { recursive: true });
+    writeFileSync(path.join(ws, '..app', 'x', 'a.log'), 'hit\n');
+    writeFileSync(path.join(ws, '..app', 'x', 'a.txt'), 'hit\n');
+    expect(await grepFiles({ pattern: 'hit', path: '..app/x' })).toEqual([path.join('..app', 'x', 'a.txt')]);
+  });
+
   it('keeps ignoring files a directory negation does not re-include', async () => {
     mkdirSync(path.join(ws, 'logs'));
     writeFileSync(path.join(ws, 'logs', '.gitignore'), '*.log\n!sub/\n');

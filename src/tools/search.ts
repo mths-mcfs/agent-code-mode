@@ -6,6 +6,7 @@ import path from 'node:path';
 import { ToolError } from '../core/errors.js';
 import { DEFAULT_CASE_INSENSITIVE, matchesPathPattern } from '../core/paths.js';
 import { isBinary, readFileInside } from './fs-ops.js';
+import { isInsideDir } from './jail.js';
 import type { GlobEffect, GlobResult, GrepEffect, GrepMatch, GrepResult } from '../core/types.js';
 
 /** Default `grep` result count. */
@@ -159,7 +160,7 @@ async function ancestorLayers(top: string, dir: string): Promise<IgnoreLayer[]> 
     chain.push(cursor);
     if (cursor === top) break;
     const parent = path.dirname(cursor);
-    if (parent === cursor || path.relative(top, parent).startsWith('..')) break;
+    if (parent === cursor || !isInsideDir(top, parent)) break;
     cursor = parent;
   }
   const layers: IgnoreLayer[] = [];
