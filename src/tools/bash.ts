@@ -1,8 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { ToolError } from '../core/errors.js';
+import { ToolError, errorMessage } from '../core/errors.js';
 import type { BashEffect, BashResult } from '../core/types.js';
+import { attachWindowsJob, killPosixTree, type WindowsJob } from './process-tree.js';
 import { withSandbox } from './sandbox.js';
 
 /** Default `bash` timeout. */
@@ -77,31 +78,25 @@ function completeUtf8Length(bytes: Buffer): number {
   return start + size > bytes.length ? start : bytes.length;
 }
 
-/** Kills the whole process group of `child` (POSIX) or its tree (Windows). */
-function killGroup(child: ChildProcess): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
-    return;
-  }
-  try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      // Already gone.
-    }
-  }
-}
-
 export interface BashRunOptions {
   readonly outputCapBytes?: number;
   /** Paths a sandboxed command may never write (from the host's protected paths). */
   readonly denyWrite?: readonly string[];
 }
 
+/**
+ * The script `bash -c` runs on Windows: it waits for one line on stdin, sent
+ * once the process sits in its Job Object, then runs the command as
+ * `bash -c <command>` with stdin closed, as on POSIX.
+ */
+const WINDOWS_GATE = 'IFS= read -r _ || exit 1; exec "$BASH" -c "$1" </dev/null';
+
+/**
+ * Runs `argv` and waits for it. No process of the call outlives it: when the
+ * shell exits, times out or is cancelled, every process it started is
+ * killed, background ones included (`killPosixTree`, or the call's Job
+ * Object on Windows). On Windows `argv` must be `[bash, '-c', command]`.
+ */
 export function spawnAndWait(
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
@@ -115,22 +110,54 @@ export function spawnAndWait(
       reject(new ToolError('cancelled', 'the run was stopped before bash started'));
       return;
     }
-    const [file, ...args] = argv;
+    const windows = process.platform === 'win32';
+    const [file, ...rest] = argv;
     if (file === undefined) {
       reject(new ToolError('tool-error', 'empty command line'));
       return;
     }
+    const args = windows ? ['-c', WINDOWS_GATE, 'bash', ...rest.slice(1)] : rest;
     const child = spawn(file, args, {
       cwd,
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
+      stdio: [windows ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      detached: !windows,
       windowsHide: true,
     });
     const out = new Capture(cap);
     const err = new Capture(cap);
     child.stdout?.on('data', (c: Buffer) => out.push(c));
     child.stderr?.on('data', (c: Buffer) => err.push(c));
+    child.stdin?.on('error', () => undefined);
+
+    let startError: ToolError | undefined;
+    let killing = false;
+    let job: Promise<WindowsJob | undefined> = Promise.resolve(undefined);
+    if (windows && child.pid !== undefined) {
+      const pid = child.pid;
+      job = attachWindowsJob(pid).then(
+        (j) => {
+          // A call stopped while the job was made never runs its command.
+          if (killing) child.stdin?.destroy();
+          else child.stdin?.end('\n');
+          return j;
+        },
+        (e: unknown) => {
+          // Still blocked on the gate: it has started nothing.
+          child.stdin?.destroy();
+          child.kill('SIGKILL');
+          startError ??= new ToolError('tool-error', errorMessage(e));
+          return undefined;
+        },
+      );
+    }
+    const killAll = async (): Promise<void> => {
+      killing = true;
+      const pid = child.pid;
+      if (pid === undefined) return;
+      if (!windows) return killPosixTree(pid);
+      await (await job)?.kill();
+    };
 
     let timedOut = false;
     let settled = false;
@@ -143,27 +170,27 @@ export function spawnAndWait(
       clearTimeout(timer);
       if (drainTimer) clearTimeout(drainTimer);
       signal.removeEventListener('abort', onAbort);
-      // No process of the call outlives it: background children are killed too.
-      killGroup(child);
-      if (signal.aborted && !timedOut) {
-        reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
-        return;
-      }
-      resolve({
+      const result: BashResult = {
         exitCode: exit.code,
         signal: exit.signal,
         stdout: out.text(),
         stderr: err.text(),
         truncated: out.truncated || err.truncated,
         timedOut,
+      };
+      // No process of the call outlives it: background children are killed too.
+      void killAll().then(() => {
+        if (startError) reject(startError);
+        else if (signal.aborted && !timedOut) reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
+        else resolve(result);
       });
     };
-    const onAbort = (): void => killGroup(child);
+    const onAbort = (): void => void killAll();
     const timer = setTimeout(() => {
       // The shell already exited: only its output was still draining.
       if (exit) return finish();
       timedOut = true;
-      killGroup(child);
+      void killAll();
     }, timeoutMs);
     signal.addEventListener('abort', onAbort, { once: true });
 

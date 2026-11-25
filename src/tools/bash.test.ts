@@ -1,4 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -88,6 +90,29 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     expect(await eventually(() => !alive(pid))).toBe(true);
   });
 
+  it('on cancel kills children that left the process group or the session', async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 1000);
+    const command = [
+      `perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sleep 100 & echo $! > setsid.pid`,
+      'set -m',
+      'sleep 100 & echo $! > job.pid',
+      'set +m',
+      'sleep 30',
+    ].join('\n');
+    await expect(bash(command, { signal: ac.signal })).rejects.toMatchObject({ code: 'cancelled' });
+    for (const file of ['setsid.pid', 'job.pid']) {
+      const pid = Number(readFileSync(path.join(ws, file), 'utf8'));
+      expect(await eventually(() => !alive(pid)), file).toBe(true);
+    }
+  });
+
+  it.runIf(process.platform === 'linux')('after a normal exit kills background jobs in their own process group', async () => {
+    const r = await bash('set -m; sleep 100 & echo $!');
+    const pid = Number(r.stdout.trim());
+    expect(await eventually(() => !alive(pid))).toBe(true);
+  });
+
   it('never starts when the signal is already aborted', async () => {
     const ac = new AbortController();
     ac.abort();
@@ -133,6 +158,41 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
   });
 });
 
+/** The Windows pid of the MSYS process `$!`, once it has exec'd. */
+const WINPID = 'sleep 1; cat /proc/$!/winpid';
+
+describe.runIf(IS_WINDOWS)('bash on Windows', () => {
+  it('runs the command as bash -c with stdin closed', async () => {
+    const r = await bash('echo "[$#][$1]"; cat; echo done; exit 3');
+    expect([r.exitCode, r.stdout]).toEqual([3, '[0][]\ndone\n']);
+  });
+
+  it('on cancel kills every process of the call, orphaned grandchildren included', async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 6000);
+    const command = `sleep 100 & ${WINPID} > child.pid\n(sleep 100 & ${WINPID} > orphan.pid)\nsleep 100`;
+    await expect(bash(command, { signal: ac.signal, timeoutMs: 60_000 })).rejects.toMatchObject({ code: 'cancelled' });
+    for (const file of ['child.pid', 'orphan.pid']) {
+      const pid = Number(readFileSync(path.join(ws, file), 'utf8'));
+      expect(pid, file).toBeGreaterThan(0);
+      expect(alive(pid), file).toBe(false);
+    }
+  });
+
+  it('after a normal exit leaves no background process behind', async () => {
+    const r = await bash(`sleep 100 & ${WINPID}`);
+    const pid = Number(r.stdout.trim());
+    expect(pid).toBeGreaterThan(0);
+    expect(alive(pid)).toBe(false);
+  });
+
+  it('kills the whole call on timeout', async () => {
+    const r = await bash(`(sleep 100 & ${WINPID} > orphan.pid); sleep 100`, { timeoutMs: 5000 });
+    expect(r.timedOut).toBe(true);
+    expect(alive(Number(readFileSync(path.join(ws, 'orphan.pid'), 'utf8')))).toBe(false);
+  });
+});
+
 const unavailable = await containmentUnavailableReason();
 if (unavailable !== null) {
   // Logged so a CI run shows why the containment tests were skipped.
@@ -146,13 +206,52 @@ it.runIf(process.env.ACM_REQUIRE_CONTAINMENT === '1')('runs the containment test
 describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   const readOnly: BashContainment = { mode: 'sandbox', readOnly: true, writableRoots: [], network: false };
 
-  // First in this block: no earlier test may have started the sandbox's bridge processes.
-  it('lets the process exit once the sandbox is idle, and starts it again for the next command', async () => {
+  const writable = (network: boolean): BashContainment => ({ mode: 'sandbox', readOnly: false, writableRoots: [ws], network });
+  let server: http.Server;
+  let url: string;
+
+  beforeEach(async () => {
+    server = http.createServer((_req, res) => res.end('reached'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  });
+
+  afterEach(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  /** A curl through the proxy `proxyExpr` names, printing only the HTTP status. */
+  const viaProxy = (proxyExpr: string): string => `curl -s -o /dev/null -w '%{http_code}' -m 5 --noproxy '' -x "${proxyExpr}" ${url}`;
+
+  it('keeps no sandbox process alive after a command, and starts it again for the next one', async () => {
     const bridges = (): number => process.getActiveResourcesInfo().filter((r) => r === 'ProcessWrap').length;
     const before = bridges();
     expect((await bash('echo one', { containment: readOnly })).stdout).toBe('one\n');
-    expect(await eventually(() => bridges() === before, 5000)).toBe(true);
+    expect(bridges()).toBe(before);
     expect((await bash('echo two', { containment: readOnly })).stdout).toBe('two\n');
+  });
+
+  it('gives network only to the call that has it: a proxy credential from an earlier call is refused', async () => {
+    const first = await bash(`${viaProxy('$HTTP_PROXY')}; echo "$HTTP_PROXY" > proxy.txt`, { containment: writable(true) });
+    expect(first.stdout).toBe('200');
+    const second = await bash(`${viaProxy('$HTTP_PROXY')} ; echo; ${viaProxy('$(cat proxy.txt)')}`, { containment: writable(true) });
+    const [own, earlier] = second.stdout.split('\n');
+    expect(own).toBe('200');
+    expect(earlier).not.toBe('200');
+  });
+
+  it('a process left behind by a call never reaches the network of a later call', async () => {
+    // Detached from the call's session and process group, then orphaned.
+    const late = `sleep 2; ${viaProxy('$HTTP_PROXY')} > late.txt; echo alive > survived.txt`;
+    const detach = `(perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sh -c ${JSON.stringify(late)} >/dev/null 2>&1 &)`;
+    const first = await bash(`${detach}; echo started`, { containment: writable(false) });
+    expect(first.stdout).toBe('started\n');
+    const second = await bash(`sleep 4; ${viaProxy('$HTTP_PROXY')}`, { containment: writable(true) });
+    expect(second.stdout).toBe('200');
+    const lateStatus = existsSync(path.join(ws, 'late.txt')) ? readFileSync(path.join(ws, 'late.txt'), 'utf8') : null;
+    expect(lateStatus).not.toBe('200');
+    if (process.platform === 'linux') expect(existsSync(path.join(ws, 'survived.txt'))).toBe(false);
   });
 
   it('blocks writes under a read-only sandbox', async () => {
