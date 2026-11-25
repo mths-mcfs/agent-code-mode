@@ -40,7 +40,7 @@ describe('NodeToolRuntime in the run pipeline', () => {
     expect(readFileSync(path.join(ws, 'a.txt'), 'utf8')).toBe('beta\n');
   });
 
-  it.skipIf(process.platform === 'win32')('rolls a transactional run back when a call is denied', async () => {
+  it('rolls a transactional run back when a call is denied', async () => {
     const adapter = new StaticHostAdapter({
       protectedPaths: [],
       rules: [(p) => (p.tool === 'write' && p.effect.absPath.endsWith('denied.txt') ? { kind: 'deny', reason: 'no' } : undefined)],

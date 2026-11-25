@@ -54,16 +54,7 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-it.runIf(IS_WINDOWS)('refuses a transactional write on Windows before the file changes, and keeps plain writes', async () => {
-  const tx = rt.beginTransaction();
-  await expect(write('a.txt', 'a1\n', tx)).rejects.toThrow(/refused to write .*Windows cannot flush the directory/);
-  expect(read('a.txt')).toBe('a0\n');
-  const prepared = await rt.prepare({ id: `c${++seq}`, tool: 'write', args: { path: 'a.txt', content: 'a1\n' } } satisfies ToolCall, ctx, policy);
-  await rt.commit(prepared, signal);
-  expect(read('a.txt')).toBe('a1\n');
-});
-
-describe.skipIf(IS_WINDOWS)('transactions', () => {
+describe('transactions', () => {
   it('rolls back three writes (two edits and a create in a new directory)', async () => {
     const tx = rt.beginTransaction();
     await write('a.txt', 'a1\n', tx);
@@ -177,7 +168,7 @@ describe.skipIf(IS_WINDOWS)('transactions', () => {
   });
 });
 
-describe.skipIf(IS_WINDOWS)('crash recovery', () => {
+describe('crash recovery', () => {
   /** Makes the journal of `tx` look like it was left by a process that died. */
   function abandon(tx: FileTransaction): string {
     const dir = tx.dir;
@@ -351,7 +342,7 @@ describe.skipIf(IS_WINDOWS)('crash recovery', () => {
   });
 });
 
-describe.skipIf(IS_WINDOWS)('finalization', () => {
+describe('finalization', () => {
   /** Keeps the delete of a finalized journal pending, as if the process died right after the commit. */
   const held = (): Promise<void> => new Promise(() => undefined);
 
@@ -508,7 +499,7 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     expect(readdirSync(journalRoot(stateDir))).toEqual([]);
   });
 
-  it.skipIf(process.getuid?.() === 0)('keeps the record when a file cannot be inspected, instead of taking it for absent', async () => {
+  it.skipIf(IS_WINDOWS || process.getuid?.() === 0)('keeps the record when a file cannot be inspected, instead of taking it for absent', async () => {
     const tx = rt.beginTransaction();
     await write('sub/new.txt', 'n1\n', tx);
     chmodSync(ws, 0o600);

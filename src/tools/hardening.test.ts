@@ -152,8 +152,7 @@ describe('5. concurrent commits on one path', () => {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
-    // Windows cannot flush a directory, so the journal's flushes are skipped here: this test is about the path lock.
-    const tx = new SlowTransaction(path.join(base, 'state'), { syncDir: async () => undefined, removeDir: (dir) => fsp.rm(dir, { recursive: true, force: true }) });
+    const tx = new SlowTransaction(path.join(base, 'state'));
     const signal = new AbortController().signal;
     const results = await Promise.allSettled([rt.commit(a, signal, tx), rt.commit(b, signal, tx)]);
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);

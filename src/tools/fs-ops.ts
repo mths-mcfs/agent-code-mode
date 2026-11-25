@@ -381,8 +381,9 @@ export async function removeEmptyDirInside(dir: string, roots: readonly string[]
   }
 }
 
+/** Windows flushes a directory only through a handle opened for writing. */
 async function flushDir(dir: string): Promise<void> {
-  const handle = await fs.open(dir, FS.O_RDONLY);
+  const handle = await fs.open(dir, IS_WINDOWS ? 'r+' : 'r');
   try {
     await handle.sync();
   } finally {
@@ -390,18 +391,16 @@ async function flushDir(dir: string): Promise<void> {
   }
 }
 
-/** Errors that mean the file system cannot fsync a directory at all (FUSE, 9p, some NFS). */
-const UNSUPPORTED_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
+/** Errors that mean the file system cannot fsync a directory at all (FUSE, 9p, some NFS, a Windows volume without it). */
+const UNSUPPORTED_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', ...(IS_WINDOWS ? ['EISDIR', 'EPERM', 'EACCES'] : [])]);
 
 /**
  * fsyncs a directory, so the entries renamed, linked or removed in it survive
- * a crash. Rejects when the flush fails, and with a `ToolError` on Windows
- * and on file systems that cannot flush a directory at all: there a rename is
- * atomic but not durable, so nothing that must survive a crash may rely on it.
- * Node on Windows has no directory flush that confirms one directory.
+ * a crash. Rejects when the flush fails, and with a `ToolError` when the file
+ * system cannot flush a directory at all: there a rename is atomic but not
+ * durable, so nothing that must survive a crash may rely on it.
  */
 export async function syncDirStrict(dir: string, flush: (dir: string) => Promise<void> = flushDir): Promise<void> {
-  if (IS_WINDOWS) throw new ToolError('tool-error', `Windows cannot flush the directory ${dir} to disk, so changes there cannot be made durable`);
   try {
     await flush(dir);
   } catch (err) {
