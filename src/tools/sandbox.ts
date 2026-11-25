@@ -10,10 +10,11 @@ import { SANDBOX_NEEDS_SENTINEL, bootstrapEnv, spawnAndWait } from './bash.js';
  *
  * Network: the library routes all traffic through its proxy and refuses an
  * allow-everything domain list, so "network on" is the library's ask
- * callback answering yes for every host. On Linux the command has no network
- * namespace of its own either way: with network on, only clients that honor
- * the proxy variables the library sets (curl, git, npm, ...) reach the
- * network; raw sockets never do.
+ * callback answering yes for every host. On Linux the command runs in its
+ * own network namespace (`--unshare-net`) either way, and reaches the proxy
+ * only through the library's Unix-socket bridge: with network on, only
+ * clients that honor the proxy variables the library sets (curl, git, npm,
+ * ...) reach the network; raw sockets never do.
  */
 
 type SandboxModule = typeof import('@anthropic-ai/sandbox-runtime');

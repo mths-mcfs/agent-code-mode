@@ -91,8 +91,10 @@ function parseLstart(text: string): number | undefined {
 }
 
 /** `ps` rows of `pid ppid pgid start`, where `lstart` (a date with spaces) runs to the end of the line. */
-function psRows(args: readonly string[]): { pid: number; ppid: number; pgid: number; start: number }[] {
-  const r = spawnSync('ps', args, { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+function psRows(args: readonly string[], whole: boolean): { pid: number; ppid: number; pgid: number; start: number }[] {
+  const r = spawnSync('/bin/ps', args, { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+  // `ps -p` exits 1 when none of the pids exists; a listing of every process must succeed.
+  if (r.error || (whole && r.status !== 0)) throw new Error(`the process table could not be read: ${r.error?.message ?? `ps exited ${r.status}`}`);
   return (r.stdout ?? '').split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S.*\S)\s*$/.exec(line);
     const start = m ? parseLstart(m[4] ?? '') : undefined;
@@ -104,11 +106,11 @@ const PS_COLUMNS = ['-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=']
 
 const psTable: Omit<ProcessTable, 'signal'> = {
   list() {
-    return psRows(['-A', ...PS_COLUMNS]).map((r) => ({ ...r, sid: null }));
+    return psRows(['-A', ...PS_COLUMNS], true).map((r) => ({ ...r, sid: null }));
   },
   read(pids) {
     if (pids.length === 0) return new Map();
-    return new Map(psRows([...PS_COLUMNS, '-p', pids.join(',')]).map((r) => [r.pid, { ...r, sid: null }]));
+    return new Map(psRows([...PS_COLUMNS, '-p', pids.join(',')], false).map((r) => [r.pid, { ...r, sid: null }]));
   },
   now: () => Date.now(),
   resolution: 1000,
@@ -173,14 +175,24 @@ export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTab
     const row = s === undefined ? undefined : table.read([s.pid]).get(s.pid);
     return row !== undefined && row.start === s?.start && row.pgid === id;
   };
-  const groupOurs = leader.exitedAt === undefined || sentinelHolds();
-  const bound = groupOurs || leader.exitedAt === undefined ? Infinity : Math.floor(leader.exitedAt / table.resolution) * table.resolution;
-  if (groupOurs) table.signal(-id, 'SIGSTOP');
   const found = new Map<number, number>();
   const skipped: number[] = [];
-  for (let round = 0; round < 100; round++) {
+  let failure: unknown;
+  // A table that cannot be read proves nothing: the group still gets its SIGKILL if it is ours, and the call fails.
+  const attempt = <T>(read: () => T, otherwise: T): T => {
+    try {
+      return read();
+    } catch (err) {
+      failure ??= err;
+      return otherwise;
+    }
+  };
+  const groupOurs = leader.exitedAt === undefined || attempt(sentinelHolds, false);
+  const bound = groupOurs || leader.exitedAt === undefined ? Infinity : Math.floor(leader.exitedAt / table.resolution) * table.resolution;
+  if (groupOurs) table.signal(-id, 'SIGSTOP');
+  for (let round = 0; round < 100 && failure === undefined; round++) {
     const stopped: ProcessEntry[] = [];
-    for (const p of table.list()) {
+    for (const p of attempt(() => table.list(), [])) {
       if (found.has(p.pid) || p.pid === process.pid || skipped.includes(p.pid)) continue;
       const byId = p.pgid === id || p.sid === id;
       if (!found.has(p.ppid) && !byId) continue;
@@ -191,23 +203,25 @@ export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTab
       if (table.signal(p.pid, 'SIGSTOP')) stopped.push(p);
     }
     if (stopped.length === 0) break;
-    const now = table.read(stopped.map((p) => p.pid));
+    const now = attempt(() => table.read(stopped.map((p) => p.pid)), new Map<number, ProcessEntry>());
     for (const p of stopped) {
       if (now.get(p.pid)?.start === p.start) found.set(p.pid, p.start);
-      else if (now.has(p.pid)) {
-        table.signal(p.pid, 'SIGCONT');
+      else {
+        // A pid now naming another process is resumed; one that could not be read again stays stopped.
+        if (now.has(p.pid)) table.signal(p.pid, 'SIGCONT');
         skipped.push(p.pid);
       }
     }
     // The sentinel never forks, so a round that stopped only it leaves nothing new to find.
     if (stopped.every((p) => p.pid === s?.pid)) break;
   }
-  if (leader.exitedAt === undefined || sentinelHolds()) table.signal(-id, 'SIGKILL');
-  const before = table.read([...found.keys()]);
+  if (leader.exitedAt === undefined || attempt(sentinelHolds, false)) table.signal(-id, 'SIGKILL');
+  const before = attempt(() => table.read([...found.keys()]), new Map<number, ProcessEntry>());
   for (const [pid, start] of found) {
     if (before.get(pid)?.start === start) table.signal(pid, 'SIGKILL');
-    else if (before.has(pid)) skipped.push(pid);
+    else if (before.has(pid) || failure !== undefined) skipped.push(pid);
   }
+  if (failure !== undefined) throw new Error(`${errorMessage(failure)}; pid ${skipped.join(', ') || 'none'} may still be running`);
   return { skipped };
 }
 
@@ -269,15 +283,16 @@ public static class AcmJobs {
     return GetProcessTimes(p, out created, out exited, out kernel, out user) ? created : long.MaxValue;
   }
 
+  /** Every process and its parent, or null when Windows could not take the snapshot. */
   static List<KeyValuePair<uint, uint>> Snapshot() {
     var all = new List<KeyValuePair<uint, uint>>();
     // Tests set this to make the snapshot fail as Windows can, to prove Attach then refuses.
     IntPtr snap = Environment.GetEnvironmentVariable("ACM_TEST_JOB_SNAPSHOT_FAILS") == "1" ? new IntPtr(-1) : CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == new IntPtr(-1)) return all;
+    if (snap == new IntPtr(-1)) return null;
     var e = new ProcessEntry(); e.dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry));
     for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e)) all.Add(new KeyValuePair<uint, uint>(e.th32ProcessID, e.th32ParentProcessID));
     CloseHandle(snap);
-    return all;
+    return all.Count > 0 ? all : null;
   }
 
   static string Attach(uint pid) {
@@ -296,7 +311,10 @@ public static class AcmJobs {
     bool grew = true;
     while (grew) {
       grew = false;
-      foreach (var p in Snapshot()) {
+      // Without the snapshot, a process the launcher already started could stay outside the job.
+      var processes = Snapshot();
+      if (processes == null) { string r = Fail("CreateToolhelp32Snapshot"); CloseHandle(job); return r; }
+      foreach (var p in processes) {
         if (created.ContainsKey(p.Key) || !created.ContainsKey(p.Value)) continue;
         IntPtr h = OpenProcess(ProcessAccess, false, p.Key);
         if (h == IntPtr.Zero) continue;
@@ -496,7 +514,8 @@ export async function attachJob(pid: number, request: HelperRequest): Promise<Wi
         try {
           line = await request(`kill ${id}`);
         } catch {
-          // The helper is gone: the OS closed its handles, and closing a job kills its processes.
+          // The helper is gone: the OS closed its handles, and it held the job's only handle,
+          // so the job closed and KILL_ON_JOB_CLOSE killed every process in it.
           return;
         }
         const reply = KillReply.safeParse(line);

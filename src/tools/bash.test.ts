@@ -313,7 +313,9 @@ describe.runIf(IS_WINDOWS)('bash on Windows', { timeout: 60_000 }, () => {
   it('kills the whole call on timeout', async () => {
     const r = await bash(`(sleep 100 & ${WINPID} > orphan.pid); sleep 100`, { timeoutMs: 5000 });
     expect(r.timedOut).toBe(true);
-    expect(alive(Number(readFileSync(path.join(ws, 'orphan.pid'), 'utf8')))).toBe(false);
+    const orphan = Number(readFileSync(path.join(ws, 'orphan.pid'), 'utf8'));
+    expect(Number.isInteger(orphan) && orphan > 0).toBe(true);
+    expect(alive(orphan)).toBe(false);
   });
 });
 
@@ -358,7 +360,8 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   it('gives network only to the call that has it: a proxy credential from an earlier call is refused', async () => {
     const first = await bash(`${viaProxy('$HTTP_PROXY')}; echo "$HTTP_PROXY" > proxy.txt`, { containment: writable(true) });
     expect(first.stdout).toBe('200');
-    const second = await bash(`${viaProxy('$HTTP_PROXY')} ; echo; ${viaProxy('$(cat proxy.txt)')}`, { containment: writable(true) });
+    // The earlier credential against this call's proxy address: on macOS the port changes too, so only this tests the token.
+    const second = await bash(`${viaProxy('$HTTP_PROXY')} ; echo; old=$(cat proxy.txt); ${viaProxy('${old%@*}@${HTTP_PROXY#*@}')}`, { containment: writable(true) });
     const [own, earlier] = second.stdout.split('\n');
     expect(own).toBe('200');
     expect(earlier).not.toBe('200');

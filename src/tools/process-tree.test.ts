@@ -5,16 +5,19 @@ import { attachJob, killPosixTree, type ProcessEntry, type ProcessTable } from '
  * A process table at time 1000 where `reused` pids name another process by
  * the time they are stopped, and `gone` pids no longer exist.
  */
-function fakeTable(rows: ProcessEntry[], opts: { reused?: number[]; unstoppable?: number[]; gone?: number[]; resolution?: number } = {}) {
+function fakeTable(rows: ProcessEntry[], opts: { reused?: number[]; unstoppable?: number[]; gone?: number[]; resolution?: number; unreadable?: number[]; listFails?: boolean } = {}) {
   const signals: string[] = [];
   const stoppedOnce = new Set<number>();
   const table: ProcessTable = {
-    list: () => rows.filter((r) => !opts.gone?.includes(r.pid)),
+    list: () => {
+      if (opts.listFails) throw new Error('ps exited 1');
+      return rows.filter((r) => !opts.gone?.includes(r.pid));
+    },
     read: (pids) => {
       const out = new Map<number, ProcessEntry>();
       for (const pid of pids) {
         const row = rows.find((r) => r.pid === pid);
-        if (!row || opts.gone?.includes(pid)) continue;
+        if (!row || opts.gone?.includes(pid) || (opts.unreadable?.includes(pid) && stoppedOnce.has(pid))) continue;
         out.set(pid, opts.reused?.includes(pid) && stoppedOnce.has(pid) ? { ...row, start: row.start + 1 } : row);
       }
       return out;
@@ -85,6 +88,18 @@ describe('killPosixTree', () => {
     expect(signals).toContain('SIGCONT 101');
     expect(signals).not.toContain('SIGKILL 101');
     expect(signals.some((s) => s.endsWith(' 102'))).toBe(false);
+  });
+
+  it('fails, after still killing its own group, when the process table cannot be read', () => {
+    const { table, signals } = fakeTable([row(100, 1, 100)], { listFails: true });
+    expect(() => killPosixTree(leader(100), table)).toThrow(/ps exited 1.*may still be running/);
+    expect(signals).toEqual(['SIGSTOP -100', 'SIGKILL -100']);
+  });
+
+  it('reports a stopped process it could not read again, instead of leaving it unmentioned', () => {
+    const { table, signals } = fakeTable([row(100, 1, 100), row(101, 100, 999)], { unreadable: [101] });
+    expect(killPosixTree(leader(100), table).skipped).toEqual([101]);
+    expect(signals).not.toContain('SIGKILL 101');
   });
 
   it('never kills a pid it could not stop', () => {
