@@ -62,9 +62,19 @@ class Capture {
   }
 
   text(): string {
-    // A cut in the middle of a multi-byte character becomes U+FFFD.
-    return Buffer.concat(this.#chunks).toString('utf8');
+    const all = Buffer.concat(this.#chunks);
+    return (this.truncated ? all.subarray(0, completeUtf8Length(all)) : all).toString('utf8');
   }
+}
+
+/** Length of `bytes` without a UTF-8 character the cut left incomplete at its end. */
+function completeUtf8Length(bytes: Buffer): number {
+  let start = bytes.length - 1;
+  while (start >= 0 && start > bytes.length - 4 && ((bytes[start] ?? 0) & 0xc0) === 0x80) start--;
+  if (start < 0) return bytes.length;
+  const lead = bytes[start] ?? 0;
+  const size = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return start + size > bytes.length ? start : bytes.length;
 }
 
 /** Kills the whole process group of `child` (POSIX) or its tree (Windows). */

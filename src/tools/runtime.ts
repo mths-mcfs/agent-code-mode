@@ -17,7 +17,7 @@ import type {
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace, type MatchHow } from './edit-match.js';
-import { type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
+import { type FileId, type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
@@ -411,9 +411,14 @@ export class NodeToolRuntime implements ToolRuntime {
     const outcome = await atomicWrite(absPath, bytes, beforeHash === null ? { kind: 'absent' } : { kind: 'hash', sha256: beforeHash }, {
       signal,
       identity: m.identity,
-      ...(tx ? { beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs) } : {}),
+      ...(tx
+        ? {
+            beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs),
+            onDirCreated: (dir: string, id: FileId) => tx.dirCreated(dir, id),
+          }
+        : {}),
     });
-    tx?.written(absPath, nextHash, outcome.createdDirs);
+    await tx?.written(absPath, nextHash, outcome.id);
     if (prepared.tool === 'write') return { path: absPath, created: outcome.before === null, diff: prepared.effect.diff };
     return {
       path: absPath,

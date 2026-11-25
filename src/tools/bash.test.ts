@@ -120,6 +120,12 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     expect(env).toEqual({ PATH: '/bin' });
   });
 
+  it('cuts capped output on a character boundary, within the cap', async () => {
+    const r = await bash("printf 'abé'; printf 'cdé' >&2", { capBytes: 3 });
+    expect(r.truncated).toBe(true);
+    expect([r.stdout, r.stderr]).toEqual(['ab', 'cd']);
+  });
+
   it('refuses a containment with a relative writable root', async () => {
     await expect(bash('true', { containment: { mode: 'sandbox', readOnly: false, writableRoots: ['rel'], network: false } })).rejects.toMatchObject({
       code: 'containment-unavailable',
@@ -139,6 +145,15 @@ it.runIf(process.env.ACM_REQUIRE_CONTAINMENT === '1')('runs the containment test
 
 describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   const readOnly: BashContainment = { mode: 'sandbox', readOnly: true, writableRoots: [], network: false };
+
+  // First in this block: no earlier test may have started the sandbox's bridge processes.
+  it('lets the process exit once the sandbox is idle, and starts it again for the next command', async () => {
+    const bridges = (): number => process.getActiveResourcesInfo().filter((r) => r === 'ProcessWrap').length;
+    const before = bridges();
+    expect((await bash('echo one', { containment: readOnly })).stdout).toBe('one\n');
+    expect(await eventually(() => bridges() === before, 5000)).toBe(true);
+    expect((await bash('echo two', { containment: readOnly })).stdout).toBe('two\n');
+  });
 
   it('blocks writes under a read-only sandbox', async () => {
     const r = await bash('touch x', { containment: readOnly });

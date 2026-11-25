@@ -26,6 +26,35 @@ let loading: Promise<Manager> | undefined;
 let networkOpen = false;
 let tail: Promise<unknown> = Promise.resolve();
 let probed = false;
+/** Sandboxed commands queued or running. */
+let pending = 0;
+let idleTimer: NodeJS.Timeout | undefined;
+
+/**
+ * How long the sandbox stays up after the last command. The library's
+ * network bridge processes keep the event loop alive, so an idle sandbox is
+ * reset; the timer is unref'd, so it never keeps a process alive by itself.
+ */
+const IDLE_RESET_MS = 1000;
+
+function serialized<T>(run: () => Promise<T>): Promise<T> {
+  const next = tail.then(run, run);
+  tail = next.catch(() => undefined);
+  return next;
+}
+
+function resetWhenIdle(): void {
+  idleTimer = setTimeout(() => {
+    idleTimer = undefined;
+    void serialized(async () => {
+      if (pending > 0 || loading === undefined) return;
+      const m = await loading.catch(() => undefined);
+      loading = undefined;
+      await m?.reset().catch(() => undefined);
+    });
+  }, IDLE_RESET_MS);
+  idleTimer.unref();
+}
 
 /** Why containment is unavailable on this machine, or null when it is available. */
 let availability: Promise<string | null> | undefined;
@@ -163,7 +192,9 @@ export function withSandbox<T>(
       }
     }
   };
-  const next = tail.then(run, run);
-  tail = next.catch(() => undefined);
-  return next;
+  pending++;
+  clearTimeout(idleTimer);
+  return serialized(run).finally(() => {
+    if (--pending === 0) resetWhenIdle();
+  });
 }

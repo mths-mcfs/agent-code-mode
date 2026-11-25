@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import fsp from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolError, TransactionFinalizeError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
@@ -49,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -130,6 +132,24 @@ describe.skipIf(IS_WINDOWS)('transactions', () => {
     expect(read('a.txt')).toBe('other\n');
   });
 
+  it('rolls back only the directory it created, not one a user put at the same name', async () => {
+    const tx = rt.beginTransaction();
+    await write('fresh/file.txt', 'x', tx);
+    renameSync(path.join(ws, 'fresh'), path.join(ws, 'moved'));
+    mkdirSync(path.join(ws, 'fresh'));
+    await tx.rollback();
+    expect(read('moved/file.txt')).toBe('x');
+    expect(existsSync(path.join(ws, 'fresh'))).toBe(true);
+  });
+
+  it('rolls back the directories a write created before it failed', async () => {
+    const tx = rt.beginTransaction();
+    vi.spyOn(fsp, 'link').mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    await expect(write('fresh/deep/file.txt', 'x', tx)).rejects.toThrow(/ENOSPC/);
+    await tx.rollback();
+    expect(existsSync(path.join(ws, 'fresh'))).toBe(false);
+  });
+
   it('rolls back only directories its own writes created', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
@@ -142,8 +162,9 @@ describe.skipIf(IS_WINDOWS)('transactions', () => {
         // Another writer creates the directory between the checks and the write.
         mkdirSync(dir);
       },
+      onDirCreated: (d, id) => tx.dirCreated(d, id),
     });
-    tx.written(abs, sha256(bytes), outcome.createdDirs);
+    await tx.written(abs, sha256(bytes), outcome.id);
     await tx.rollback();
     expect(existsSync(abs)).toBe(false);
     expect(existsSync(dir)).toBe(true);
@@ -257,6 +278,24 @@ describe.skipIf(IS_WINDOWS)('crash recovery', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
+  it('keeps a later acknowledged write of the same file, and the record, reporting a conflict', async () => {
+    const earlier = rt.beginTransaction();
+    if (!(earlier instanceof FileTransaction)) throw new Error('unreachable');
+    await write('a.txt', 'one', earlier);
+    await write('a.txt', 'two', earlier);
+    const later = rt.beginTransaction();
+    await write('a.txt', 'one', later);
+    await later.dispose();
+    abandon(earlier);
+    const recovered = (await recoverStaleJournals(stateDir, [ws], [])).find((r) => r.finalized === undefined);
+    expect(recovered?.report).toEqual({
+      restored: [],
+      skipped: [{ path: path.join(ws, 'a.txt'), reason: 'changed-externally', detail: expect.stringContaining('conflict') }],
+    });
+    expect(read('a.txt')).toBe('one');
+    expect(readdirSync(journalRoot(stateDir)).filter((n) => !n.endsWith(COMMITTED))).toHaveLength(1);
+  });
+
   it('never restores a protected path', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
@@ -325,7 +364,7 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     expect(existsSync(tx.dir)).toBe(false);
     expect(existsSync(path.join(`${tx.dir}${COMMITTED}`, 'manifest.json'))).toBe(true);
 
-    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([]);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([{ id: tx.id, report: { restored: [], skipped: [] }, finalized: true }]);
     expect(read('a.txt')).toBe('a1\n');
     expect(read('new.txt')).toBe('n1\n');
     // Recovery deletes what a finalized run left behind.
@@ -354,7 +393,7 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     await expect(tx.dispose()).rejects.toBe(err);
     expect(existsSync(path.join(`${tx.dir}${COMMITTED}`, 'manifest.json'))).toBe(true);
     expect(await tx.rollback()).toEqual({ restored: [], skipped: [] });
-    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([]);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([{ id: tx.id, report: { restored: [], skipped: [] }, finalized: true }]);
     expect(read('a.txt')).toBe('a1\n');
   });
 
@@ -426,6 +465,18 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     const uncommitted = atDispose.filter((f) => !f.committed).map((f) => f.dir);
     expect(uncommitted).toEqual(expect.arrayContaining([ws, path.join(ws, 'd1'), path.join(ws, 'd1', 'd2')]));
     expect(atDispose.at(-1)).toEqual({ dir: journalRoot(stateDir), committed: true });
+  });
+
+  it('does not commit when a directory the run changed was moved before the flush, and leaves the move alone', async () => {
+    mkdirSync(path.join(ws, 'nested'));
+    const tx = rt.beginTransaction();
+    await write('a.txt', 'a1\n', tx);
+    await write('nested/file.txt', 'new', tx);
+    renameSync(path.join(ws, 'nested'), path.join(ws, 'moved'));
+    await expect(tx.dispose()).rejects.toMatchObject({ name: 'TransactionFinalizeError', committed: false });
+    await tx.rollback();
+    expect(read('moved/file.txt')).toBe('new');
+    expect(read('a.txt')).toBe('a0\n');
   });
 
   it('keeps the journal open for a rollback when a changed directory cannot be flushed at finalization', async () => {

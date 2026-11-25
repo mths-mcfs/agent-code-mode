@@ -159,9 +159,17 @@ export function withPathLock<T>(abs: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/** `dev:ino` of a file or directory: a rename keeps it, a replacement changes it. */
+export type FileId = string;
+
+function fileId(st: { readonly dev: bigint; readonly ino: bigint }): FileId {
+  return `${st.dev}:${st.ino}`;
+}
+
 export interface RegularFile {
   readonly bytes: Buffer;
   readonly mode: number;
+  readonly id: FileId;
 }
 
 /**
@@ -187,7 +195,7 @@ export async function readRegularFile(abs: string, maxBytes = Number.MAX_SAFE_IN
     if (st.size > maxBytes) throw tooBig(st.size);
     const bytes = await readAtMost(handle, maxBytes);
     if (bytes === null) throw tooBig(`over ${maxBytes}`);
-    return { bytes, mode: st.mode & 0o7777 };
+    return { bytes, mode: st.mode & 0o7777, id: fileId(await handle.stat({ bigint: true })) };
   } finally {
     await handle.close();
   }
@@ -201,6 +209,8 @@ export interface WriteOutcome {
   readonly before: RegularFile | null;
   /** Directories this write created to hold the file (not ones that appeared meanwhile), outermost first. */
   readonly createdDirs: readonly string[];
+  /** Identity of the file written. */
+  readonly id: FileId;
 }
 
 async function missingDirs(dir: string): Promise<string[]> {
@@ -231,6 +241,8 @@ export interface AtomicWriteOptions {
   readonly identity?: PathIdentity;
   /** Mode of the new file; defaults to the mode of the file it replaces. */
   readonly mode?: number;
+  /** Told about each directory as soon as this write creates it, even when the write fails later. */
+  readonly onDirCreated?: (dir: string, id: FileId) => void;
 }
 
 function hashMatches(expect: Expectation, current: RegularFile | null): boolean {
@@ -283,6 +295,7 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     try {
       await fs.mkdir(d);
       createdDirs.push(d);
+      opts.onDirCreated?.(d, fileId(await fs.lstat(d, { bigint: true })));
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
@@ -294,10 +307,12 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
   const mode = opts.mode ?? before?.mode ?? 0o666;
   const handle = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | NOFOLLOW, mode);
   try {
+    let id: FileId;
     try {
       await handle.writeFile(bytes);
       if ((opts.mode !== undefined || before) && !IS_WINDOWS) await handle.chmod(mode);
       await handle.sync();
+      id = fileId(await handle.stat({ bigint: true }));
     } finally {
       await handle.close();
     }
@@ -319,7 +334,7 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     } else {
       await fs.rename(tmp, abs);
     }
-    return { before, createdDirs };
+    return { before, createdDirs, id };
   } finally {
     // After `link` the temp name is still there; after `rename` it is gone.
     await fs.rm(tmp, { force: true }).catch(() => undefined);
@@ -342,12 +357,14 @@ export function removeRegularFile(abs: string, expectHash: string): Promise<void
 
 /**
  * Removes `dir` when it is an empty real directory (not a link, not reached
- * through one) strictly inside one of `roots`. Returns whether it was removed.
+ * through one) strictly inside one of `roots`, and, when `id` is given, still
+ * the directory with that identity. Returns whether it was removed.
  */
-export async function removeEmptyDirInside(dir: string, roots: readonly string[]): Promise<boolean> {
+export async function removeEmptyDirInside(dir: string, roots: readonly string[], id?: FileId): Promise<boolean> {
   if (!path.isAbsolute(dir)) return false;
-  const st = await fs.lstat(dir).catch(() => null);
+  const st = await fs.lstat(dir, { bigint: true }).catch(() => null);
   if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
+  if (id !== undefined && fileId(st) !== id) return false;
   const real = await fs.realpath(dir).catch(() => null);
   const same = real !== null && (IS_WINDOWS ? real.toLowerCase() === dir.toLowerCase() : real === dir);
   if (!same) return false;
