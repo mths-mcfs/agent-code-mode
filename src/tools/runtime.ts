@@ -14,7 +14,7 @@ import type {
   ToolRuntime,
   Transaction,
 } from '../core/types.js';
-import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, runBash, shellQuote } from './bash.js';
+import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace, type MatchHow } from './edit-match.js';
 import { type DirId, type InstallId, type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
@@ -192,12 +192,14 @@ export class NodeToolRuntime implements ToolRuntime {
         const timeoutMs = Math.min(call.args.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
         const containment = policy.bashContainment;
         assertContainmentShape(containment);
+        const shellPath = findBash();
+        if (shellPath === null) throw new ToolError('tool-error', 'bash is not installed');
         const denyWrite = containment.mode === 'sandbox' && !containment.readOnly ? sandboxDenyWrite(jail.protectedPaths) : [];
         const prepared: PreparedCallOf<'bash'> = {
           id: call.id,
           tool: 'bash',
           args: { command, timeoutMs },
-          effect: { command, cwd: jail.cwd, timeoutMs, containment },
+          effect: { command, shell: { path: shellPath, args: ['-c'] }, cwd: jail.cwd, timeoutMs, containment },
         };
         this.#meta.put(prepared, meta(jail.cwd, denyWrite));
         return prepared;

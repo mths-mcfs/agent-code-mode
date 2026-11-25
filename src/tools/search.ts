@@ -297,7 +297,10 @@ export function compileGrep(pattern: string, ignoreCase: boolean): RegExp {
   try {
     return new RegExp(pattern, ignoreCase ? 'i' : '');
   } catch (err) {
-    throw new ToolError('invalid-args', `invalid regular expression ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}`);
+    throw new ToolError(
+      'invalid-args',
+      `invalid regular expression ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}. A grep pattern must be valid in both JavaScript and ripgrep (Rust) regex syntax: inline flags such as (?i) are not accepted (use ignoreCase), and look-around and backreferences are not accepted under Codex CLI.`,
+    );
   }
 }
 
