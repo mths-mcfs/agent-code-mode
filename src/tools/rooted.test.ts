@@ -62,6 +62,16 @@ describe.each(anchors)('%s anchor', (_name, anchor) => {
     expect(() => anchor(rooted(ws, path.join(ws, 'missing', 'deeper')), () => undefined)).toThrow(expect.objectContaining({ code: 'ENOENT' }));
   });
 
+  it.skipIf(process.getuid?.() === 0)('walks through a directory it may search but not list, as a path lookup does', () => {
+    mkdirSync(path.join(ws, 'a', 'b'));
+    nodeFs.chmodSync(path.join(ws, 'a'), 0o311);
+    try {
+      expect(anchor(rooted(ws, path.join(ws, 'a', 'b')), (at) => nodeFs.lstatSync(at('.')).isDirectory())).toBe(true);
+    } finally {
+      nodeFs.chmodSync(path.join(ws, 'a'), 0o755);
+    }
+  });
+
   it('leaves the working directory where it was', () => {
     const before = process.cwd();
     anchor(rooted(ws, path.join(ws, 'a')), () => undefined);

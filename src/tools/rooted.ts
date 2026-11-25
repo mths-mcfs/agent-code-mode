@@ -5,7 +5,7 @@ import { ToolError } from '../core/errors.js';
 
 /**
  * Rooted file operations: a path inside a workspace root is reached from the
- * root one directory at a time, each opened with `O_NOFOLLOW`, and the final
+ * root one directory at a time, never through a symbolic link, and the final
  * syscall names its entry relative to the last directory reached. Nothing
  * re-resolves the path between that walk and the use, so a symbolic link
  * swapped into the path can make an operation fail but never lead it outside.
@@ -14,8 +14,8 @@ import { ToolError } from '../core/errors.js';
  * - Linux: `/proc/self/fd/<fd>/<name>`, which the kernel resolves from the
  *   directory the descriptor holds, whatever its path is now.
  * - Other POSIX systems (and Linux without a usable `/proc`): the process
- *   working directory. Each step is opened with `O_NOFOLLOW`, entered with
- *   `chdir`, and checked to be the inode just opened (directories have no
+ *   working directory. Each step must `lstat` as a real directory, is entered
+ *   with `chdir`, and must then be the inode `lstat` saw (directories have no
  *   hard links). Inside one synchronous block, so no other JavaScript sees the
  *   changed cwd; the runtime uses absolute paths everywhere else.
  * Windows has neither, so rooted operations refuse there.
@@ -51,31 +51,39 @@ export type At = (name: string) => string;
 
 type Anchor = <T>(dir: RootedPath, fn: (at: At) => T) => T;
 
-const DIR_FLAGS = FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NOFOLLOW;
+/**
+ * Linux `O_PATH`, which Node does not export: a walk step needs only search
+ * permission on the directory, as a path lookup does. Same value on every
+ * architecture Node supports.
+ */
+const O_PATH = 0o10000000;
+const STEP_FLAGS = O_PATH | FS.O_DIRECTORY | FS.O_NOFOLLOW;
 
 function errnoCode(err: unknown): string | undefined {
   if (err !== null && typeof err === 'object' && 'code' in err && typeof err.code === 'string') return err.code;
   return undefined;
 }
 
-function openStep(at: At, dir: RootedPath, i: number): number {
-  const name = dir.parts[i] ?? '';
-  try {
-    return fs.openSync(at(name), DIR_FLAGS);
-  } catch (err) {
-    const code = errnoCode(err);
-    if ((code === 'ELOOP' || code === 'ENOTDIR') && fs.lstatSync(at(name), { throwIfNoEntry: false })?.isSymbolicLink() === true) {
-      throw new ToolError('stale', `${path.join(dir.root, ...dir.parts.slice(0, i + 1))} is a symbolic link; rooted file operations never follow one`);
-    }
-    throw err;
-  }
+function stepPath(dir: RootedPath, i: number): string {
+  return path.join(dir.root, ...dir.parts.slice(0, i + 1));
+}
+
+function linkStep(dir: RootedPath, i: number): ToolError {
+  return new ToolError('stale', `${stepPath(dir, i)} is a symbolic link; rooted file operations never follow one`);
 }
 
 export const procFdAnchor: Anchor = (dir, fn) => {
-  let fd = fs.openSync(dir.root, DIR_FLAGS);
+  let fd = fs.openSync(dir.root, STEP_FLAGS);
   try {
     for (let i = 0; i < dir.parts.length; i++) {
-      const next = openStep((name) => `/proc/self/fd/${fd}/${name}`, dir, i);
+      const at = `/proc/self/fd/${fd}/${dir.parts[i] ?? ''}`;
+      let next: number;
+      try {
+        next = fs.openSync(at, STEP_FLAGS);
+      } catch (err) {
+        if (errnoCode(err) === 'ENOTDIR' && fs.lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink() === true) throw linkStep(dir, i);
+        throw err;
+      }
       fs.closeSync(fd);
       fd = next;
     }
@@ -99,16 +107,14 @@ export const cwdAnchor: Anchor = (dir, fn) => {
   try {
     process.chdir(dir.root);
     for (let i = 0; i < dir.parts.length; i++) {
-      const fd = openStep((name) => name, dir, i);
-      try {
-        process.chdir(dir.parts[i] ?? '');
-        const opened = fs.fstatSync(fd, { bigint: true });
-        const entered = fs.statSync('.', { bigint: true });
-        if (opened.dev !== entered.dev || opened.ino !== entered.ino) {
-          throw new ToolError('stale', `${path.join(dir.root, ...dir.parts.slice(0, i + 1))} was replaced while it was opened`);
-        }
-      } finally {
-        fs.closeSync(fd);
+      const name = dir.parts[i] ?? '';
+      const seen = fs.lstatSync(name, { bigint: true });
+      if (seen.isSymbolicLink()) throw linkStep(dir, i);
+      if (!seen.isDirectory()) throw Object.assign(new Error(`ENOTDIR: not a directory, ${stepPath(dir, i)}`), { code: 'ENOTDIR' });
+      process.chdir(name);
+      const entered = fs.statSync('.', { bigint: true });
+      if (seen.dev !== entered.dev || seen.ino !== entered.ino) {
+        throw new ToolError('stale', `${stepPath(dir, i)} was replaced while it was entered`);
       }
     }
     return fn((name) => name);
@@ -135,7 +141,7 @@ const windowsAnchor: Anchor = () => {
 /** Whether `/proc/self/fd/<fd>` names the directory the descriptor holds (no `/proc`, or a foreign one, fails). */
 function procFdWorks(): boolean {
   try {
-    const fd = fs.openSync('/', DIR_FLAGS);
+    const fd = fs.openSync('/', STEP_FLAGS);
     try {
       const held = fs.fstatSync(fd, { bigint: true });
       const named = fs.statSync(`/proc/self/fd/${fd}/.`, { bigint: true });
