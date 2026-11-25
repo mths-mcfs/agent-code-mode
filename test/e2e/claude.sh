@@ -59,12 +59,16 @@ for (const r of runs) {
   console.log(`run: host=${r.host} permissionMode=${r.permissionMode} (source ${r.sources.permissionMode})`);
   for (const c of r.calls) console.log(`  ${c.id} ${c.summary} -> ${c.decision}${c.reason ? `: ${c.reason}` : ''}`);
 }
-const calls = runs.flatMap((r) => r.calls);
-const write = calls.find((c) => c.summary.startsWith('write a.txt'));
-const read = calls.find((c) => c.summary.startsWith('read a.txt'));
-const rm = calls.find((c) => /^bash .*rm a\.txt/.test(c.summary));
-const ok = write?.decision === 'allowed' && read?.decision === 'allowed' && rm?.decision === 'denied' && /^hook:/.test(rm.reason ?? '') && fs.existsSync(file);
-console.log(`a.txt exists: ${fs.existsSync(file)}`);
+// All three calls must come from one run: write and read allowed, rm denied by the hook.
+const passed = runs.some((r) => {
+  const write = r.calls.find((c) => c.summary.startsWith('write a.txt'));
+  const read = r.calls.find((c) => c.summary.startsWith('read a.txt'));
+  const rm = r.calls.find((c) => /^bash .*rm a\.txt/.test(c.summary));
+  return write?.decision === 'allowed' && read?.decision === 'allowed' && rm?.decision === 'denied' && /^hook:/.test(rm.reason ?? '');
+});
+const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+const ok = passed && content !== null && content.trim() === 'hello';
+console.log(`a.txt exists: ${content !== null}, content: ${JSON.stringify(content)}`);
 console.log(ok ? 'PASS' : 'FAIL');
 process.exit(ok ? 0 : 1);
 JS

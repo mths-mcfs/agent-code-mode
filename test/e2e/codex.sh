@@ -51,7 +51,10 @@ JS
 
 prompt='Use the agent-code-mode run tool exactly once, with one JavaScript script that: (1) writes the file a.txt with the content "hello\n"; (2) reads a.txt back; (3) runs the shell command "rm a.txt" with the bash binding, catching any error. Return each step result or error message, then report each result in one short line per step. Do not run any other command.'
 
-CODEX_HOME="$home" codex exec --json -C "$project" --skip-git-repo-check "$prompt" </dev/null >"$work/transcript.jsonl" 2>"$work/stderr.txt" || true
+status=0
+CODEX_HOME="$home" codex exec --json -C "$project" --skip-git-repo-check "$prompt" </dev/null >"$work/transcript.jsonl" 2>"$work/stderr.txt" || status=$?
+echo "codex exec exit status: $status"
+[ "$status" -eq 0 ] || { echo "FAIL: codex exec failed, see $work/stderr.txt"; exit 1; }
 
 echo "transcript: $work/transcript.jsonl"
 echo "server log: $log"
@@ -64,12 +67,16 @@ for (const r of runs) {
   console.log(`run: host=${r.host} cwd source=${r.sources.cwd}`);
   for (const c of r.calls) console.log(`  ${c.id} ${c.summary} -> ${c.decision}${c.reason ? `: ${c.reason}` : ''}`);
 }
-const calls = runs.flatMap((r) => r.calls);
-const write = calls.find((c) => c.summary.startsWith('write a.txt'));
-const read = calls.find((c) => c.summary.startsWith('read a.txt'));
-const rm = calls.find((c) => /^bash .*rm a\.txt/.test(c.summary));
-const ok = write?.decision === 'allowed' && read?.decision === 'allowed' && rm?.decision === 'denied' && /^hook:/.test(rm.reason ?? '') && fs.existsSync(file);
-console.log(`a.txt exists: ${fs.existsSync(file)}`);
+// All three calls must come from one run: write and read allowed, rm denied by the hook.
+const passed = runs.some((r) => {
+  const write = r.calls.find((c) => c.summary.startsWith('write a.txt'));
+  const read = r.calls.find((c) => c.summary.startsWith('read a.txt'));
+  const rm = r.calls.find((c) => /^bash .*rm a\.txt/.test(c.summary));
+  return write?.decision === 'allowed' && read?.decision === 'allowed' && rm?.decision === 'denied' && /^hook:/.test(rm.reason ?? '');
+});
+const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+const ok = passed && content !== null && content.trim() === 'hello';
+console.log(`a.txt exists: ${content !== null}, content: ${JSON.stringify(content)}`);
 console.log(ok ? 'PASS' : 'FAIL');
 process.exit(ok ? 0 : 1);
 JS

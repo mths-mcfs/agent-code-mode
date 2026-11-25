@@ -10,7 +10,7 @@ import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
 import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
-import type { HostKind, RunResult, SessionContext } from '../core/types.js';
+import type { HostKind, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
 import { recoverStaleJournals, type RecoveredJournal } from '../tools/journal.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
@@ -54,9 +54,11 @@ export interface McpServerOptions {
 
 export const RUN_LOG_ENV = 'AGENT_CODE_MODE_LOG';
 
-export function recoveryProtectedPaths(stateDir: string, home: string = os.homedir()): string[] {
+export function recoveryProtectedPaths(stateDir: string, env: Readonly<Record<string, string | undefined>>, home: string = os.homedir()): string[] {
+  const configDirs = [env['CODEX_HOME'], env['CLAUDE_CONFIG_DIR']].filter((d): d is string => d !== undefined && path.isAbsolute(d));
   return [
     path.join(stateDir, '**'),
+    ...configDirs.map((d) => path.join(d, '**')),
     path.join(home, '.claude', '**'),
     path.join(home, '.claude.json'),
     path.join(home, '.codex', '**'),
@@ -147,40 +149,6 @@ export function createMcpServer(opts: McpServerOptions): Server {
   const factory = opts.createRuntime ?? ((host: HostKind) => createRuntime(host, { env, serverCwd, stateDir }));
   const runLog = env[RUN_LOG_ENV];
   const recoverJournals = opts.recoverJournals ?? true;
-  const recoveries = new Map<string, Promise<RecoveryLog | undefined>>();
-  const recover = (trigger: RecoveryLog['trigger'], roots: readonly string[], protectedPaths: () => Promise<readonly string[]>): Promise<RecoveryLog | undefined> => {
-    const pass = (async () => {
-      const recovered = await recoverStaleJournals(stateDir, roots, await protectedPaths());
-      if (recovered.length === 0) return undefined;
-      const log = recoveryLog(trigger, roots, recovered);
-      await appendRunLog(runLog, { event: 'recovery', ...log });
-      return log;
-    })();
-    for (const root of roots) recoveries.set(root, pass);
-    return pass;
-  };
-  if (recoverJournals) void recover('startup', [serverCwd], async () => recoveryProtectedPaths(stateDir));
-  let startupReported = false;
-  const recoverFor = async (ctx: SessionContext, runtime: Runtime): Promise<RecoveryLog[]> => {
-    if (!recoverJournals) return [];
-    const roots = [...new Set([ctx.cwd, ...ctx.roots])];
-    const fresh = roots.filter((r) => !recoveries.has(r));
-    const reported: Promise<RecoveryLog | undefined>[] = [];
-    if (fresh.length > 0) {
-      reported.push(
-        recover('first-run', fresh, async () => {
-          const policy = await runtime.adapter.loadPolicy(ctx).catch(() => undefined);
-          const fromPolicy = policy !== undefined && !('error' in policy) ? policy.protectedPaths : [];
-          return [...fromPolicy, ...recoveryProtectedPaths(stateDir)];
-        }),
-      );
-    }
-    const startup = recoveries.get(serverCwd);
-    if (!startupReported && startup !== undefined) reported.push(startup);
-    startupReported = true;
-    await Promise.all(roots.map((r) => recoveries.get(r)));
-    return [...new Set(await Promise.all(reported))].filter((l): l is RecoveryLog => l !== undefined);
-  };
   const runtimes = new Map<HostKind, Runtime>();
   const runtimeFor = (host: HostKind): Runtime => {
     let runtime = runtimes.get(host);
@@ -189,6 +157,50 @@ export function createMcpServer(opts: McpServerOptions): Server {
       runtimes.set(host, runtime);
     }
     return runtime;
+  };
+  const policyOf = async (runtime: Runtime, ctx: SessionContext): Promise<PolicySnapshot | undefined> => {
+    const policy = await runtime.adapter.loadPolicy(ctx).catch(() => undefined);
+    return policy !== undefined && !('error' in policy) ? policy : undefined;
+  };
+  const recoveries = new Map<string, Promise<RecoveryLog | undefined>>();
+  const recover = (trigger: RecoveryLog['trigger'], known: readonly string[], policy: () => Promise<PolicySnapshot | undefined>): Promise<RecoveryLog | undefined> => {
+    const pass: Promise<RecoveryLog | undefined> = Promise.resolve().then(async () => {
+      const snapshot = await policy().catch(() => undefined);
+      const extra = (snapshot?.additionalRoots ?? []).filter((r) => !recoveries.has(r));
+      for (const root of extra) recoveries.set(root, pass);
+      const roots = [...known, ...extra];
+      const recovered = await recoverStaleJournals(stateDir, roots, [...(snapshot?.protectedPaths ?? []), ...recoveryProtectedPaths(stateDir, env)]);
+      if (recovered.length === 0) return undefined;
+      const log = recoveryLog(trigger, roots, recovered);
+      await appendRunLog(runLog, { event: 'recovery', ...log });
+      return log;
+    });
+    for (const root of known) recoveries.set(root, pass);
+    return pass;
+  };
+  if (recoverJournals) {
+    void recover('startup', [serverCwd], async () => {
+      if (opts.host === undefined) return undefined;
+      const runtime = runtimeFor(opts.host);
+      return policyOf(runtime, await runtime.contextProvider.resolve({ env, meta: undefined, roots: [], serverCwd }));
+    });
+  }
+  let startupReported = false;
+  /** Session cwds whose host policy was read for additional roots to recover. */
+  const policyRead = new Set<string>();
+  const recoverFor = async (ctx: SessionContext, runtime: Runtime): Promise<RecoveryLog[]> => {
+    if (!recoverJournals) return [];
+    const fresh = [...new Set([ctx.cwd, ...ctx.roots])].filter((r) => !recoveries.has(r));
+    const reported: Promise<RecoveryLog | undefined>[] = [];
+    if (fresh.length > 0 || !policyRead.has(ctx.cwd)) {
+      policyRead.add(ctx.cwd);
+      reported.push(recover('first-run', fresh, () => policyOf(runtime, ctx)));
+    }
+    const startup = recoveries.get(serverCwd);
+    if (!startupReported && startup !== undefined) reported.push(startup);
+    startupReported = true;
+    await Promise.all(recoveries.values());
+    return [...new Set(await Promise.all(reported))].filter((l): l is RecoveryLog => l !== undefined);
   };
 
   const server = new Server({ name: SERVER_NAME, version: opts.version }, {

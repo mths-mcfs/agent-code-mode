@@ -17,8 +17,9 @@ import { FileTransaction } from '../tools/journal.js';
 import { NodeToolRuntime } from '../tools/runtime.js';
 import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 import { GenericContextProvider } from './context.js';
+import { GenericHostAdapter } from './generic-adapter.js';
 import { RUN_LOG_ENV, createMcpServer } from './mcp.js';
-import type { Runtime } from './runtime.js';
+import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 
 const root = os.tmpdir();
 const closers: (() => Promise<void>)[] = [];
@@ -195,8 +196,14 @@ describe('MCP server', () => {
   });
 });
 
-async function connectReal(opts: { serverCwd: string; stateDir: string; roots?: readonly string[]; env?: Record<string, string> }) {
-  const server = createMcpServer({ version: '0.0.0-test', env: opts.env ?? {}, serverCwd: opts.serverCwd, stateDir: opts.stateDir });
+async function connectReal(opts: { serverCwd: string; stateDir: string; roots?: readonly string[]; env?: Record<string, string>; createRuntime?: RuntimeFactory }) {
+  const server = createMcpServer({
+    version: '0.0.0-test',
+    env: opts.env ?? {},
+    serverCwd: opts.serverCwd,
+    stateDir: opts.stateDir,
+    ...(opts.createRuntime ? { createRuntime: opts.createRuntime } : {}),
+  });
   const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
   client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: (opts.roots ?? []).map((r) => ({ uri: pathToFileURL(r).href })) }));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -225,11 +232,11 @@ describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  async function crashedWrite(file: string, content: string): Promise<void> {
+  async function crashedWrite(file: string, content: string, root = workspace): Promise<void> {
     const tools = new NodeToolRuntime({ stateDir });
     const tx = tools.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('expected a disk journal');
-    const ctx = { host: 'generic' as const, cwd: workspace, roots: [workspace], permissionMode: 'default', sources: {} };
+    const ctx = { host: 'generic' as const, cwd: root, roots: [root], permissionMode: 'default', sources: {} };
     const policy = { host: 'generic' as const, bashContainment: { mode: 'none' as const }, protectedPaths: [], payload: null };
     const prepared = await tools.prepare({ id: 'c1', tool: 'write', args: { path: file, content } }, ctx, policy);
     await tools.commit(prepared, new AbortController().signal, tx);
@@ -288,5 +295,26 @@ return { content: r.content, w };`;
     const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return (await read({ path: 'a.txt' })).content;` } })));
     expect(first.result).toBe('edited by hand');
     expect(first.warnings.join('\n')).toContain('was not restored (changed-externally');
+  });
+
+  it("recovers the host policy's additional roots, which neither the cwd nor the client roots name", async () => {
+    const extra = path.join(base, 'extra');
+    mkdirSync(extra);
+    writeFileSync(path.join(extra, 'a.txt'), 'original');
+    await crashedWrite('a.txt', 'half-done', extra);
+    const generic = new GenericHostAdapter({ stateDir });
+    const factory: RuntimeFactory = (host) => ({
+      ...createRuntime(host, { env: {}, serverCwd: workspace, stateDir }),
+      adapter: {
+        host: 'generic',
+        loadPolicy: async (ctx) => ({ ...(await generic.loadPolicy(ctx)), additionalRoots: [extra] }),
+        checkStatic: (prepared) => generic.checkStatic(prepared),
+        authorize: () => generic.authorize(),
+      },
+    });
+    const client = await connectReal({ serverCwd: workspace, stateDir, createRuntime: factory });
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return (await read({ path: ${JSON.stringify(path.join(extra, 'a.txt'))} })).content;` } })));
+    expect(first.result).toBe('original');
+    expect(first.warnings.join('\n')).toContain(`restored: ${path.join(extra, 'a.txt')}`);
   });
 });
