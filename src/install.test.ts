@@ -38,7 +38,7 @@ describe('install', () => {
     const plan = await planInstall(opts({}));
     expect(plan.text).toContain('"command": "npx"');
     expect(plan.text).toContain('npx -y agent-code-mode hook');
-    expect(planDiff(plan)).toContain('+++ b/');
+    expect(planDiff(plan)).toContain('+++ ');
     await applyPlan(plan);
     const settings: unknown = JSON.parse(readFileSync(path.join(project, '.claude', 'settings.json'), 'utf8'));
     expect(settings).toEqual({

@@ -53,7 +53,7 @@ describe.runIf(process.platform === 'linux')('live: temp CODEX_HOME, real config
 
   it('runs a search the hook allows and denies one the hook denies', async () => {
     const d = await dispatcher();
-    expect(await d.dispatch('grep', { pattern: 'needle' })).toEqual({ ok: true, value: { matches: [{ file: path.join(ws, 'notes.ts'), line: 1, text: 'needle' }], truncated: false } });
+    expect(await d.dispatch('grep', { pattern: 'needle' })).toEqual({ ok: true, value: { matches: [{ file: path.join(ws, 'notes.ts'), line: 1, text: 'needle' }], truncated: false, filtered: 0 } });
     expect(await d.dispatch('grep', { pattern: 'secret' })).toMatchObject({ ok: false, error: { code: 'denied', source: 'hook', message: expect.stringContaining('blocked') } });
   });
 

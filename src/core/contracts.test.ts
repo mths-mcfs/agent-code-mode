@@ -180,7 +180,7 @@ describe('Codex policy wiring', () => {
       if ('error' in policy) throw new Error(policy.error);
       return policy;
     };
-    expect((await policyFor('workspace-write')).additionalRoots).toEqual([extra]);
+    expect((await policyFor('workspace-write')).additionalRoots).toEqual([path.resolve(extra)]);
     expect((await policyFor('read-only')).additionalRoots).toBeUndefined();
   });
 });

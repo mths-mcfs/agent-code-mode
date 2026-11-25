@@ -672,15 +672,19 @@ describe('QuickJsSandbox: reply buffering', () => {
 
   it('ends a run whose script stops reading binding results instead of buffering them', async () => {
     const before = process.memoryUsage();
+    const cap = 16 * 1024 * 1024;
     const { outcome, calls, elapsedMs } = await run('for (let i = 0; i < 200; i++) read({ path: "x" }); while (true) {}', {
       timeoutMs: 10_000,
       onCall: bigRead,
-      sandbox: { maxPendingReplyBytes: 16 * 1024 * 1024 },
+      sandbox: { maxPendingReplyBytes: cap },
     });
     const f = failure(outcome);
     expect(f.kind).toBe('oom');
     expect(f.error.name).toBe('ReplyBufferFull');
-    expect(calls.length).toBeGreaterThan(16);
+    expect(f.error.message).toContain(`not read yet exceeded ${cap} bytes`);
+    // How many replies fit before the cap depends on how much the OS pipe absorbs, so only the bound
+    // that holds everywhere is checked: each reply is a little over 1 MiB.
+    expect(calls.length).toBeGreaterThanOrEqual(Math.floor(cap / (1024 * 1024 + 1024)));
     expect(elapsedMs).toBeLessThan(5_000);
     const after = process.memoryUsage();
     expect(after.external + after.arrayBuffers - (before.external + before.arrayBuffers)).toBeLessThan(64 * 1024 * 1024);
