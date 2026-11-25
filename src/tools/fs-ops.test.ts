@@ -5,7 +5,11 @@ const failWith = (code: string) => async (): Promise<void> => {
   throw Object.assign(new Error(`${code}: directory fsync`), { code });
 };
 
-describe('syncDirStrict', () => {
+it.runIf(process.platform === 'win32')('syncDirStrict refuses every directory on Windows', async () => {
+  await expect(syncDirStrict(process.cwd())).rejects.toThrow(/Windows cannot flush the directory/);
+});
+
+describe.skipIf(process.platform === 'win32')('syncDirStrict', () => {
   it.each(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'])('refuses a file system that answers %s, which cannot make a rename durable', async (code) => {
     await expect(syncDirStrict('/any', failWith(code))).rejects.toThrow(/cannot flush a directory to disk/);
   });

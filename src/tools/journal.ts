@@ -136,7 +136,6 @@ export class FileTransaction implements Transaction {
   readonly #dirs: string[] = [];
   /** Directories this transaction's writes really created; only those are removed by the in-process rollback. */
   readonly #ownDirs = new Set<string>();
-  /** Workspace directories already shown to flush to disk. */
   readonly #flushable = new Set<string>();
   #bytes = 0;
   #created = false;
@@ -179,15 +178,9 @@ export class FileTransaction implements Transaction {
   async #persist(): Promise<void> {
     if (!this.#created) {
       const root = path.dirname(this.dir);
-      const first = await fs.mkdir(root, { recursive: true, mode: 0o700 });
+      const firstCreated = await fs.mkdir(root, { recursive: true, mode: 0o700 });
       await assertPrivateDir(root);
-      // Each directory mkdir created must be durable in its parent, or a crash loses the record.
-      let parent = path.dirname(root);
-      await this.#io.syncDir(parent);
-      while (first !== undefined && parent !== path.dirname(first)) {
-        parent = path.dirname(parent);
-        await this.#io.syncDir(parent);
-      }
+      await syncParentsOfCreated(root, firstCreated, this.#io.syncDir);
       await fs.mkdir(this.dir, { mode: 0o700 });
       this.#created = true;
       await this.#io.syncDir(root);
@@ -212,16 +205,7 @@ export class FileTransaction implements Transaction {
   ): Promise<void> {
     return this.#serial(async () => {
       if (this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
-      // Finalization flushes this directory; where it cannot, the write is refused before the file changes.
-      const dir = path.dirname(createdDirs[0] ?? absPath);
-      if (!this.#flushable.has(dir)) {
-        try {
-          await this.#io.syncDir(dir);
-        } catch (err) {
-          throw new ToolError('tool-error', `refused to write ${absPath} in a transaction: ${errorMessage(err)}`);
-        }
-        this.#flushable.add(dir);
-      }
+      await this.#assertFlushable(path.dirname(createdDirs[0] ?? absPath), absPath);
       if (!this.#roots.includes(root)) this.#roots.push(root);
       const existing = this.#entries.get(absPath);
       if (existing) {
@@ -269,6 +253,16 @@ export class FileTransaction implements Transaction {
     });
   }
 
+  async #assertFlushable(dir: string, absPath: string): Promise<void> {
+    if (this.#flushable.has(dir)) return;
+    try {
+      await this.#io.syncDir(dir);
+    } catch (err) {
+      throw new ToolError('tool-error', `refused to write ${absPath} in a transaction: ${errorMessage(err)}`);
+    }
+    this.#flushable.add(dir);
+  }
+
   /** Called after a successful write, with the directories it created. */
   written(absPath: string, hash: string, createdDirs: readonly string[] = []): void {
     const live = this.#entries.get(absPath);
@@ -302,12 +296,9 @@ export class FileTransaction implements Transaction {
       }
       const ownDirs = this.#dirs.filter((d) => this.#ownDirs.has(d));
       await removeCreatedDirs(ownDirs, this.#roots);
-      const durable = await syncExisting(touchedDirs(restored, ownDirs), this.#io.syncDir).then(
-        () => true,
-        () => false,
-      );
-      // A file whose restore failed or is not yet on disk keeps the record, so a recovery pass can still restore it.
-      if (!durable || skipped.some((s) => s.reason === 'error')) await this.#flushRecord();
+      const restoresOnDisk = await flushes(touchedDirs(restored, ownDirs), this.#io.syncDir);
+      const needsRecovery = !restoresOnDisk || skipped.some((s) => s.reason === 'error');
+      if (needsRecovery) await this.#flushRecord();
       else await this.#removeRecord();
       return { restored, skipped };
     });
@@ -338,7 +329,6 @@ export class FileTransaction implements Transaction {
       }
       const committed = `${this.dir}${COMMITTED}`;
       try {
-        // The changes must be on disk before the journal stops protecting them.
         await syncExisting(touchedDirs([...this.#entries.keys()], this.#dirs), this.#io.syncDir);
         await fs.rename(this.dir, committed);
       } catch (err) {
@@ -400,12 +390,26 @@ async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: str
   await atomicWrite(entry.path, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {});
 }
 
-/** Directories whose entries changed: the directory of each file and the parent of each created directory. */
 function touchedDirs(files: readonly string[], createdDirs: readonly string[]): string[] {
   return [...new Set([...files, ...createdDirs].map((p) => path.dirname(p)))];
 }
 
-/** fsyncs each directory; one that is gone holds none of the changes, so it is skipped. */
+async function syncParentsOfCreated(dir: string, firstCreated: string | undefined, sync: (dir: string) => Promise<void>): Promise<void> {
+  let parent = path.dirname(dir);
+  await sync(parent);
+  while (firstCreated !== undefined && parent !== path.dirname(firstCreated)) {
+    parent = path.dirname(parent);
+    await sync(parent);
+  }
+}
+
+function flushes(dirs: readonly string[], sync: (dir: string) => Promise<void>): Promise<boolean> {
+  return syncExisting(dirs, sync).then(
+    () => true,
+    () => false,
+  );
+}
+
 async function syncExisting(dirs: readonly string[], sync: (dir: string) => Promise<void>): Promise<void> {
   for (const dir of dirs) {
     try {
@@ -585,12 +589,9 @@ export async function recoverStaleJournals(
   for (const record of claimed) {
     try {
       // The journal contains planned directory names and cannot establish ownership after a crash.
-      // A file that could not be handled or whose restore is not yet on disk keeps the record for a later pass.
-      const durable = await syncExisting(touchedDirs(record.restored, []), syncDirStrict).then(
-        () => true,
-        () => false,
-      );
-      if (durable && !record.skipped.some((s) => s.reason === 'error')) await fs.rm(record.dir, { recursive: true, force: true });
+      const restoresOnDisk = await flushes(touchedDirs(record.restored, []), syncDirStrict);
+      const needsRecovery = !restoresOnDisk || record.skipped.some((s) => s.reason === 'error');
+      if (!needsRecovery) await fs.rm(record.dir, { recursive: true, force: true });
       out.push({ id: record.id, report: { restored: record.restored, skipped: record.skipped } });
     } catch {
       // One bad record must not stop the others.

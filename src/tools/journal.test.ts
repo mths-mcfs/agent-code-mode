@@ -52,7 +52,16 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-describe('transactions', () => {
+it.runIf(IS_WINDOWS)('refuses a transactional write on Windows before the file changes, and keeps plain writes', async () => {
+  const tx = rt.beginTransaction();
+  await expect(write('a.txt', 'a1\n', tx)).rejects.toThrow(/refused to write .*Windows cannot flush the directory/);
+  expect(read('a.txt')).toBe('a0\n');
+  const prepared = await rt.prepare({ id: `c${++seq}`, tool: 'write', args: { path: 'a.txt', content: 'a1\n' } } satisfies ToolCall, ctx, policy);
+  await rt.commit(prepared, signal);
+  expect(read('a.txt')).toBe('a1\n');
+});
+
+describe.skipIf(IS_WINDOWS)('transactions', () => {
   it('rolls back three writes (two edits and a create in a new directory)', async () => {
     const tx = rt.beginTransaction();
     await write('a.txt', 'a1\n', tx);
@@ -147,7 +156,7 @@ describe('transactions', () => {
   });
 });
 
-describe('crash recovery', () => {
+describe.skipIf(IS_WINDOWS)('crash recovery', () => {
   /** Makes the journal of `tx` look like it was left by a process that died. */
   function abandon(tx: FileTransaction): string {
     const dir = tx.dir;
@@ -286,7 +295,7 @@ describe('crash recovery', () => {
   });
 });
 
-describe('finalization', () => {
+describe.skipIf(IS_WINDOWS)('finalization', () => {
   /** Keeps the delete of a finalized journal pending, as if the process died right after the commit. */
   const held = (): Promise<void> => new Promise(() => undefined);
 
@@ -361,7 +370,6 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
-  /** Flushes for real, failing with `code` for the workspace directories while `failing()` holds. */
   function workspaceFlushFails(code: string, failing: () => boolean): JournalIo {
     const inWorkspace = (dir: string): boolean => dir === ws || dir.startsWith(`${ws}${path.sep}`);
     return {
@@ -437,7 +445,6 @@ describe('finalization', () => {
       removeDir: held,
     });
     await write('a.txt', 'a1\n', tx);
-    // The state directory did not exist: its parent must be flushed too.
     expect(flushed).toEqual(expect.arrayContaining([base, stateDir, journalRoot(stateDir), tx.dir]));
   });
 });

@@ -141,7 +141,7 @@ describe('4. abort stops a write that already entered commit', () => {
   });
 });
 
-describe('5. concurrent commits on one path', () => {
+describe.skipIf(IS_WINDOWS)('5. concurrent commits on one path', () => {
   it('lets only the first of two writes prepared against the same content succeed', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const a = await prepWrite('f', 'first');
