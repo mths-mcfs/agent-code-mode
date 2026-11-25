@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
+import { claimFile } from './file-claims.js';
 import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
 import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
@@ -463,6 +464,10 @@ export class Dispatcher<P = unknown> {
     const tool = lowered?.tool ?? prepared.tool;
     const transaction = this.#opts.transaction;
     const journaled = transaction !== undefined && (prepared.tool === 'write' || prepared.tool === 'edit');
+    if (journaled && !claimFile(transaction, prepared.effect.absPath)) {
+      const error = new ToolError('tool-error', `${prepared.effect.absPath} is being changed by another transactional run that has not finished; retry once it ends`);
+      return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error });
+    }
     let result: ToolResult;
     try {
       const pending = this.#opts.tools.commit(prepared, signal, transaction);
