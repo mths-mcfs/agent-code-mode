@@ -268,6 +268,40 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
 /** Variables that name a command or a config file a program reads commands from. */
 const COMMAND_VARIABLES = /^(GIT_PAGER|PAGER|MANPAGER|GIT_EXTERNAL_DIFF|GIT_SSH_COMMAND|GIT_SSH|GIT_EDITOR|GIT_SEQUENCE_EDITOR|EDITOR|VISUAL|GIT_ASKPASS|SSH_ASKPASS|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|RIPGREP_CONFIG_PATH|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|LD_PRELOAD)\+?=/;
 
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+/** Builtins whose NAME=VALUE operands set shell variables, which reach the environment when exported. */
+const DECLARING = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
+
+/**
+ * The words of a command that set the environment of what it runs: leading
+ * NAME=VALUE words (as a wrapper such as `sudo` passes them on), the
+ * NAME=VALUE operands of `env` after its options, and the assignment
+ * operands of `export`, `declare`, `typeset`, `local` and `readonly`. Other
+ * arguments are data, so `printf '%s' GIT_PAGER=cat` sets nothing.
+ */
+function environmentWords(argv: readonly string[]): string[] {
+  const leading: string[] = [];
+  let i = 0;
+  while (i < argv.length && ASSIGNMENT.test(argv[i] ?? '')) leading.push(argv[i++] ?? '');
+  const program = argv[i] === undefined ? '' : (executableLookupKey(argv[i] ?? '', process.platform) ?? argv[i] ?? '');
+  const operands = argv.slice(i + 1);
+  if (DECLARING.has(program)) return [...leading, ...operands.filter((w) => ASSIGNMENT.test(w))];
+  if (program !== 'env') return leading;
+  const set: string[] = [];
+  for (let k = 0; k < operands.length; k++) {
+    const w = operands[k] ?? '';
+    if (w === '--') continue;
+    if (w === '-u' || w === '--unset' || w === '-C' || w === '--chdir' || w === '-S' || w === '--split-string') {
+      k++;
+      continue;
+    }
+    if (w.startsWith('-')) continue;
+    if (!ASSIGNMENT.test(w)) break;
+    set.push(w);
+  }
+  return [...leading, ...set];
+}
+
 /** git subcommands that never run their arguments as commands. */
 const GIT_DATA_SUBCOMMANDS = new Set(['add', 'blame', 'branch', 'commit', 'diff', 'log', 'mv', 'reset', 'restore', 'rm', 'show', 'stash', 'status', 'switch', 'tag']);
 /** Programs that read or print their arguments and never run them. */
@@ -331,7 +365,7 @@ export function checkShellCommand(command: string, p: CodexPolicy, executor?: re
   }
   if (split.unsure.length > 0) unmatchedAsk ??= `cannot tell which command runs behind a wrapper (${split.unsure[0] ?? ''})`;
   // A variable that makes a program start another command (a pager, an editor, a config path) runs a command this check does not see.
-  const setsCommand = [...split.assignments, ...split.commands.flatMap((argv) => argv.slice(1))].find((w) => COMMAND_VARIABLES.test(w));
+  const setsCommand = [...split.assignments, ...split.commands.flatMap(environmentWords)].find((w) => COMMAND_VARIABLES.test(w));
   if (setsCommand !== undefined) unmatchedAsk ??= `${setsCommand.split('=')[0] ?? ''} makes a program start a command this check cannot see`;
   // A forbidden or prompted program given as a whole argument may run through a wrapper this splitter does not model.
   const guarded = new Set(p.rules.rules.filter((r) => r.decision !== 'allow').map((r) => executableLookupKey(r.program, process.platform) ?? r.program));

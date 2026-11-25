@@ -64,6 +64,9 @@ const EQUIVALENT_FORMS: readonly string[] = [
   "RIPGREP_CONFIG_PATH=./rg.conf rg x",
   "env GIT_PAGER='sh -c x' git log",
   "export GIT_PAGER='sh -c x'; git log",
+  "declare -x GIT_PAGER='sh -c x'; git log",
+  "env -u HOME GIT_PAGER='sh -c x' git log",
+  "sudo GIT_PAGER='sh -c x' git log",
   "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=sh git log",
   "flock /tmp/lk -c 'rm -rf x'",
   '$"rm" -rf x',
@@ -129,7 +132,7 @@ describe('a forbidden rule survives equivalent forms', () => {
   });
 
   it('still allows commands that name no guarded program', () => {
-    for (const cmd of ['ls -la', 'git status', "bash -c 'echo ok'", 'source ./env.sh', 'bash ./build.sh', "printf '%s' a", 'git commit -m "rm old files"', 'echo "use git here"', "echo 'git push later'", "printf '%s\\n' 'rm x'", "cat 'rm notes.txt'", "rg -e 'rm -rf' src"]) {
+    for (const cmd of ['ls -la', 'git status', "bash -c 'echo ok'", 'source ./env.sh', 'bash ./build.sh', "printf '%s' a", 'git commit -m "rm old files"', 'echo "use git here"', "printf '%s\\n' 'GIT_PAGER=cat'", 'echo GIT_PAGER=less', 'git commit -m "set GIT_PAGER=cat"', "echo 'git push later'", "printf '%s\\n' 'rm x'", "cat 'rm notes.txt'", "rg -e 'rm -rf' src"]) {
       expect(decide(cmd), cmd).toEqual({ kind: 'allow' });
     }
   });
