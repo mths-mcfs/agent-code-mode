@@ -413,9 +413,9 @@ export class NodeToolRuntime implements ToolRuntime {
       identity: m.identity,
       ...(tx
         ? {
-            beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs),
+            beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, createdDirs),
             onDirCreated: (dir: string, id: DirId, parent: DirId | undefined) => tx.dirCreated(dir, id, parent),
-            beforeInstall: (install: InstallId) => tx.installing(absPath, nextHash, install),
+            beforeInstall: (install: InstallId, temp: string) => tx.installing(absPath, install, temp),
           }
         : {}),
     });

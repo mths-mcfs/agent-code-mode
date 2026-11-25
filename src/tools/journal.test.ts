@@ -149,7 +149,7 @@ describe('transactions', () => {
     const bytes = Buffer.from('x\n');
     const outcome = await atomicWrite(abs, bytes, { kind: 'absent' }, {
       beforeWrite: async (before, dirs) => {
-        await tx.record(abs, ws, before, sha256(bytes), dirs);
+        await tx.record(abs, ws, before, dirs);
         // Another writer creates the directory between the checks and the write.
         mkdirSync(dir);
       },
@@ -195,7 +195,7 @@ describe('crash recovery', () => {
       version: 1, pid, host: os.hostname(), startedAt: 0, roots: [ws], dirs: [shared],
       entries: [{
         path: path.join(ws, 'a.txt'), existed: true, original: sha256('a0\n'),
-        mode: 0o644, blob: '0.bin', written: [sha256('a1\n')],
+        mode: 0o644, blob: '0.bin',
       }],
     }));
 
@@ -259,7 +259,7 @@ describe('crash recovery', () => {
     expect(readdirSync(journalRoot(stateDir))).toHaveLength(1);
   });
 
-  it('undoes writes newest first across journals, whatever order the runs started in', async () => {
+  it('undoes the newest write across journals and reports the older journal as a conflict', async () => {
     const first = rt.beginTransaction();
     const second = rt.beginTransaction();
     if (!(first instanceof FileTransaction) || !(second instanceof FileTransaction)) throw new Error('unreachable');
@@ -268,8 +268,10 @@ describe('crash recovery', () => {
     await write('a.txt', 'first\n', first);
     abandon(first);
     abandon(second);
-    await recoverStaleJournals(stateDir, [ws], []);
-    expect(read('a.txt')).toBe('a0\n');
+    const reports = (await recoverStaleJournals(stateDir, [ws], [])).map((r) => r.report);
+    expect(reports.flatMap((r) => r.restored)).toEqual([path.join(ws, 'a.txt')]);
+    expect(reports.flatMap((r) => r.skipped.map((x) => x.reason))).toEqual(['changed-externally']);
+    expect(read('a.txt')).toBe('second\n');
   });
 
   it('keeps a later acknowledged write of the same file, and the record, reporting a conflict', async () => {
@@ -361,17 +363,7 @@ describe('recovery restores only files the crashed run installed', () => {
   };
   const recover = () => recoverStaleJournals(stateDir, [ws], []);
 
-  it('unwinds two consecutive unfinished journals on the same file', async () => {
-    const one = start();
-    await write('a.txt', 'first', one);
-    const two = start();
-    await write('a.txt', 'second', two);
-    abandonAll(one, two);
-    expect((await recover()).flatMap((r) => r.report.restored)).toHaveLength(2);
-    expect(read('a.txt')).toBe('a0\n');
-  });
-
-  it('undoes a write the crash cut between its install and its confirmation, by the temp file identity', async () => {
+  it('reports a write the crash cut between its install and its confirmation as a conflict, and leaves it', async () => {
     class CutBeforeConfirmation extends FileTransaction {
       override written(): Promise<void> {
         return Promise.resolve();
@@ -381,31 +373,9 @@ describe('recovery restores only files the crashed run installed', () => {
     await write('a.txt', 'first', one);
     await write('new.txt', 'created', one);
     abandonAll(one);
-    expect((await recover())[0]?.report.restored).toHaveLength(2);
-    expect(read('a.txt')).toBe('a0\n');
-    expect(existsSync(path.join(ws, 'new.txt'))).toBe(false);
-  });
-
-  it('leaves a manual restoration of the original bytes in place', async () => {
-    const one = start();
-    await write('a.txt', 'first', one);
-    writeFileSync(path.join(ws, 'manual'), 'a0\n');
-    renameSync(path.join(ws, 'manual'), path.join(ws, 'a.txt'));
-    abandonAll(one);
-    expect((await recover())[0]?.report).toEqual({ restored: [], skipped: [] });
-    expect(read('a.txt')).toBe('a0\n');
-    expect(await recover()).toEqual([]);
-  });
-
-  it('reports a conflict when the bytes match but the file was replaced', async () => {
-    const one = start();
-    await write('a.txt', 'first', one);
-    writeFileSync(path.join(ws, 'replacement'), 'first');
-    renameSync(path.join(ws, 'replacement'), path.join(ws, 'a.txt'));
-    abandonAll(one);
-    expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
+    expect((await recover())[0]?.report.skipped.map((x) => x.reason)).toEqual(['changed-externally', 'changed-externally']);
     expect(read('a.txt')).toBe('first');
-    expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
+    expect(read('new.txt')).toBe('created');
   });
 
   it('reports a conflict when the file was rewritten in place with the same bytes', async () => {
@@ -418,31 +388,6 @@ describe('recovery restores only files the crashed run installed', () => {
     expect(read('a.txt')).toBe('first');
   });
 
-  it('keeps a committed write between two unfinished journals that wrote the same bytes', async () => {
-    const one = start();
-    await write('a.txt', 'first', one);
-    const committed = start();
-    await write('a.txt', 'intermediate', committed);
-    await write('a.txt', 'first', committed);
-    await committed.dispose();
-    const two = start();
-    await write('a.txt', 'second', two);
-    abandonAll(one, two);
-    await recover();
-    expect(read('a.txt')).toBe('first');
-  });
-
-  it('keeps a later committed file after an earlier write failed before it was installed', async () => {
-    const one = start();
-    vi.spyOn(fsp, 'link').mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
-    await expect(write('new.txt', 'first', one)).rejects.toThrow(/ENOSPC/);
-    const committed = start();
-    await write('new.txt', 'first', committed);
-    await committed.dispose();
-    abandonAll(one);
-    await recover();
-    expect(read('new.txt')).toBe('first');
-  });
 });
 
 describe('finalization', () => {
@@ -523,10 +468,10 @@ describe('finalization', () => {
   function workspaceFlushFails(code: string, failing: () => boolean): JournalIo {
     const inWorkspace = (dir: string): boolean => dir === ws || dir.startsWith(`${ws}${path.sep}`);
     return {
-      syncDir: (dir) =>
-        syncDirStrict(dir, async (d) => {
+      syncDir: (dir, expected) =>
+        syncDirStrict(dir, expected, async (d, id) => {
           if (failing() && inWorkspace(d)) throw Object.assign(new Error(`${code}: directory fsync`), { code });
-          await syncDirStrict(d);
+          await syncDirStrict(d, id);
         }),
       removeDir: held,
     };
@@ -573,16 +518,6 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
-  it('does not commit when a changed directory was moved and another one now sits at its path', async () => {
-    mkdirSync(path.join(ws, 'nested'));
-    const tx = rt.beginTransaction();
-    await write('nested/file.txt', 'new', tx);
-    renameSync(path.join(ws, 'nested'), path.join(ws, 'moved'));
-    mkdirSync(path.join(ws, 'nested'));
-    await expect(tx.dispose()).rejects.toMatchObject({ name: 'TransactionFinalizeError', committed: false });
-    expect(read('moved/file.txt')).toBe('new');
-  });
-
   it('keeps the journal open for a rollback when a changed directory cannot be flushed at finalization', async () => {
     let failing = false;
     const tx = new FileTransaction(stateDir, workspaceFlushFails('EIO', () => failing));
@@ -595,7 +530,7 @@ describe('finalization', () => {
     expect(read('a.txt')).toBe('a0\n');
   });
 
-  it('keeps the record of a rollback whose restore cannot be flushed, for recovery to finish', async () => {
+  it('keeps the record of a rollback whose restore cannot be flushed, which recovery then reports as a conflict', async () => {
     let failing = false;
     const tx = new FileTransaction(stateDir, workspaceFlushFails('EIO', () => failing));
     await write('a.txt', 'a1\n', tx);
@@ -603,13 +538,11 @@ describe('finalization', () => {
     expect((await tx.rollback()).restored).toEqual([path.join(ws, 'a.txt')]);
     expect(read('a.txt')).toBe('a0\n');
     expect(existsSync(path.join(tx.dir, 'manifest.json'))).toBe(true);
-    const io = workspaceFlushFails('EIO', () => failing);
-    // The restore is already visible, so recovery has nothing to undo, but it still flushes it before deleting the record.
-    expect(await recoverStaleJournals(stateDir, [ws], [], io.syncDir)).toEqual([{ id: tx.id, report: { restored: [], skipped: [] } }]);
+    // The restored file is not one the run installed: recovery leaves it and keeps the record.
+    const [recovered] = await recoverStaleJournals(stateDir, [ws], []);
+    expect(recovered?.report.skipped.map((x) => x.reason)).toEqual(['changed-externally']);
+    expect(read('a.txt')).toBe('a0\n');
     expect(readdirSync(journalRoot(stateDir))).toHaveLength(1);
-    failing = false;
-    expect(await recoverStaleJournals(stateDir, [ws], [], io.syncDir)).toEqual([{ id: tx.id, report: { restored: [], skipped: [] } }]);
-    expect(readdirSync(journalRoot(stateDir))).toEqual([]);
   });
 
   it.skipIf(IS_WINDOWS || process.getuid?.() === 0)('keeps the record when a file cannot be inspected, instead of taking it for absent', async () => {

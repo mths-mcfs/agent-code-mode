@@ -7,11 +7,11 @@ const failWith = (code: string) => async (): Promise<void> => {
 
 describe('syncDirStrict', () => {
   it.each(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'])('refuses a file system that answers %s, which cannot make a rename durable', async (code) => {
-    await expect(syncDirStrict('/any', failWith(code))).rejects.toThrow(/cannot flush a directory to disk/);
+    await expect(syncDirStrict('/any', undefined, failWith(code))).rejects.toThrow(/cannot flush a directory to disk/);
   });
 
   it.each(['EIO', 'ENOSPC'])('rethrows %s', async (code) => {
-    await expect(syncDirStrict('/any', failWith(code))).rejects.toMatchObject({ code });
+    await expect(syncDirStrict('/any', undefined, failWith(code))).rejects.toMatchObject({ code });
   });
 
   it('flushes a real directory', async () => {

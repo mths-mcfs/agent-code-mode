@@ -188,6 +188,14 @@ function fileId(st: IdStats): FileId {
   return `${installIdOf(st)}:${st.ctimeNs}`;
 }
 
+/** Removes `temp` when it is still the temp file with identity `install`; returns whether it did. */
+export async function removeTempIfInstall(temp: string, install: InstallId): Promise<boolean> {
+  const st = await fs.lstat(temp, { bigint: true }).catch(() => null);
+  if (st === null || !st.isFile() || installIdOf(st) !== install) return false;
+  await fs.unlink(temp);
+  return true;
+}
+
 /** The install identity a file identity started from. */
 export function installIdFrom(id: FileId): InstallId {
   return id.slice(0, id.lastIndexOf(':'));
@@ -285,7 +293,7 @@ export interface AtomicWriteOptions {
   /** Told about each directory as soon as this write creates it (and its parent's identity), even when the write fails later. */
   readonly onDirCreated?: (dir: string, id: DirId, parent: DirId | undefined) => void;
   /** Runs once the temp file holds the bytes and right before it is installed (the journal records its identity there). */
-  readonly beforeInstall?: (install: InstallId) => Promise<void>;
+  readonly beforeInstall?: (install: InstallId, temp: string) => Promise<void>;
 }
 
 function hashMatches(expect: Expectation, current: RegularFile | null): boolean {
@@ -360,7 +368,7 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     } finally {
       await handle.close();
     }
-    await opts.beforeInstall?.(install);
+    await opts.beforeInstall?.(install, tmp);
     // Last checks before the irreversible step.
     await assertDirUnchanged(dir);
     dirIdentity = dirId(await fs.lstat(dir, { bigint: true }));
@@ -429,10 +437,17 @@ export async function removeEmptyDirInside(dir: string, roots: readonly string[]
   }
 }
 
-/** Windows flushes a directory only through a handle opened for writing. */
-async function flushDir(dir: string): Promise<void> {
+/**
+ * fsyncs the directory at `dir`, after checking through the same handle that
+ * it is still the directory `expected` names. Windows flushes a directory
+ * only through a handle opened for writing.
+ */
+async function flushDir(dir: string, expected?: DirId): Promise<void> {
   const handle = await fs.open(dir, IS_WINDOWS ? 'r+' : 'r');
   try {
+    if (expected !== undefined && dirId(await handle.stat({ bigint: true })) !== expected) {
+      throw new ToolError('stale', `${dir} was moved or replaced after the run changed it, so its changes cannot be flushed`);
+    }
     await handle.sync();
   } finally {
     await handle.close();
@@ -448,9 +463,13 @@ const UNSUPPORTED_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', ...(IS_WIND
  * system cannot flush a directory at all: there a rename is atomic but not
  * durable, so nothing that must survive a crash may rely on it.
  */
-export async function syncDirStrict(dir: string, flush: (dir: string) => Promise<void> = flushDir): Promise<void> {
+export async function syncDirStrict(
+  dir: string,
+  expected?: DirId,
+  flush: (dir: string, expected?: DirId) => Promise<void> = flushDir,
+): Promise<void> {
   try {
-    await flush(dir);
+    await flush(dir, expected);
   } catch (err) {
     const code = errnoCode(err);
     if (code !== undefined && UNSUPPORTED_SYNC.has(code)) {

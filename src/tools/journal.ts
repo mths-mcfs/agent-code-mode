@@ -21,6 +21,7 @@ import {
   type RegularFile,
   currentDirId,
   installIdFrom,
+  removeTempIfInstall,
   assertDirUnchanged,
   atomicWrite,
   errnoCode,
@@ -55,18 +56,16 @@ const EntrySchema = z.object({
   mode: z.number().int().nullable(),
   /** Blob file name holding the original bytes (null when absent). */
   blob: z.string().regex(/^[0-9]+\.bin$/).nullable(),
-  /** Hashes this transaction wrote (or was about to write) to the file, oldest first. */
-  written: z.array(z.string()),
   /** Wall-clock time (ms) of the latest write to the file; recovery undoes writes newest first across journals. */
   at: z.number().optional(),
-  /** Identity of the original when the transaction first wrote the file (null when absent). */
+  /** Identity of the original when the transaction first wrote the file (null when absent): a file still with it was never touched. */
   originalId: z.string().nullable().optional(),
   /**
-   * Each file this transaction installed at the path: the temp file's identity,
-   * recorded before the rename, and the file's identity once the install was
-   * confirmed. Only these prove that the file at the path is this run's.
+   * Each install at the path: the temp file and its identity, recorded before
+   * the rename, and the file's identity once the install was confirmed.
+   * Recovery restores only a file whose identity is the last confirmed one.
    */
-  installs: z.array(z.object({ hash: z.string(), id: z.string(), confirmed: z.string().optional() })).optional(),
+  installs: z.array(z.object({ id: z.string(), temp: z.string().optional(), confirmed: z.string().optional() })).optional(),
 });
 
 const ManifestSchema = z.object({
@@ -90,8 +89,8 @@ export function journalRoot(stateDir: string): string {
 
 /** File system steps of finalization; replaceable in tests. */
 export interface JournalIo {
-  /** fsyncs a directory and rejects when that fails or the file system cannot do it. */
-  readonly syncDir: (dir: string) => Promise<void>;
+  /** fsyncs a directory (checking it is still `expected` when given) and rejects when that fails or the file system cannot do it. */
+  readonly syncDir: (dir: string, expected?: DirId) => Promise<void>;
   /** Deletes a finalized transaction directory. */
   readonly removeDir: (dir: string) => Promise<void>;
 }
@@ -219,14 +218,13 @@ export class FileTransaction implements Transaction {
 
   /**
    * Called by a commit after the stale check and before the write. Records
-   * the original on the first write to `absPath` and the hash about to be
-   * written. Throws when the journal is full or closed.
+   * the original on the first write to `absPath`. Throws when the journal is
+   * full or closed.
    */
   record(
     absPath: string,
     root: string,
     before: RegularFile | null,
-    nextHash: string,
     createdDirs: readonly string[],
   ): Promise<void> {
     return this.#serial(async () => {
@@ -242,7 +240,6 @@ export class FileTransaction implements Transaction {
         if (current !== ours || (existing.last !== null && before?.id !== existing.last.id)) {
           throw new ToolError('stale', `${absPath} was changed by another writer since this transaction last wrote it`);
         }
-        existing.entry.written.push(nextHash);
         existing.entry.at = writeTime();
         await this.#persist();
         return;
@@ -269,7 +266,6 @@ export class FileTransaction implements Transaction {
           original: before ? sha256(before.bytes) : '',
           mode: before?.mode ?? null,
           blob,
-          written: [nextHash],
           at: writeTime(),
           originalId: before?.id ?? null,
           installs: [],
@@ -298,11 +294,11 @@ export class FileTransaction implements Transaction {
   }
 
   /** Called right before a write installs its temp file at `absPath`: the record of that identity reaches disk first. */
-  installing(absPath: string, hash: string, install: InstallId): Promise<void> {
+  installing(absPath: string, install: InstallId, temp: string): Promise<void> {
     return this.#serial(async () => {
       const live = this.#entries.get(absPath);
       if (!live || this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
-      (live.entry.installs ??= []).push({ hash, id: install });
+      (live.entry.installs ??= []).push({ id: install, temp });
       await this.#persist();
     });
   }
@@ -381,8 +377,8 @@ export class FileTransaction implements Transaction {
       const committed = `${this.dir}${COMMITTED}`;
       try {
         for (const [dir, id] of this.#changedDirs) {
-          if ((await currentDirId(dir)) !== id) throw new Error(`${dir} was moved or replaced after the run changed it, so its changes cannot be flushed`);
-          await this.#io.syncDir(dir);
+          await this.#io.syncDir(dir, id);
+          if ((await currentDirId(dir)) !== id) throw new Error(`${dir} was moved or replaced after the run changed it`);
         }
         await fs.rename(this.dir, committed);
       } catch (err) {
@@ -436,16 +432,15 @@ async function currentContent(abs: string): Promise<RegularFile | null> {
   return readRegularFile(abs);
 }
 
-/** Restores the original; returns the identity of the restored file, or undefined when the file was removed. */
-async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: string | null): Promise<FileId | undefined> {
+async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: string | null): Promise<void> {
   if (isInsideGitDir(entry.path)) throw new ToolError('protected-path', 'inside a .git directory');
   if (!entry.existed) {
     if (currentHash !== null) await removeRegularFile(entry.path, currentHash);
-    return undefined;
+    return;
   }
   if (bytes === null || sha256(bytes) !== entry.original) throw new ToolError('tool-error', 'the saved original is damaged');
   const expect = currentHash === null ? ({ kind: 'absent' } as const) : ({ kind: 'hash', sha256: currentHash } as const);
-  return (await atomicWrite(entry.path, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {})).id;
+  await atomicWrite(entry.path, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {});
 }
 
 function touchedDirs(files: readonly string[], createdDirs: readonly string[]): string[] {
@@ -533,6 +528,8 @@ export interface RecoveredJournal {
   readonly report: RollbackReport;
   /** Set for a finalized run's leftover journal, which is only deleted. */
   readonly finalized?: true;
+  /** Temp files of installs the crash cut, which recovery removed. */
+  readonly removedTemps?: readonly string[];
 }
 
 async function realOrSelf(p: string): Promise<string> {
@@ -554,15 +551,9 @@ interface Claimed {
   readonly dir: string;
   readonly manifest: Manifest;
   readonly restored: string[];
-  /** Files that hold their original again, restored by this pass or an earlier one. */
-  readonly settled: string[];
   readonly skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[];
-}
-
-/** A file this pass restored: its new identity stands for the original the undone journal recorded. */
-interface Restored {
-  readonly id: FileId;
-  readonly standsFor: FileId | null;
+  /** Temp files of installs the crash cut, removed by this pass. */
+  readonly removedTemps: string[];
 }
 
 async function undoEntry(
@@ -570,9 +561,8 @@ async function undoEntry(
   entry: Entry,
   roots: readonly string[],
   protectedPaths: readonly string[],
-  restoredHere: Map<string, Restored>,
 ): Promise<void> {
-  const { manifest, dir, restored, settled, skipped } = record;
+  const { manifest, dir, restored, skipped, removedTemps } = record;
   try {
     // The record is data on disk: each path is checked like a tool argument.
     if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
@@ -588,44 +578,29 @@ async function undoEntry(
       skipped.push({ path: entry.path, reason: 'error', detail: `a protected host policy path (${hit}); not touched` });
       return;
     }
-    const current = await currentContent(entry.path);
-    const currentHash = current ? sha256(current.bytes) : null;
-    const originalHash = entry.existed ? entry.original : null;
-    if (currentHash === originalHash) {
-      settled.push(entry.path);
-      return;
+    for (const install of entry.installs ?? []) {
+      if (install.temp !== undefined && path.dirname(install.temp) === path.dirname(entry.path) && (await removeTempIfInstall(install.temp, install.id))) {
+        removedTemps.push(install.temp);
+      }
     }
-    if (current === null || !holdsOwnInstall(entry, currentHash, current.id, restoredHere.get(entry.path))) {
+    const current = await currentContent(entry.path);
+    const untouched = current === null ? !entry.existed : current.id === entry.originalId;
+    if (untouched) return;
+    const lastConfirmed = (entry.installs ?? []).findLast((install) => install.confirmed !== undefined)?.confirmed;
+    if (current === null || current.id !== lastConfirmed) {
       skipped.push({
         path: entry.path,
         reason: 'changed-externally',
-        detail: 'conflict: the file no longer holds what the crashed run last wrote, so it was left as it is and the record kept',
+        detail: 'conflict: the file is not the one the crashed run last installed, so it was left as it is and the record kept',
       });
       return;
     }
     const bytes = await readOriginal(dir, entry);
-    const restoredId = await restoreEntry(entry, bytes, currentHash);
-    if (restoredId !== undefined) restoredHere.set(entry.path, { id: restoredId, standsFor: entry.originalId ?? null });
-    else restoredHere.delete(entry.path);
+    await restoreEntry(entry, bytes, sha256(current.bytes));
     restored.push(entry.path);
-    settled.push(entry.path);
   } catch (err) {
     skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
   }
-}
-
-/**
- * Whether the file at the path is one this journal installed, proven only by
- * identities the run recorded: the confirmed identity of an install, or for an
- * install the crash cut before its confirmation, the temp file's identity.
- * Bytes alone never prove it. A file this pass restored counts only when the
- * journal it undid recorded, as its original, a file this journal installed.
- */
-function holdsOwnInstall(entry: Entry, hash: string | null, id: FileId, restored: Restored | undefined): boolean {
-  const standsFor = restored?.id === id ? restored.standsFor : null;
-  const is = (install: { readonly id: InstallId; readonly confirmed?: FileId | undefined }, file: FileId): boolean =>
-    install.confirmed !== undefined ? install.confirmed === file : install.id === installIdFrom(file);
-  return (entry.installs ?? []).some((install) => install.hash === hash && (is(install, id) || (standsFor !== null && is(install, standsFor))));
 }
 
 function isCommitted(name: string): boolean {
@@ -646,7 +621,6 @@ export async function recoverStaleJournals(
   stateDir: string,
   roots: readonly string[],
   protectedPaths: readonly string[],
-  syncDir: (dir: string) => Promise<void> = syncDirStrict,
 ): Promise<RecoveredJournal[]> {
   const base = journalRoot(stateDir);
   let names: string[];
@@ -702,7 +676,7 @@ export async function recoverStaleJournals(
           continue;
         }
       }
-      claimed.push({ id: record.id, dir: target, manifest, restored: [], settled: [], skipped: [] });
+      claimed.push({ id: record.id, dir: target, manifest, restored: [], skipped: [], removedTemps: [] });
     } catch {
       // One bad record must not stop the others.
     }
@@ -710,15 +684,18 @@ export async function recoverStaleJournals(
   const writes = claimed
     .flatMap((record) => record.manifest.entries.map((entry) => ({ record, entry })))
     .sort((a, b) => (b.entry.at ?? b.record.manifest.startedAt) - (a.entry.at ?? a.record.manifest.startedAt));
-  const restoredHere = new Map<string, Restored>();
-  for (const { record, entry } of writes) await undoEntry(record, entry, realRoots, patterns, restoredHere);
+  for (const { record, entry } of writes) await undoEntry(record, entry, realRoots, patterns);
   for (const record of claimed) {
     try {
       // The journal contains planned directory names and cannot establish ownership after a crash.
-      const restoresOnDisk = await flushes(touchedDirs(record.settled, []), syncDir);
+      const restoresOnDisk = await flushes(touchedDirs(record.restored, []), syncDirStrict);
       const needsRecovery = !restoresOnDisk || record.skipped.length > 0;
       if (!needsRecovery) await fs.rm(record.dir, { recursive: true, force: true });
-      out.push({ id: record.id, report: { restored: record.restored, skipped: record.skipped } });
+      out.push({
+        id: record.id,
+        report: { restored: record.restored, skipped: record.skipped },
+        ...(record.removedTemps.length > 0 ? { removedTemps: record.removedTemps } : {}),
+      });
     } catch {
       // One bad record must not stop the others.
     }
