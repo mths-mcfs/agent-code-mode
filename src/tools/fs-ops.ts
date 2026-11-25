@@ -326,10 +326,7 @@ async function writeLocked(file: RootedPath, bytes: Buffer, expect: Expectation,
     if (sha256(before.bytes) !== expect.sha256) throw new ToolError('stale', `file changed since prepared: ${abs}`);
   }
 
-  await beforeWrite?.(
-    before,
-    toCreate.map((d) => d.abs),
-  );
+  await beforeWrite?.(before, toCreate.map((d) => d.abs));
 
   const createdDirs: string[] = [];
   for (const d of toCreate) {
