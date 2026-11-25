@@ -21,7 +21,6 @@ import { ToolError } from '../core/errors.js';
  * Windows has neither, so rooted operations refuse there.
  */
 
-/** A path inside a workspace root: the root and the components below it. */
 export interface RootedPath {
   readonly root: string;
   readonly abs: string;
@@ -59,7 +58,6 @@ function errnoCode(err: unknown): string | undefined {
   return undefined;
 }
 
-/** Opens the walk's next directory, turning a symbolic link into `stale`; a missing or non-directory step keeps its errno. */
 function openStep(at: At, dir: RootedPath, i: number): number {
   const name = dir.parts[i] ?? '';
   try {
@@ -115,15 +113,17 @@ export const cwdAnchor: Anchor = (dir, fn) => {
     }
     return fn((name) => name);
   } finally {
-    if (orig !== undefined) {
-      try {
-        process.chdir(orig);
-      } catch {
-        // The old cwd is gone; nothing in the runtime resolves a relative path.
-      }
-    }
+    if (orig !== undefined) returnToCwdIfItExists(orig);
   }
 };
+
+function returnToCwdIfItExists(dir: string): void {
+  try {
+    process.chdir(dir);
+  } catch {
+    return;
+  }
+}
 
 const windowsAnchor: Anchor = () => {
   throw new ToolError(
@@ -165,7 +165,6 @@ export function within<T>(dir: RootedPath, fn: (at: At) => T): T {
   return anchor()(dir, fn);
 }
 
-/** `lstat` of `p` itself, through the anchor of its directory. */
 export function lstatRooted(p: RootedPath): BigIntStats {
   if (p.parts.length === 0) return within(p, (at) => fs.lstatSync(at('.'), { bigint: true }));
   const { dir, name } = splitParent(p);

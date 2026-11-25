@@ -128,7 +128,6 @@ async function assertPrivateDir(dir: string): Promise<void> {
 
 interface LiveEntry {
   readonly entry: Entry;
-  /** Workspace root the file is reached from. */
   readonly root: string;
   /** Original bytes, kept in memory for the in-process rollback. */
   readonly bytes: Buffer | null;

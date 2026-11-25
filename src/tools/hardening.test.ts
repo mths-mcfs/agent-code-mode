@@ -55,7 +55,6 @@ afterEach(() => {
 });
 
 describe.skipIf(IS_WINDOWS)('1. grep and glob reach every directory and file without a link', () => {
-  /** Swaps `ws/sub` for a link to `outside` right after the walk lists the directory that holds `name`. */
   function swapAfterListing(name: string): void {
     const sub = path.join(ws, 'sub');
     const readdirSync = nodeFs.readdirSync;

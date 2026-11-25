@@ -29,7 +29,6 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-/** Replaces `ws/a` with a link to `outside/a`, keeping the real directory at `ws/a-real`. */
 function swapIn(): void {
   renameSync(path.join(ws, 'a'), path.join(ws, 'a-real'));
   nodeFs.symlinkSync(path.join(outside, 'a'), path.join(ws, 'a'), 'dir');
@@ -76,10 +75,6 @@ describe.skipIf(!IS_WINDOWS)('Windows', () => {
   });
 });
 
-/**
- * The attack L1c closes: another process swaps a directory of the target
- * path for a link to outside the workspace while `write` and `edit` run.
- */
 const ATTACKER = `
 const fs = require('node:fs');
 const [ws, outside, counter] = process.argv.slice(1);
@@ -134,8 +129,9 @@ describe.skipIf(IS_WINDOWS)('racing symlink swap', () => {
     expect(readFileSync(victim, 'utf8')).toBe('same\n');
     expect([victimAfter.ino, victimAfter.mtimeNs]).toEqual([victimBefore.ino, victimBefore.mtimeNs]);
     expect(readdirSync(path.join(outside, 'a'))).toEqual(['f.txt']);
-    // The race really ran: the attacker swapped many times and some calls still landed inside.
-    expect(Number(readFileSync(counter, 'utf8'))).toBeGreaterThan(1000);
-    expect(done.write + done.edit).toBeGreaterThan(0);
+    const attackerSwaps = Number(readFileSync(counter, 'utf8'));
+    const callsThatLandedInside = done.write + done.edit;
+    expect(attackerSwaps).toBeGreaterThan(1000);
+    expect(callsThatLandedInside).toBeGreaterThan(0);
   });
 });

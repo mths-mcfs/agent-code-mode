@@ -140,7 +140,6 @@ async function loadIgnore(dir: RootedPath): Promise<IgnoreLayer | null> {
   return bytes === null ? null : { base: dir.abs, rules: parseGitignore(bytes.toString('utf8')) };
 }
 
-/** `.gitignore` layers of the directories from the root of `dir` down to `dir` (inclusive). */
 async function ancestorLayers(dir: RootedPath): Promise<IgnoreLayer[]> {
   const layers: IgnoreLayer[] = [];
   for (let depth = 0; depth <= dir.parts.length; depth++) {
@@ -154,13 +153,15 @@ async function ancestorLayers(dir: RootedPath): Promise<IgnoreLayer[]> {
 // Walking
 // ---------------------------------------------------------------------------
 
-/**
- * Lists regular files below `top`, sorted, skipping `.git`, `node_modules`
- * and gitignored entries. Every directory is listed through its rooted path,
- * and symbolic links are never followed, whether they point inside or
- * outside the workspace. The `.gitignore` files from the workspace root down
- * apply.
- */
+/** A directory that is gone, or reached only through a link (its names could come from outside), lists as null. */
+function listUnlessGoneOrLinked(dir: RootedPath): Dirent[] | null {
+  try {
+    return within(dir, (at) => fs.readdirSync(at('.'), { withFileTypes: true }));
+  } catch {
+    return null;
+  }
+}
+
 async function* walkFiles(top: RootedPath, signal: AbortSignal): AsyncGenerator<RootedPath> {
   const rootStat = lstatRooted(top);
   if (rootStat.isFile()) {
@@ -174,13 +175,8 @@ async function* walkFiles(top: RootedPath, signal: AbortSignal): AsyncGenerator<
   while (stack.length > 0) {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped');
     const { dir, layers } = stack.pop() as { dir: RootedPath; layers: IgnoreLayer[] };
-    let entries: Dirent[];
-    try {
-      entries = within(dir, (at) => fs.readdirSync(at('.'), { withFileTypes: true }));
-    } catch {
-      // Gone, or swapped for a link: its names may come from outside the workspace.
-      continue;
-    }
+    const entries = listUnlessGoneOrLinked(dir);
+    if (entries === null) continue;
     const own = dir === top ? null : await loadIgnore(dir);
     const here = own ? [...layers, own] : layers;
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

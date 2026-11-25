@@ -53,7 +53,6 @@ async function readAtMost(fd: number, maxBytes: number): Promise<Buffer | null> 
   }
 }
 
-/** Opens `file` for reading through its rooted directory; null when it or a directory on the way is missing. */
 function openForRead(file: RootedPath): number | null {
   try {
     return openRooted(file, FS.O_RDONLY | NONBLOCK);
@@ -247,7 +246,6 @@ export interface WriteOutcome {
   readonly dirId: DirId;
 }
 
-/** The directories from the deepest existing one down to `dir` that are missing, outermost first. */
 function missingDirs(dir: RootedPath): RootedPath[] {
   const missing: RootedPath[] = [];
   for (let cursor = dir; ; ) {
@@ -381,15 +379,20 @@ async function writeLocked(file: RootedPath, bytes: Buffer, expect: Expectation,
     });
   } finally {
     // After `link` the temp name is still there; after `rename` it is gone.
-    try {
-      within(dir, (at) => nodeFs.rmSync(at(tmpName), { force: true }));
-    } catch {
-      // The directory is no longer reachable without a link; the temp file stays.
-    }
+    removeTempIfReachable(dir, tmpName);
   }
   const st = lstatOrNull(file);
   const id = st !== null && installIdOf(st) === install ? fileId(st) : undefined;
   return { before, createdDirs, install, id, dirId: dirIdentity };
+}
+
+/** A temp file whose directory can no longer be reached without a link stays where it is. */
+function removeTempIfReachable(dir: RootedPath, name: string): void {
+  try {
+    within(dir, (at) => nodeFs.rmSync(at(name), { force: true }));
+  } catch {
+    return;
+  }
 }
 
 function lstatOrNull(p: RootedPath): BigIntStats | null {
