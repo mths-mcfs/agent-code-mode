@@ -159,11 +159,48 @@ export function withPathLock<T>(abs: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** `dev:ino` of a file or directory: a rename keeps it, a replacement changes it. */
-export type FileId = string;
+interface IdStats {
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+}
 
-function fileId(st: { readonly dev: bigint; readonly ino: bigint }): FileId {
+/**
+ * Identity of a file as it is now: `dev:ino:size:mtime:ctime`. A replacement
+ * changes the inode, and a rewrite in place changes the times.
+ */
+export type FileId = string;
+/**
+ * Identity of a temp file before it is installed: `dev:ino:size:mtime`. The
+ * rename or link that installs it keeps these and changes the ctime.
+ */
+export type InstallId = string;
+/** `dev:ino` of a directory, which adding entries does not change. */
+export type DirId = string;
+
+function installIdOf(st: IdStats): InstallId {
+  return `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}`;
+}
+
+function fileId(st: IdStats): FileId {
+  return `${installIdOf(st)}:${st.ctimeNs}`;
+}
+
+/** The install identity a file identity started from. */
+export function installIdFrom(id: FileId): InstallId {
+  return id.slice(0, id.lastIndexOf(':'));
+}
+
+function dirId(st: { readonly dev: bigint; readonly ino: bigint }): DirId {
   return `${st.dev}:${st.ino}`;
+}
+
+/** Identity of the directory at `dir` now, or undefined when nothing is there. */
+export async function currentDirId(dir: string): Promise<DirId | undefined> {
+  const st = await fs.lstat(dir, { bigint: true }).catch(() => null);
+  return st?.isDirectory() === true ? dirId(st) : undefined;
 }
 
 export interface RegularFile {
@@ -209,8 +246,12 @@ export interface WriteOutcome {
   readonly before: RegularFile | null;
   /** Directories this write created to hold the file (not ones that appeared meanwhile), outermost first. */
   readonly createdDirs: readonly string[];
-  /** Identity of the file written. */
-  readonly id: FileId;
+  /** Identity of the temp file that was installed. */
+  readonly install: InstallId;
+  /** Identity of the file at the path right after the install, when it is still the installed one. */
+  readonly id: FileId | undefined;
+  /** Identity of the file's directory right before the install. */
+  readonly dirId: DirId;
 }
 
 async function missingDirs(dir: string): Promise<string[]> {
@@ -241,8 +282,10 @@ export interface AtomicWriteOptions {
   readonly identity?: PathIdentity;
   /** Mode of the new file; defaults to the mode of the file it replaces. */
   readonly mode?: number;
-  /** Told about each directory as soon as this write creates it, even when the write fails later. */
-  readonly onDirCreated?: (dir: string, id: FileId) => void;
+  /** Told about each directory as soon as this write creates it (and its parent's identity), even when the write fails later. */
+  readonly onDirCreated?: (dir: string, id: DirId, parent: DirId | undefined) => void;
+  /** Runs once the temp file holds the bytes and right before it is installed (the journal records its identity there). */
+  readonly beforeInstall?: (install: InstallId) => Promise<void>;
 }
 
 function hashMatches(expect: Expectation, current: RegularFile | null): boolean {
@@ -295,7 +338,7 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     try {
       await fs.mkdir(d);
       createdDirs.push(d);
-      opts.onDirCreated?.(d, fileId(await fs.lstat(d, { bigint: true })));
+      opts.onDirCreated?.(d, dirId(await fs.lstat(d, { bigint: true })), await currentDirId(path.dirname(d)));
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
     }
@@ -306,18 +349,21 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
   const tmp = path.join(dir, `.acm-${randomBytes(6).toString('hex')}.tmp`);
   const mode = opts.mode ?? before?.mode ?? 0o666;
   const handle = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | NOFOLLOW, mode);
+  let install: InstallId;
+  let dirIdentity: DirId;
   try {
-    let id: FileId;
     try {
       await handle.writeFile(bytes);
       if ((opts.mode !== undefined || before) && !IS_WINDOWS) await handle.chmod(mode);
       await handle.sync();
-      id = fileId(await handle.stat({ bigint: true }));
+      install = installIdOf(await handle.stat({ bigint: true }));
     } finally {
       await handle.close();
     }
+    await opts.beforeInstall?.(install);
     // Last checks before the irreversible step.
     await assertDirUnchanged(dir);
+    dirIdentity = dirId(await fs.lstat(dir, { bigint: true }));
     if (identity) await assertIdentity(identity);
     if (!hashMatches(expect, await readRegularFile(abs))) {
       throw new ToolError('stale', `file changed since prepared: ${abs} changed while it was being written`);
@@ -334,11 +380,13 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     } else {
       await fs.rename(tmp, abs);
     }
-    return { before, createdDirs, id };
   } finally {
     // After `link` the temp name is still there; after `rename` it is gone.
     await fs.rm(tmp, { force: true }).catch(() => undefined);
   }
+  const st = await fs.lstat(abs, { bigint: true }).catch(() => null);
+  const id = st !== null && installIdOf(st) === install ? fileId(st) : undefined;
+  return { before, createdDirs, install, id, dirId: dirIdentity };
 }
 
 /**
@@ -360,11 +408,11 @@ export function removeRegularFile(abs: string, expectHash: string): Promise<void
  * through one) strictly inside one of `roots`, and, when `id` is given, still
  * the directory with that identity. Returns whether it was removed.
  */
-export async function removeEmptyDirInside(dir: string, roots: readonly string[], id?: FileId): Promise<boolean> {
+export async function removeEmptyDirInside(dir: string, roots: readonly string[], id?: DirId): Promise<boolean> {
   if (!path.isAbsolute(dir)) return false;
   const st = await fs.lstat(dir, { bigint: true }).catch(() => null);
   if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
-  if (id !== undefined && fileId(st) !== id) return false;
+  if (id !== undefined && dirId(st) !== id) return false;
   const real = await fs.realpath(dir).catch(() => null);
   const same = real !== null && (IS_WINDOWS ? real.toLowerCase() === dir.toLowerCase() : real === dir);
   if (!same) return false;

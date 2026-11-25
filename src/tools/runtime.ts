@@ -17,7 +17,7 @@ import type {
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
 import { applySearchReplace, type MatchHow } from './edit-match.js';
-import { type FileId, type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
+import { type DirId, type InstallId, type PathIdentity, type RegularFile, assertDirUnchanged, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
@@ -414,11 +414,12 @@ export class NodeToolRuntime implements ToolRuntime {
       ...(tx
         ? {
             beforeWrite: (before: RegularFile | null, createdDirs: readonly string[]) => tx.record(absPath, m.root, before, nextHash, createdDirs),
-            onDirCreated: (dir: string, id: FileId) => tx.dirCreated(dir, id),
+            onDirCreated: (dir: string, id: DirId, parent: DirId | undefined) => tx.dirCreated(dir, id, parent),
+            beforeInstall: (install: InstallId) => tx.installing(absPath, nextHash, install),
           }
         : {}),
     });
-    await tx?.written(absPath, nextHash, outcome.id);
+    await tx?.written(absPath, nextHash, outcome.id, outcome.dirId);
     if (prepared.tool === 'write') return { path: absPath, created: outcome.before === null, diff: prepared.effect.diff };
     return {
       path: absPath,

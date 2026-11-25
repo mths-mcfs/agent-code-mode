@@ -153,9 +153,9 @@ describe('transactions', () => {
         // Another writer creates the directory between the checks and the write.
         mkdirSync(dir);
       },
-      onDirCreated: (d, id) => tx.dirCreated(d, id),
+      onDirCreated: (d, id, parent) => tx.dirCreated(d, id, parent),
     });
-    await tx.written(abs, sha256(bytes), outcome.id);
+    await tx.written(abs, sha256(bytes), outcome.id, outcome.dirId);
     await tx.rollback();
     expect(existsSync(abs)).toBe(false);
     expect(existsSync(dir)).toBe(true);
@@ -183,7 +183,7 @@ describe('crash recovery', () => {
     return moved;
   }
 
-  it('recovers a journal without write timestamps and preserves directories with unknown ownership', async () => {
+  it('never restores by bytes alone a record without install identities, and preserves directories with unknown ownership', async () => {
     const pid = deadPid();
     const dir = path.join(journalRoot(stateDir), `old-${pid}-abcd`);
     const shared = path.join(ws, 'shared');
@@ -201,8 +201,11 @@ describe('crash recovery', () => {
 
     const recovered = await recoverStaleJournals(stateDir, [ws], []);
 
-    expect(recovered[0]?.report.restored).toEqual([path.join(ws, 'a.txt')]);
-    expect(read('a.txt')).toBe('a0\n');
+    expect(recovered[0]?.report).toEqual({
+      restored: [],
+      skipped: [{ path: path.join(ws, 'a.txt'), reason: 'changed-externally', detail: expect.stringContaining('conflict') }],
+    });
+    expect(read('a.txt')).toBe('a1\n');
     expect(existsSync(shared)).toBe(true);
   });
 
@@ -342,6 +345,106 @@ describe('crash recovery', () => {
   });
 });
 
+describe('recovery restores only files the crashed run installed', () => {
+  const start = (): FileTransaction => {
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    return tx;
+  };
+  const abandonAll = (...txs: FileTransaction[]): void => {
+    for (const tx of txs) {
+      const manifestPath = path.join(tx.dir, 'manifest.json');
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { pid: number };
+      manifest.pid = deadPid();
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+    }
+  };
+  const recover = () => recoverStaleJournals(stateDir, [ws], []);
+
+  it('unwinds two consecutive unfinished journals on the same file', async () => {
+    const one = start();
+    await write('a.txt', 'first', one);
+    const two = start();
+    await write('a.txt', 'second', two);
+    abandonAll(one, two);
+    expect((await recover()).flatMap((r) => r.report.restored)).toHaveLength(2);
+    expect(read('a.txt')).toBe('a0\n');
+  });
+
+  it('undoes a write the crash cut between its install and its confirmation, by the temp file identity', async () => {
+    class CutBeforeConfirmation extends FileTransaction {
+      override written(): Promise<void> {
+        return Promise.resolve();
+      }
+    }
+    const one = new CutBeforeConfirmation(stateDir);
+    await write('a.txt', 'first', one);
+    await write('new.txt', 'created', one);
+    abandonAll(one);
+    expect((await recover())[0]?.report.restored).toHaveLength(2);
+    expect(read('a.txt')).toBe('a0\n');
+    expect(existsSync(path.join(ws, 'new.txt'))).toBe(false);
+  });
+
+  it('leaves a manual restoration of the original bytes in place', async () => {
+    const one = start();
+    await write('a.txt', 'first', one);
+    writeFileSync(path.join(ws, 'manual'), 'a0\n');
+    renameSync(path.join(ws, 'manual'), path.join(ws, 'a.txt'));
+    abandonAll(one);
+    expect((await recover())[0]?.report).toEqual({ restored: [], skipped: [] });
+    expect(read('a.txt')).toBe('a0\n');
+    expect(await recover()).toEqual([]);
+  });
+
+  it('reports a conflict when the bytes match but the file was replaced', async () => {
+    const one = start();
+    await write('a.txt', 'first', one);
+    writeFileSync(path.join(ws, 'replacement'), 'first');
+    renameSync(path.join(ws, 'replacement'), path.join(ws, 'a.txt'));
+    abandonAll(one);
+    expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
+    expect(read('a.txt')).toBe('first');
+    expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
+  });
+
+  it('reports a conflict when the file was rewritten in place with the same bytes', async () => {
+    const one = start();
+    await write('a.txt', 'first', one);
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(path.join(ws, 'a.txt'), 'first');
+    abandonAll(one);
+    expect((await recover())[0]?.report.skipped[0]?.reason).toBe('changed-externally');
+    expect(read('a.txt')).toBe('first');
+  });
+
+  it('keeps a committed write between two unfinished journals that wrote the same bytes', async () => {
+    const one = start();
+    await write('a.txt', 'first', one);
+    const committed = start();
+    await write('a.txt', 'intermediate', committed);
+    await write('a.txt', 'first', committed);
+    await committed.dispose();
+    const two = start();
+    await write('a.txt', 'second', two);
+    abandonAll(one, two);
+    await recover();
+    expect(read('a.txt')).toBe('first');
+  });
+
+  it('keeps a later committed file after an earlier write failed before it was installed', async () => {
+    const one = start();
+    vi.spyOn(fsp, 'link').mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    await expect(write('new.txt', 'first', one)).rejects.toThrow(/ENOSPC/);
+    const committed = start();
+    await write('new.txt', 'first', committed);
+    await committed.dispose();
+    abandonAll(one);
+    await recover();
+    expect(read('new.txt')).toBe('first');
+  });
+});
+
 describe('finalization', () => {
   /** Keeps the delete of a finalized journal pending, as if the process died right after the commit. */
   const held = (): Promise<void> => new Promise(() => undefined);
@@ -468,6 +571,16 @@ describe('finalization', () => {
     await tx.rollback();
     expect(read('moved/file.txt')).toBe('new');
     expect(read('a.txt')).toBe('a0\n');
+  });
+
+  it('does not commit when a changed directory was moved and another one now sits at its path', async () => {
+    mkdirSync(path.join(ws, 'nested'));
+    const tx = rt.beginTransaction();
+    await write('nested/file.txt', 'new', tx);
+    renameSync(path.join(ws, 'nested'), path.join(ws, 'moved'));
+    mkdirSync(path.join(ws, 'nested'));
+    await expect(tx.dispose()).rejects.toMatchObject({ name: 'TransactionFinalizeError', committed: false });
+    expect(read('moved/file.txt')).toBe('new');
   });
 
   it('keeps the journal open for a rollback when a changed directory cannot be flushed at finalization', async () => {
