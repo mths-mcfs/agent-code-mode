@@ -186,7 +186,8 @@ export class FileTransaction implements Transaction {
   async #persist(): Promise<void> {
     if (!this.#created) {
       const root = path.dirname(this.dir);
-      const firstCreated = (await fs.mkdir(root, { recursive: true, mode: 0o700 })) ?? unflushedAncestors.get(root);
+      const firstCreated = (await firstMissing(root)) ?? unflushedAncestors.get(root);
+      await fs.mkdir(root, { recursive: true, mode: 0o700 });
       await assertPrivateDir(root);
       if (firstCreated !== undefined) unflushedAncestors.set(root, firstCreated);
       await syncParentsOfCreated(root, firstCreated, this.#io.syncDir);
@@ -426,11 +427,21 @@ function isGone(err: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
+/** The outermost missing directory on the way to `dir`; `mkdir`'s own answer is not reliable on Windows. */
+async function firstMissing(dir: string): Promise<string | undefined> {
+  let missing: string | undefined;
+  for (let d = dir; ; d = path.dirname(d)) {
+    if (await fs.lstat(d).then(() => true, (err: unknown) => !isGone(err))) return missing;
+    missing = d;
+    if (path.dirname(d) === d) return missing;
+  }
+}
+
 function depth(p: string): number {
   return path.resolve(p).split(/[\\/]+/).filter(Boolean).length;
 }
 
-/** Counts levels rather than comparing names: Windows can spell `firstCreated` differently (case, 8.3 names). */
+/** Counts levels rather than comparing names, which can be spelled differently (case, Windows 8.3 names). */
 async function syncParentsOfCreated(dir: string, firstCreated: string | undefined, sync: (dir: string) => Promise<void>): Promise<void> {
   const created = firstCreated === undefined ? 0 : Math.max(0, depth(dir) - depth(firstCreated));
   let parent = path.dirname(dir);
