@@ -18,10 +18,13 @@ Every binding call is prepared, authorized against the host's permission rules a
 ## Module map
 
 - `src/core`: frozen contracts (`types.ts`), boundary schemas, dispatcher (prepare, authorize, commit), run orchestration, output shaping, command hooks.
-- `src/server`: MCP stdio server, host detection, runtime factory.
+- `src/server`: MCP stdio server, host detection, runtime factory (real sandbox, tools and host adapters), the generic read-only policy, crash recovery and the run log.
+- `src/cli.ts`, `src/install.ts`: `serve`, `hook` (Claude companion hook) and `install`.
 - `src/sandbox`: QuickJS-ng WASM sandbox in a child process.
 - `src/hosts/claude`: Claude Code host adapter (settings, permission rules, hooks).
 - `src/hosts/codex`: Codex CLI host adapter (config, exec policy, hooks).
 - `src/tools`: tool runtime (`bash`, `read`, `write`, `edit`, `grep`, `glob`), journal and rollback.
 - `src/testing`: fakes for tests (sandbox, host adapter, in-memory tool runtime).
+- `test/attack`: attack suite through `run` with the real sandbox, tools and adapters (part of `npm test`, not on Windows).
+- `test/e2e`: real-host end-to-end scripts (need a logged-in `claude` or `codex`; not in CI).
 - `bench`: benchmark.
