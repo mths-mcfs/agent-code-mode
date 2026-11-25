@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type { BashEffect, BashResult } from '../core/types.js';
-import { attachWindowsJob, killPosixTree, type WindowsJob } from './process-tree.js';
+import { killPosixTree, startInWindowsJob, type WindowsJob } from './process-tree.js';
 import { withSandbox } from './sandbox.js';
 
 /** Default `bash` timeout. */
@@ -91,14 +91,9 @@ export interface BashRunOptions {
  */
 const WINDOWS_GATE = 'IFS= read -r _ || exit 1; exec "$BASH" -c "$1" </dev/null';
 
-/**
- * Runs `argv` and waits for it. No process of the call outlives it: when the
- * shell exits, times out or is cancelled, every process it started is
- * killed, background ones included (`killPosixTree`, or the call's Job
- * Object on Windows). On Windows `argv` must be `[bash, '-c', command]`.
- */
 export function spawnAndWait(
-  argv: readonly string[],
+  shell: string,
+  script: string,
   env: NodeJS.ProcessEnv,
   cwd: string,
   timeoutMs: number,
@@ -111,13 +106,8 @@ export function spawnAndWait(
       return;
     }
     const windows = process.platform === 'win32';
-    const [file, ...rest] = argv;
-    if (file === undefined) {
-      reject(new ToolError('tool-error', 'empty command line'));
-      return;
-    }
-    const args = windows ? ['-c', WINDOWS_GATE, 'bash', ...rest.slice(1)] : rest;
-    const child = spawn(file, args, {
+    const args = windows ? ['-c', WINDOWS_GATE, 'bash', script] : ['-c', script];
+    const child = spawn(shell, args, {
       cwd,
       env,
       stdio: [windows ? 'pipe' : 'ignore', 'pipe', 'pipe'],
@@ -133,22 +123,11 @@ export function spawnAndWait(
     let startError: ToolError | undefined;
     let killing = false;
     let job: Promise<WindowsJob | undefined> = Promise.resolve(undefined);
-    if (windows && child.pid !== undefined) {
-      job = attachWindowsJob(child.pid).then(
-        (j) => {
-          // A call stopped while the job was made never runs its command.
-          if (killing) child.stdin?.destroy();
-          else child.stdin?.end('\n');
-          return j;
-        },
-        (e: unknown) => {
-          // Still blocked on the gate: it has started nothing.
-          child.stdin?.destroy();
-          child.kill('SIGKILL');
-          startError ??= new ToolError('tool-error', errorMessage(e));
-          return undefined;
-        },
-      );
+    if (windows) {
+      job = startInWindowsJob(child, () => killing).catch((e: unknown) => {
+        startError ??= new ToolError('tool-error', errorMessage(e));
+        return undefined;
+      });
     }
     const killAll = async (): Promise<void> => {
       killing = true;
@@ -177,7 +156,6 @@ export function spawnAndWait(
         truncated: out.truncated || err.truncated,
         timedOut,
       };
-      // No process of the call outlives it: background children are killed too.
       void killAll().then(() => {
         if (startError) reject(startError);
         else if (signal.aborted && !timedOut) reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
@@ -233,10 +211,10 @@ export async function runBash(effect: BashEffect, signal: AbortSignal, opts: Bas
   const cap = opts.outputCapBytes ?? DEFAULT_OUTPUT_CAP_BYTES;
   const containment = effect.containment;
   if (containment.mode === 'none') {
-    return spawnAndWait([shell, '-c', effect.command], process.env, effect.cwd, effect.timeoutMs, signal, cap);
+    return spawnAndWait(shell, effect.command, process.env, effect.cwd, effect.timeoutMs, signal, cap);
   }
   return withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], signal, (wrapped) => {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-    return spawnAndWait(wrapped.argv, bootstrapEnv({ ...process.env, ...wrapped.env }), effect.cwd, effect.timeoutMs, signal, cap);
+    return spawnAndWait(wrapped.shell, wrapped.script, bootstrapEnv({ ...process.env, ...wrapped.env }), effect.cwd, effect.timeoutMs, signal, cap);
   });
 }

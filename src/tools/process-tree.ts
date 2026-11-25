@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import type { Socket } from 'node:net';
 import path from 'node:path';
@@ -30,9 +30,7 @@ function listLinuxProcesses(): ProcessEntry[] {
     try {
       const entry = parseProcStat(pid, readFileSync(`/proc/${name}/stat`, 'utf8'));
       if (entry) out.push(entry);
-    } catch {
-      // The process exited while the table was read.
-    }
+    } catch {}
   }
   return out;
 }
@@ -52,36 +50,26 @@ function listPsProcesses(): ProcessEntry[] {
 function signal(pid: number, sig: NodeJS.Signals): void {
   try {
     process.kill(pid, sig);
-  } catch {
-    // Already gone, or not ours.
-  }
+  } catch {}
 }
 
 /**
- * Kills every process of the call that `leader` started on POSIX: its
- * process group, its session (Linux), and every descendant of those. The
- * leader was spawned detached, so it leads both its session and its group.
- *
  * Each process found is stopped before the table is read again, so none can
- * fork a child the sweep misses or exit and orphan one; the sweep repeats
- * until it finds nothing new, then everything found is killed. Only a
- * process that left the session and was orphaned before the sweep (a
- * daemon) escapes it, and on macOS, which reports no session id, one that
- * left the group and was orphaned.
+ * fork a child the sweep misses or exit and orphan one.
  *
  * Group and session ids stay reserved while any member lives, and a stopped
  * process keeps its pid, so no id this matches can belong to an unrelated
  * process.
  */
-export function killPosixTree(leader: number): void {
-  signal(-leader, 'SIGSTOP');
+export function killPosixTree(sessionLeader: number): void {
+  signal(-sessionLeader, 'SIGSTOP');
   const list = process.platform === 'linux' ? listLinuxProcesses : listPsProcesses;
   const found = new Set<number>();
   for (let round = 0; round < 100; round++) {
     let added = false;
     for (const p of list()) {
       if (found.has(p.pid) || p.pid === process.pid) continue;
-      if (p.pgid === leader || p.sid === leader || found.has(p.ppid)) {
+      if (p.pgid === sessionLeader || p.sid === sessionLeader || found.has(p.ppid)) {
         found.add(p.pid);
         signal(p.pid, 'SIGSTOP');
         added = true;
@@ -89,27 +77,11 @@ export function killPosixTree(leader: number): void {
     }
     if (!added) break;
   }
-  signal(-leader, 'SIGKILL');
+  signal(-sessionLeader, 'SIGKILL');
   for (const pid of found) signal(pid, 'SIGKILL');
 }
 
-// ---------------------------------------------------------------------------
-// Windows: a Job Object per call.
-// ---------------------------------------------------------------------------
-
-/**
- * The helper that owns the Job Objects. Node cannot create one, so a Windows
- * PowerShell process compiles this class once and serves one request per
- * stdin line, answering each in order:
- *
- * - `attach <pid>`: a new job with KILL_ON_JOB_CLOSE, holding `<pid>` and
- *   every process it already started. Answers `ok <job>`.
- * - `kill <job>`: terminates the job, waits until it has no process left,
- *   and closes it. Answers `ok`.
- *
- * Any failure answers `err <reason>`. When the helper dies, its handles
- * close and every job it held kills its processes.
- */
+/** Node cannot create a Job Object, so a Windows PowerShell process compiles this class and owns them. */
 const HELPER_SOURCE = String.raw`
 using System;
 using System.Collections.Generic;
@@ -153,7 +125,10 @@ public static class AcmJobs {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool Process32FirstW(IntPtr snap, ref ProcessEntry e);
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool Process32NextW(IntPtr snap, ref ProcessEntry e);
 
-  const uint ProcessAccess = 0x0001 | 0x0100 | 0x1000; // TERMINATE | SET_QUOTA | QUERY_LIMITED_INFORMATION
+  const uint PROCESS_TERMINATE = 0x0001, PROCESS_SET_QUOTA = 0x0100, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+  const uint ProcessAccess = PROCESS_TERMINATE | PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION;
+  const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000, TH32CS_SNAPPROCESS = 2;
+  const int JobObjectBasicAccountingInformation = 1, JobObjectExtendedLimitInformation = 9;
   static readonly Dictionary<long, IntPtr> jobs = new Dictionary<long, IntPtr>();
   static long next = 0;
 
@@ -166,7 +141,7 @@ public static class AcmJobs {
 
   static List<KeyValuePair<uint, uint>> Snapshot() {
     var all = new List<KeyValuePair<uint, uint>>();
-    IntPtr snap = CreateToolhelp32Snapshot(2, 0);
+    IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == new IntPtr(-1)) return all;
     var e = new ProcessEntry(); e.dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry));
     for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e)) all.Add(new KeyValuePair<uint, uint>(e.th32ProcessID, e.th32ParentProcessID));
@@ -179,8 +154,8 @@ public static class AcmJobs {
     if (root == IntPtr.Zero) return Fail("OpenProcess");
     IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
     if (job == IntPtr.Zero) { CloseHandle(root); return Fail("CreateJobObject"); }
-    var info = new ExtendedLimit(); info.Basic.LimitFlags = 0x2000; // KILL_ON_JOB_CLOSE
-    if (!SetInformationJobObject(job, 9, ref info, Marshal.SizeOf(typeof(ExtendedLimit)))) { CloseHandle(root); CloseHandle(job); return Fail("SetInformationJobObject"); }
+    var info = new ExtendedLimit(); info.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(typeof(ExtendedLimit)))) { CloseHandle(root); CloseHandle(job); return Fail("SetInformationJobObject"); }
     if (!AssignProcessToJobObject(job, root)) { string r = Fail("AssignProcessToJobObject"); CloseHandle(root); CloseHandle(job); return r; }
     // Every process started from now on is born in the job. The ones started
     // before (the Git for Windows launcher starts its bash at once) are added
@@ -211,7 +186,7 @@ public static class AcmJobs {
     TerminateJobObject(job, 1);
     for (int i = 0; i < 200; i++) {
       Accounting a;
-      if (!QueryInformationJobObject(job, 1, out a, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) || a.ActiveProcesses == 0) break;
+      if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out a, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) || a.ActiveProcesses == 0) break;
       System.Threading.Thread.Sleep(25);
     }
     CloseHandle(job);
@@ -237,8 +212,7 @@ public static class AcmJobs {
 
 const HELPER_SCRIPT = `$ErrorActionPreference = 'Stop'\nAdd-Type -TypeDefinition @'\n${HELPER_SOURCE}\n'@\n[AcmJobs]::Serve()\n`;
 
-/** Most time the helper may take to compile and answer its first line. */
-const HELPER_START_MS = 60_000;
+const HELPER_ANSWER_MS = 60_000;
 
 class JobHelper {
   readonly #child: ChildProcessWithoutNullStreams;
@@ -265,9 +239,8 @@ class JobHelper {
     this.#child.once('exit', (code) => this.#die(`it exited with code ${code}`));
   }
 
-  /** Resolves with the helper's first line once it is ready to serve. */
   ready(): Promise<string> {
-    return this.#expect(HELPER_START_MS);
+    return this.#expect(HELPER_ANSWER_MS);
   }
 
   get alive(): boolean {
@@ -276,7 +249,7 @@ class JobHelper {
 
   request(line: string): Promise<string> {
     if (this.#dead) return Promise.reject(this.#dead);
-    const answer = this.#expect(HELPER_START_MS);
+    const answer = this.#expect(HELPER_ANSWER_MS);
     this.#child.stdin.write(`${line}\n`);
     return answer;
   }
@@ -320,7 +293,6 @@ class JobHelper {
 let helper: Promise<JobHelper> | undefined;
 let started: JobHelper | undefined;
 
-/** The running helper, started on first use and again after it died. */
 function jobHelper(): Promise<JobHelper> {
   if (helper === undefined || (started !== undefined && !started.alive)) {
     started = undefined;
@@ -339,18 +311,25 @@ function jobHelper(): Promise<JobHelper> {
   return helper;
 }
 
-/** The processes of one call on Windows, held in a Job Object. */
 export interface WindowsJob {
-  /** Kills every process in the job and resolves once none is left. */
   kill(): Promise<void>;
 }
 
-/**
- * Puts `pid`, and every process it already started, in a new Job Object.
- * Throws with the reason when the job cannot be made: the caller must then
- * not let the process run.
- */
-export async function attachWindowsJob(pid: number): Promise<WindowsJob> {
+export async function startInWindowsJob(child: ChildProcess, stopped: () => boolean): Promise<WindowsJob> {
+  try {
+    if (child.pid === undefined) throw new Error('bash did not start');
+    const job = await attachWindowsJob(child.pid);
+    if (stopped()) child.stdin?.destroy();
+    else child.stdin?.end('\n');
+    return job;
+  } catch (err) {
+    child.stdin?.destroy();
+    child.kill('SIGKILL');
+    throw err;
+  }
+}
+
+async function attachWindowsJob(pid: number): Promise<WindowsJob> {
   let h: JobHelper;
   let answer: string;
   try {

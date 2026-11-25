@@ -8,12 +8,6 @@ import { bootstrapEnv, spawnAndWait } from './bash.js';
  * configuration and one network proxy per process, so this module owns it
  * and serializes sandboxed commands in this process.
  *
- * Each command gets its own sandbox lifetime: the library is initialized for
- * it and reset after it. Its network proxy therefore listens on a port and
- * checks an auth token that exist only for that command, so a process that
- * outlives its call (possible on macOS, where a detached process can leave
- * the process tree) never reaches the network of a later call.
- *
  * Network: the library routes all traffic through its proxy and refuses an
  * allow-everything domain list, so "network on" is the library's ask
  * callback answering yes for every host. On Linux the command has no network
@@ -71,9 +65,9 @@ const PROBE_TIMEOUT_MS = 15_000;
  */
 async function probe(m: Manager, shell: string, signal: AbortSignal): Promise<void> {
   try {
-    const wrapped = await m.wrapWithSandboxArgv('true', shell, { filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } });
+    const wrapped = asShellScript(await m.wrapWithSandboxArgv('true', shell, { filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } }));
     const env = bootstrapEnv({ ...process.env, ...wrapped.env });
-    const r = await spawnAndWait(wrapped.argv, env, process.cwd(), PROBE_TIMEOUT_MS, signal, 4096);
+    const r = await spawnAndWait(wrapped.shell, wrapped.script, env, process.cwd(), PROBE_TIMEOUT_MS, signal, 4096);
     if (r.exitCode === 0) return;
     const how = r.timedOut ? `no exit within ${PROBE_TIMEOUT_MS} ms` : `exit ${r.exitCode ?? r.signal}`;
     const first = r.stderr.trim().split('\n')[0] ?? '';
@@ -87,10 +81,20 @@ async function probe(m: Manager, shell: string, signal: AbortSignal): Promise<vo
   }
 }
 
-/** A command wrapped for the sandbox. */
+/** A command wrapped for the sandbox: `<shell> -c <script>` with `env`. */
 export interface WrappedCommand {
-  readonly argv: readonly string[];
+  readonly shell: string;
+  readonly script: string;
   readonly env: NodeJS.ProcessEnv;
+}
+
+/** The library wraps a command as `[shell, '-c', script]` on Linux and macOS. */
+function asShellScript(raw: { argv: readonly string[]; env: NodeJS.ProcessEnv }): WrappedCommand {
+  const [shell, flag, script, ...extra] = raw.argv;
+  if (shell === undefined || flag !== '-c' || script === undefined || extra.length > 0) {
+    throw new Error(`unexpected sandbox command line shape: ${raw.argv.length} arguments`);
+  }
+  return { shell, script, env: raw.env };
 }
 
 /**
@@ -129,7 +133,7 @@ export function withSandbox<T>(
       }
       let wrapped: WrappedCommand;
       try {
-        wrapped = await m.wrapWithSandboxArgv(
+        wrapped = asShellScript(await m.wrapWithSandboxArgv(
           command,
           shell,
           {
@@ -141,7 +145,7 @@ export function withSandbox<T>(
           },
           undefined,
           cwd,
-        );
+        ));
       } catch (err) {
         throw new ToolError('containment-unavailable', `sandbox runtime could not wrap the command: ${errorMessage(err)}`);
       }

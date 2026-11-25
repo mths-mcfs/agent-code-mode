@@ -161,7 +161,7 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
 /** The Windows pid of the MSYS process `$!`, once it has exec'd. */
 const WINPID = 'sleep 1; cat /proc/$!/winpid';
 
-describe.runIf(IS_WINDOWS)('bash on Windows', () => {
+describe.runIf(IS_WINDOWS)('bash on Windows', { timeout: 60_000 }, () => {
   it('runs the command as bash -c with stdin closed', async () => {
     const r = await bash('echo "[$#][$1]"; cat; echo done; exit 3');
     expect([r.exitCode, r.stdout]).toEqual([3, '[0][]\ndone\n']);
@@ -169,14 +169,14 @@ describe.runIf(IS_WINDOWS)('bash on Windows', () => {
 
   it('on cancel kills every process of the call, orphaned grandchildren included', async () => {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 6000);
     const command = `sleep 100 & ${WINPID} > child.pid\n(sleep 100 & ${WINPID} > orphan.pid)\nsleep 100`;
-    await expect(bash(command, { signal: ac.signal, timeoutMs: 60_000 })).rejects.toMatchObject({ code: 'cancelled' });
-    for (const file of ['child.pid', 'orphan.pid']) {
-      const pid = Number(readFileSync(path.join(ws, file), 'utf8'));
-      expect(pid, file).toBeGreaterThan(0);
-      expect(alive(pid), file).toBe(false);
-    }
+    const call = bash(command, { signal: ac.signal, timeoutMs: 60_000 });
+    const pidOf = (file: string): number => (existsSync(path.join(ws, file)) ? Number(readFileSync(path.join(ws, file), 'utf8')) : 0);
+    // Both are running before the cancel, so their absence after it is the kill's doing.
+    expect(await eventually(() => ['child.pid', 'orphan.pid'].every((f) => pidOf(f) > 0 && alive(pidOf(f))), 20_000)).toBe(true);
+    ac.abort();
+    await expect(call).rejects.toMatchObject({ code: 'cancelled' });
+    for (const file of ['child.pid', 'orphan.pid']) expect(alive(pidOf(file)), file).toBe(false);
   });
 
   it('after a normal exit leaves no background process behind', async () => {
@@ -221,7 +221,6 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
     await new Promise((resolve) => server.close(resolve));
   });
 
-  /** A curl through the proxy `proxyExpr` names, printing only the HTTP status. */
   const viaProxy = (proxyExpr: string): string => `curl -s -o /dev/null -w '%{http_code}' -m 5 --noproxy '' -x "${proxyExpr}" ${url}`;
 
   it('keeps no sandbox process alive after a command, and starts it again for the next one', async () => {
@@ -242,7 +241,6 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   });
 
   it('a process left behind by a call never reaches the network of a later call', async () => {
-    // Detached from the call's session and process group, then orphaned.
     const late = `sleep 2; ${viaProxy('$HTTP_PROXY')} > late.txt; echo alive > survived.txt`;
     const detach = `(perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sh -c ${JSON.stringify(late)} >/dev/null 2>&1 &)`;
     const first = await bash(`${detach}; echo started`, { containment: writable(false) });
