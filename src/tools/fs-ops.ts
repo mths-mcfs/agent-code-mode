@@ -364,18 +364,9 @@ export async function removeEmptyDirInside(dir: string, roots: readonly string[]
   }
 }
 
-/** fsyncs a directory where the platform allows it. */
-export async function syncDir(dir: string): Promise<void> {
-  try {
-    await syncDirStrict(dir);
-  } catch {
-    // Not every file system lets a directory be flushed.
-  }
-}
-
-/** Opens a directory and fsyncs it. */
+/** Opens a directory and fsyncs it. Windows flushes a directory only through a handle opened for writing. */
 async function flushDir(dir: string): Promise<void> {
-  const handle = await fs.open(dir, FS.O_RDONLY);
+  const handle = await fs.open(dir, IS_WINDOWS ? 'r+' : 'r');
   try {
     await handle.sync();
   } finally {
@@ -383,18 +374,23 @@ async function flushDir(dir: string): Promise<void> {
   }
 }
 
-/** Errors that mean the file system cannot fsync a directory at all (FUSE, 9p, some NFS). */
-const UNSUPPORTED_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
+/** Errors that mean the file system cannot fsync a directory at all (FUSE, 9p, some NFS, Windows). */
+const UNSUPPORTED_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', ...(IS_WINDOWS ? ['EISDIR', 'EPERM', 'EACCES'] : [])]);
 
-/** fsyncs a directory and rethrows any failure, except where directory fsync is not supported. */
+/**
+ * fsyncs a directory, so the entries renamed, linked or removed in it survive
+ * a crash. Rejects when the flush fails, and with a `ToolError` when the file
+ * system cannot flush a directory at all: there a rename is atomic but not
+ * durable, so nothing that must survive a crash may rely on it.
+ */
 export async function syncDirStrict(dir: string, flush: (dir: string) => Promise<void> = flushDir): Promise<void> {
-  // Windows, and file systems that answer EINVAL/ENOTSUP/EOPNOTSUPP, cannot fsync a directory: a rename there stays atomic but is not guaranteed to survive a power loss.
-  if (IS_WINDOWS) return;
   try {
     await flush(dir);
   } catch (err) {
     const code = errnoCode(err);
-    if (code !== undefined && UNSUPPORTED_SYNC.has(code)) return;
+    if (code !== undefined && UNSUPPORTED_SYNC.has(code)) {
+      throw new ToolError('tool-error', `the file system of ${dir} cannot flush a directory to disk (${code}), so changes there cannot be made durable`);
+    }
     throw err;
   }
 }

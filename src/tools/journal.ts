@@ -77,7 +77,7 @@ export function journalRoot(stateDir: string): string {
 
 /** File system steps of finalization; replaceable in tests. */
 export interface JournalIo {
-  /** fsyncs a directory and rejects when that fails. */
+  /** fsyncs a directory and rejects when that fails or the file system cannot do it. */
   readonly syncDir: (dir: string) => Promise<void>;
   /** Deletes a finalized transaction directory. */
   readonly removeDir: (dir: string) => Promise<void>;
@@ -136,6 +136,8 @@ export class FileTransaction implements Transaction {
   readonly #dirs: string[] = [];
   /** Directories this transaction's writes really created; only those are removed by the in-process rollback. */
   readonly #ownDirs = new Set<string>();
+  /** Workspace directories already shown to flush to disk. */
+  readonly #flushable = new Set<string>();
   #bytes = 0;
   #created = false;
   #closed = false;
@@ -177,9 +179,15 @@ export class FileTransaction implements Transaction {
   async #persist(): Promise<void> {
     if (!this.#created) {
       const root = path.dirname(this.dir);
-      await fs.mkdir(root, { recursive: true, mode: 0o700 });
+      const first = await fs.mkdir(root, { recursive: true, mode: 0o700 });
       await assertPrivateDir(root);
-      await this.#io.syncDir(path.dirname(root));
+      // Each directory mkdir created must be durable in its parent, or a crash loses the record.
+      let parent = path.dirname(root);
+      await this.#io.syncDir(parent);
+      while (first !== undefined && parent !== path.dirname(first)) {
+        parent = path.dirname(parent);
+        await this.#io.syncDir(parent);
+      }
       await fs.mkdir(this.dir, { mode: 0o700 });
       this.#created = true;
       await this.#io.syncDir(root);
@@ -204,6 +212,16 @@ export class FileTransaction implements Transaction {
   ): Promise<void> {
     return this.#serial(async () => {
       if (this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
+      // Finalization flushes this directory; where it cannot, the write is refused before the file changes.
+      const dir = path.dirname(createdDirs[0] ?? absPath);
+      if (!this.#flushable.has(dir)) {
+        try {
+          await this.#io.syncDir(dir);
+        } catch (err) {
+          throw new ToolError('tool-error', `refused to write ${absPath} in a transaction: ${errorMessage(err)}`);
+        }
+        this.#flushable.add(dir);
+      }
       if (!this.#roots.includes(root)) this.#roots.push(root);
       const existing = this.#entries.get(absPath);
       if (existing) {
@@ -282,23 +300,25 @@ export class FileTransaction implements Transaction {
           skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
         }
       }
-      await removeCreatedDirs(
-        this.#dirs.filter((d) => this.#ownDirs.has(d)),
-        this.#roots,
+      const ownDirs = this.#dirs.filter((d) => this.#ownDirs.has(d));
+      await removeCreatedDirs(ownDirs, this.#roots);
+      const durable = await syncExisting(touchedDirs(restored, ownDirs), this.#io.syncDir).then(
+        () => true,
+        () => false,
       );
-      // A file whose restore failed keeps the record, so a recovery pass can still restore it.
-      if (skipped.some((s) => s.reason === 'error')) await this.#flushRecord();
+      // A file whose restore failed or is not yet on disk keeps the record, so a recovery pass can still restore it.
+      if (!durable || skipped.some((s) => s.reason === 'error')) await this.#flushRecord();
       else await this.#removeRecord();
       return { restored, skipped };
     });
   }
 
   /**
-   * Commits the journal: renames its directory to `<id>.committed`, which
-   * recovery never undoes, then fsyncs the journal root so the rename is
-   * durable. The recursive delete of the renamed directory runs afterwards
+   * Commits the journal: fsyncs every workspace directory the run changed,
+   * renames the journal directory to `<id>.committed`, which recovery never
+   * undoes, then fsyncs the journal root so the rename is durable. The recursive delete of the renamed directory runs afterwards
    * and is not awaited. Rejects with `TransactionFinalizeError`: not
-   * committed when the rename failed (the journal stays open for a
+   * committed when a flush before the rename or the rename failed (the journal stays open for a
    * rollback), committed when only the fsync failed. Called again, it
    * settles the same way.
    */
@@ -317,6 +337,8 @@ export class FileTransaction implements Transaction {
       }
       const committed = `${this.dir}${COMMITTED}`;
       try {
+        // The changes must be on disk before the journal stops protecting them.
+        await syncExisting(touchedDirs([...this.#entries.keys()], this.#dirs), this.#io.syncDir);
         await fs.rename(this.dir, committed);
       } catch (err) {
         throw new TransactionFinalizeError(false, `could not finalize the transaction journal: ${errorMessage(err)}`);
@@ -375,6 +397,23 @@ async function restoreEntry(entry: Entry, bytes: Buffer | null, currentHash: str
   if (bytes === null || sha256(bytes) !== entry.original) throw new ToolError('tool-error', 'the saved original is damaged');
   const expect = currentHash === null ? ({ kind: 'absent' } as const) : ({ kind: 'hash', sha256: currentHash } as const);
   await atomicWrite(entry.path, bytes, expect, entry.mode !== null ? { mode: entry.mode } : {});
+}
+
+/** Directories whose entries changed: the directory of each file and the parent of each created directory. */
+function touchedDirs(files: readonly string[], createdDirs: readonly string[]): string[] {
+  return [...new Set([...files, ...createdDirs].map((p) => path.dirname(p)))];
+}
+
+/** fsyncs each directory; one that is gone holds none of the changes, so it is skipped. */
+async function syncExisting(dirs: readonly string[], sync: (dir: string) => Promise<void>): Promise<void> {
+  for (const dir of dirs) {
+    try {
+      await sync(dir);
+    } catch (err) {
+      const code = errnoCode(err);
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+    }
+  }
 }
 
 /** Removes created directories that are empty, real and strictly inside `roots`, deepest first. */
@@ -545,8 +584,12 @@ export async function recoverStaleJournals(
   for (const record of claimed) {
     try {
       // The journal contains planned directory names and cannot establish ownership after a crash.
-      // A file that could not be handled keeps the record for a later pass.
-      if (!record.skipped.some((s) => s.reason === 'error')) await fs.rm(record.dir, { recursive: true, force: true });
+      // A file that could not be handled or whose restore is not yet on disk keeps the record for a later pass.
+      const durable = await syncExisting(touchedDirs(record.restored, []), syncDirStrict).then(
+        () => true,
+        () => false,
+      );
+      if (durable && !record.skipped.some((s) => s.reason === 'error')) await fs.rm(record.dir, { recursive: true, force: true });
       out.push({ id: record.id, report: { restored: record.restored, skipped: record.skipped } });
     } catch {
       // One bad record must not stop the others.

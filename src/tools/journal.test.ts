@@ -309,8 +309,8 @@ describe('finalization', () => {
   it('reports a committed but not flushed journal and never rolls it back', async () => {
     let failing = false;
     const io: JournalIo = {
-      syncDir: async () => {
-        if (failing) throw new Error('EIO: flush failed');
+      syncDir: async (dir) => {
+        if (failing && dir === journalRoot(stateDir)) throw new Error('EIO: flush failed');
       },
       removeDir: held,
     };
@@ -359,5 +359,85 @@ describe('finalization', () => {
     const report = await tx.rollback();
     expect(report.restored).toEqual([path.join(ws, 'a.txt')]);
     expect(read('a.txt')).toBe('a0\n');
+  });
+
+  /** Flushes for real, failing with `code` for the workspace directories while `failing()` holds. */
+  function workspaceFlushFails(code: string, failing: () => boolean): JournalIo {
+    const inWorkspace = (dir: string): boolean => dir === ws || dir.startsWith(`${ws}${path.sep}`);
+    return {
+      syncDir: (dir) =>
+        syncDirStrict(dir, async (d) => {
+          if (failing() && inWorkspace(d)) throw Object.assign(new Error(`${code}: directory fsync`), { code });
+          await syncDirStrict(d);
+        }),
+      removeDir: held,
+    };
+  }
+
+  it('refuses a transactional write, before the file changes, where its directory cannot be flushed', async () => {
+    const tx = new FileTransaction(stateDir, workspaceFlushFails('EINVAL', () => true));
+    await expect(write('a.txt', 'a1\n', tx)).rejects.toThrow(/refused to write .*cannot flush a directory to disk/);
+    await expect(write('sub/new.txt', 'n1\n', tx)).rejects.toThrow(/refused to write/);
+    expect(read('a.txt')).toBe('a0\n');
+    expect(existsSync(path.join(ws, 'sub'))).toBe(false);
+  });
+
+  it('flushes every directory the run changed before the commit makes the journal unrecoverable', async () => {
+    const flushed: { dir: string; committed: boolean }[] = [];
+    let txDir = '';
+    const tx = new FileTransaction(stateDir, {
+      syncDir: async (dir) => {
+        flushed.push({ dir, committed: existsSync(`${txDir}${COMMITTED}`) });
+        await syncDirStrict(dir);
+      },
+      removeDir: held,
+    });
+    txDir = tx.dir;
+    await write('a.txt', 'a1\n', tx);
+    await write('d1/d2/new.txt', 'n1\n', tx);
+    const before = flushed.length;
+    await tx.dispose();
+    const atDispose = flushed.slice(before);
+    const uncommitted = atDispose.filter((f) => !f.committed).map((f) => f.dir);
+    expect(uncommitted).toEqual(expect.arrayContaining([ws, path.join(ws, 'd1'), path.join(ws, 'd1', 'd2')]));
+    expect(atDispose.at(-1)).toEqual({ dir: journalRoot(stateDir), committed: true });
+  });
+
+  it('keeps the journal open for a rollback when a changed directory cannot be flushed at finalization', async () => {
+    let failing = false;
+    const tx = new FileTransaction(stateDir, workspaceFlushFails('EIO', () => failing));
+    await write('a.txt', 'a1\n', tx);
+    failing = true;
+    await expect(tx.dispose()).rejects.toMatchObject({ name: 'TransactionFinalizeError', committed: false });
+    expect(existsSync(path.join(tx.dir, 'manifest.json'))).toBe(true);
+    failing = false;
+    expect((await tx.rollback()).restored).toEqual([path.join(ws, 'a.txt')]);
+    expect(read('a.txt')).toBe('a0\n');
+  });
+
+  it('keeps the record of a rollback whose restore cannot be flushed, for recovery to finish', async () => {
+    let failing = false;
+    const tx = new FileTransaction(stateDir, workspaceFlushFails('EIO', () => failing));
+    await write('a.txt', 'a1\n', tx);
+    failing = true;
+    expect((await tx.rollback()).restored).toEqual([path.join(ws, 'a.txt')]);
+    expect(read('a.txt')).toBe('a0\n');
+    expect(existsSync(path.join(tx.dir, 'manifest.json'))).toBe(true);
+    expect(await recoverStaleJournals(stateDir, [ws], [])).toEqual([{ id: tx.id, report: { restored: [], skipped: [] } }]);
+    expect(readdirSync(journalRoot(stateDir))).toEqual([]);
+  });
+
+  it('flushes every directory it creates for the journal, so a crash cannot lose the record', async () => {
+    const flushed: string[] = [];
+    const tx = new FileTransaction(stateDir, {
+      syncDir: async (dir) => {
+        flushed.push(dir);
+        await syncDirStrict(dir);
+      },
+      removeDir: held,
+    });
+    await write('a.txt', 'a1\n', tx);
+    // The state directory did not exist: its parent must be flushed too.
+    expect(flushed).toEqual(expect.arrayContaining([base, stateDir, journalRoot(stateDir), tx.dir]));
   });
 });
