@@ -21,7 +21,7 @@ import { type DirId, type InstallId, type PathIdentity, type RegularFile, atomic
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { rooted } from './rooted.js';
-import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, compileGrep, normalizeGlob, runGlob, runGrep } from './search.js';
+import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, type SearchTop, compileGrep, normalizeGlob, runGlob, runGrep, searchTop } from './search.js';
 
 /** Default number of lines `read` returns. */
 export const DEFAULT_READ_LIMIT = 2000;
@@ -64,6 +64,8 @@ interface CallMeta {
   readonly denyWrite: readonly string[];
   /** For write and edit: identity of the file and its directories at prepare. */
   readonly identity?: PathIdentity;
+  /** For grep and glob: the search path and what it named at prepare. */
+  readonly searchTop?: SearchTop;
 }
 
 /** Most prepared calls whose metadata is kept while they wait for commit. */
@@ -288,7 +290,7 @@ export class NodeToolRuntime implements ToolRuntime {
           maxResults: call.args.maxResults ?? DEFAULT_GREP_MAX_RESULTS,
         };
         const prepared: PreparedCallOf<'grep'> = { id: call.id, tool: 'grep', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, meta(absRoot));
+        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot) });
         return prepared;
       }
       case 'glob': {
@@ -298,7 +300,7 @@ export class NodeToolRuntime implements ToolRuntime {
         normalizeGlob(call.args.pattern, absRoot);
         const effect = { absRoot, pattern: call.args.pattern, maxResults: call.args.maxResults ?? DEFAULT_GLOB_MAX_RESULTS };
         const prepared: PreparedCallOf<'glob'> = { id: call.id, tool: 'glob', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, meta(absRoot));
+        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot) });
         return prepared;
       }
     }
@@ -328,6 +330,12 @@ export class NodeToolRuntime implements ToolRuntime {
     return meta;
   }
 
+  #searchTopOf(prepared: PreparedCall): SearchTop {
+    const { searchTop: top } = this.#metaOf(prepared);
+    if (top === undefined) throw new ToolError('tool-error', `this ${prepared.tool} call was not prepared by this tool runtime; prepare it again`);
+    return top;
+  }
+
   async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
     try {
       return await this.#commit(prepared, signal, tx);
@@ -352,12 +360,10 @@ export class NodeToolRuntime implements ToolRuntime {
       case 'edit':
         return this.#commitWrite(prepared, signal, tx);
       case 'grep': {
-        const { root } = this.#metaOf(prepared);
-        return runGrep(prepared.effect, root, signal, this.#opts.grepFileBudgetMs);
+        return runGrep(prepared.effect, this.#searchTopOf(prepared), signal, this.#opts.grepFileBudgetMs);
       }
       case 'glob': {
-        const { root } = this.#metaOf(prepared);
-        return runGlob(prepared.effect, root, signal);
+        return runGlob(prepared.effect, this.#searchTopOf(prepared), signal);
       }
     }
   }

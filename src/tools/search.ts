@@ -162,8 +162,22 @@ function listUnlessGoneOrLinked(dir: RootedPath): Dirent[] | null {
   }
 }
 
-async function* walkFiles(top: RootedPath, signal: AbortSignal): AsyncGenerator<RootedPath> {
+/** The path a search was prepared for, and the `dev:ino` it named then. */
+export interface SearchTop {
+  readonly path: RootedPath;
+  readonly id: string;
+}
+
+export function searchTop(jailRoot: string, absRoot: string): SearchTop {
+  const top = rooted(jailRoot, absRoot);
+  const st = lstatRooted(top);
+  return { path: top, id: `${st.dev}:${st.ino}` };
+}
+
+async function* walkFiles({ path: top, id }: SearchTop, signal: AbortSignal): AsyncGenerator<RootedPath> {
   const rootStat = lstatRooted(top);
+  if (rootStat.isSymbolicLink()) throw new ToolError('stale', `file changed since prepared: ${top.abs} is now a symbolic link`);
+  if (`${rootStat.dev}:${rootStat.ino}` !== id) throw new ToolError('stale', `file changed since prepared: ${top.abs} was replaced`);
   if (rootStat.isFile()) {
     yield top;
     return;
@@ -369,7 +383,7 @@ export const DEFAULT_GREP_FILE_BUDGET_MS = 10_000;
 
 export async function runGrep(
   effect: GrepEffect,
-  jailRoot: string,
+  top: SearchTop,
   signal: AbortSignal,
   fileBudgetMs: number = DEFAULT_GREP_FILE_BUDGET_MS,
 ): Promise<GrepResult> {
@@ -378,7 +392,7 @@ export async function runGrep(
   const matches: GrepMatch[] = [];
   const worker = new MatchWorker(effect.pattern, effect.ignoreCase ? 'i' : '');
   try {
-    for await (const file of walkFiles(rooted(jailRoot, effect.absRoot), signal)) {
+    for await (const file of walkFiles(top, signal)) {
       const rel = file.abs === effect.absRoot ? path.basename(file.abs) : toRel(effect.absRoot, file.abs);
       if (globs && !matchesFileGlob(rel, globs)) continue;
       const bytes = await readFileInside(file, MAX_GREP_FILE_BYTES);
@@ -394,10 +408,10 @@ export async function runGrep(
   return { matches, truncated: false };
 }
 
-export async function runGlob(effect: GlobEffect, jailRoot: string, signal: AbortSignal): Promise<GlobResult> {
+export async function runGlob(effect: GlobEffect, top: SearchTop, signal: AbortSignal): Promise<GlobResult> {
   const patterns = expandBraces(normalizeGlob(effect.pattern, effect.absRoot));
   const all: string[] = [];
-  for await (const file of walkFiles(rooted(jailRoot, effect.absRoot), signal)) {
+  for await (const file of walkFiles(top, signal)) {
     if (file.abs === effect.absRoot) continue;
     const rel = toRel(effect.absRoot, file.abs);
     if (patterns.some((p) => matchesPathPattern(rel, p))) all.push(file.abs);

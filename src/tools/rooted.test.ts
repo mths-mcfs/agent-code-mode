@@ -105,6 +105,32 @@ describe.skipIf(IS_WINDOWS)('working directory anchor when the server cwd disapp
   });
 });
 
+describe.skipIf(IS_WINDOWS)('search path that changes between prepare and commit', () => {
+  const searches: ToolCall[] = [
+    { id: 'g', tool: 'grep', args: { path: 'a', pattern: 'x' } },
+    { id: 'G', tool: 'glob', args: { path: 'a', pattern: '**/*' } },
+  ];
+
+  it.each(searches.map((call) => [call.tool, call] as const))('%s fails as stale when the search path became a link', async (_tool, call) => {
+    writeFileSync(path.join(ws, 'a', 'f.txt'), 'x\n');
+    writeFileSync(path.join(outside, 'a', 'secret.txt'), 'x\n');
+    const rt = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
+    const prepared = await rt.prepare(call, makeContext(ws), policy);
+    swapIn();
+    await expect(rt.commit(prepared, new AbortController().signal)).rejects.toMatchObject({ code: 'stale' });
+  });
+
+  it.each(searches.map((call) => [call.tool, call] as const))('%s fails as stale when the search path is now another directory', async (_tool, call) => {
+    writeFileSync(path.join(ws, 'a', 'f.txt'), 'x\n');
+    const rt = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
+    const prepared = await rt.prepare(call, makeContext(ws), policy);
+    renameSync(path.join(ws, 'a'), path.join(ws, 'a-old'));
+    mkdirSync(path.join(ws, 'a'));
+    writeFileSync(path.join(ws, 'a', 'g.txt'), 'x\n');
+    await expect(rt.commit(prepared, new AbortController().signal)).rejects.toMatchObject({ code: 'stale' });
+  });
+});
+
 describe.skipIf(!IS_WINDOWS)('Windows', () => {
   it('refuses rooted operations with the reason', () => {
     expect(() => within(rooted(ws, path.join(ws, 'a')), () => undefined)).toThrow(
