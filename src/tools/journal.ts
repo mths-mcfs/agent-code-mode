@@ -316,10 +316,11 @@ export class FileTransaction implements Transaction {
   /**
    * Commits the journal: fsyncs every workspace directory the run changed,
    * renames the journal directory to `<id>.committed`, which recovery never
-   * undoes, then fsyncs the journal root so the rename is durable. The recursive delete of the renamed directory runs afterwards
-   * and is not awaited. Rejects with `TransactionFinalizeError`: not
-   * committed when a flush before the rename or the rename failed (the journal stays open for a
-   * rollback), committed when only the fsync failed. Called again, it
+   * undoes, then fsyncs the journal root so the rename is durable. The
+   * recursive delete of the renamed directory runs afterwards and is not
+   * awaited. Rejects with `TransactionFinalizeError`: not committed when a
+   * flush before the rename or the rename failed (the journal stays open for
+   * a rollback), committed when only the last fsync failed. Called again, it
    * settles the same way.
    */
   dispose(): Promise<void> {
