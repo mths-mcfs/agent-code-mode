@@ -74,7 +74,7 @@ class UnconfirmedInstall extends FileTransaction {
   }
 }
 
-it('cleans the temp left by a crash immediately before rename and preserves old target', async () => {
+it('reports the temp left by a crash immediately before rename and preserves old target', async () => {
   const tx = new FileTransaction(state);
   const rename = fs.rename.bind(fs);
   let temp = '';
@@ -94,9 +94,12 @@ it('cleans the temp left by a crash immediately before rename and preserves old 
   vi.restoreAllMocks();
   expect(existsSync(temp)).toBe(true);
   abandon(tx);
-  expect((await recover())[0]?.report.restored).toEqual([]);
+  // Adjusted: recovery reports the leftover temp file and deletes nothing.
+  const [journal] = await recover();
+  expect(journal?.report.restored).toEqual([]);
+  expect(journal?.leftoverTemps).toEqual([{ path: temp, identityMatches: true }]);
   expect(bytes()).toBe('original');
-  expect(readdirSync(workspace)).toEqual(['file']);
+  expect(existsSync(temp)).toBe(true);
 });
 
 it('preserves later unrelated bytes on reuse of a temp inode with the same coarse mtime', async () => {

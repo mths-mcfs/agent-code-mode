@@ -188,12 +188,11 @@ function fileId(st: IdStats): FileId {
   return `${installIdOf(st)}:${st.ctimeNs}`;
 }
 
-/** Removes `temp` when it is still the temp file with identity `install`; returns whether it did. */
-export async function removeTempIfInstall(temp: string, install: InstallId): Promise<boolean> {
+/** Whether something is at `temp`, and if so whether it still has the identity `install`; reads metadata only. */
+export async function tempLeftover(temp: string, install: InstallId): Promise<{ readonly identityMatches: boolean } | undefined> {
   const st = await fs.lstat(temp, { bigint: true }).catch(() => null);
-  if (st === null || !st.isFile() || installIdOf(st) !== install) return false;
-  await fs.unlink(temp);
-  return true;
+  if (st === null) return undefined;
+  return { identityMatches: st.isFile() && installIdOf(st) === install };
 }
 
 /** The install identity a file identity started from. */

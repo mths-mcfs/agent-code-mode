@@ -21,7 +21,7 @@ import {
   type RegularFile,
   currentDirId,
   installIdFrom,
-  removeTempIfInstall,
+  tempLeftover,
   assertDirUnchanged,
   atomicWrite,
   errnoCode,
@@ -522,14 +522,20 @@ function ownerGone(manifest: Manifest, openHere: ReadonlySet<string>, id: string
   return bootedAt > manifest.startedAt + BOOT_SLACK_MS;
 }
 
+/** A temp file a cut install left: a wrong delete would lose data, so it is only reported. */
+export interface LeftoverTemp {
+  readonly path: string;
+  readonly identityMatches: boolean;
+}
+
 /** What a recovery pass did for one stale journal. */
 export interface RecoveredJournal {
   readonly id: string;
   readonly report: RollbackReport;
   /** Set for a finalized run's leftover journal, which is only deleted. */
   readonly finalized?: true;
-  /** Temp files of installs the crash cut, which recovery removed. */
-  readonly removedTemps?: readonly string[];
+  /** Recorded temp paths of installs the crash cut that still exist; recovery never deletes them. */
+  readonly leftoverTemps?: readonly LeftoverTemp[];
 }
 
 async function realOrSelf(p: string): Promise<string> {
@@ -552,8 +558,7 @@ interface Claimed {
   readonly manifest: Manifest;
   readonly restored: string[];
   readonly skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[];
-  /** Temp files of installs the crash cut, removed by this pass. */
-  readonly removedTemps: string[];
+  readonly leftoverTemps: LeftoverTemp[];
 }
 
 async function undoEntry(
@@ -562,7 +567,7 @@ async function undoEntry(
   roots: readonly string[],
   protectedPaths: readonly string[],
 ): Promise<void> {
-  const { manifest, dir, restored, skipped, removedTemps } = record;
+  const { manifest, dir, restored, skipped, leftoverTemps } = record;
   try {
     // The record is data on disk: each path is checked like a tool argument.
     if (!path.isAbsolute(entry.path) || !roots.some((root) => isInsideDir(root, entry.path))) {
@@ -579,9 +584,8 @@ async function undoEntry(
       return;
     }
     for (const install of entry.installs ?? []) {
-      if (install.temp !== undefined && path.dirname(install.temp) === path.dirname(entry.path) && (await removeTempIfInstall(install.temp, install.id))) {
-        removedTemps.push(install.temp);
-      }
+      const left = install.temp === undefined ? undefined : await tempLeftover(install.temp, install.id);
+      if (install.temp !== undefined && left !== undefined) leftoverTemps.push({ path: install.temp, ...left });
     }
     const current = await currentContent(entry.path);
     const untouched = current === null ? !entry.existed : current.id === entry.originalId;
@@ -676,7 +680,7 @@ export async function recoverStaleJournals(
           continue;
         }
       }
-      claimed.push({ id: record.id, dir: target, manifest, restored: [], skipped: [], removedTemps: [] });
+      claimed.push({ id: record.id, dir: target, manifest, restored: [], skipped: [], leftoverTemps: [] });
     } catch {
       // One bad record must not stop the others.
     }
@@ -694,7 +698,7 @@ export async function recoverStaleJournals(
       out.push({
         id: record.id,
         report: { restored: record.restored, skipped: record.skipped },
-        ...(record.removedTemps.length > 0 ? { removedTemps: record.removedTemps } : {}),
+        ...(record.leftoverTemps.length > 0 ? { leftoverTemps: record.leftoverTemps } : {}),
       });
     } catch {
       // One bad record must not stop the others.
