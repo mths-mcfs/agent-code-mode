@@ -499,7 +499,11 @@ export interface RollbackReport {
 export interface Transaction {
   /** Restores every journaled file whose content is still what this run wrote. */
   rollback(): Promise<RollbackReport>;
-  /** Releases the journal (keeps the changes). Idempotent. */
+  /**
+   * Finalizes the journal (keeps the changes): once it resolves, no recovery
+   * can undo them. Idempotent; a no-op after a rollback. Rejects with a
+   * `TransactionFinalizeError` when finalization failed.
+   */
   dispose(): Promise<void>;
 }
 

@@ -23,12 +23,23 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
+    env:
+      ACM_REQUIRE_CONTAINMENT: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Install the Linux sandbox dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          # Ubuntu's AppArmor restricts the unprivileged user namespaces Bubblewrap needs, and its
+          # bwrap-userns-restrict profile drops the capabilities the nested seccomp namespace needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict; fi
       - run: npm ci
       - run: npm run verify
 
