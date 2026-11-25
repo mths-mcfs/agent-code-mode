@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -9,6 +9,7 @@ import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from
 import { makeContext } from '../testing/context.js';
 import { bootstrapEnv } from './bash.js';
 import { NodeToolRuntime } from './runtime.js';
+import { windowsJobHelperPid } from './process-tree.js';
 import { containmentUnavailableReason } from './sandbox.js';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -177,6 +178,44 @@ describe.runIf(IS_WINDOWS)('bash on Windows', { timeout: 60_000 }, () => {
     ac.abort();
     await expect(call).rejects.toMatchObject({ code: 'cancelled' });
     for (const file of ['child.pid', 'orphan.pid']) expect(alive(pidOf(file)), file).toBe(false);
+  });
+
+  it('runs nothing from BASH_ENV or ENV, so no process starts before the call has its job', async () => {
+    const script = path.join(base, 'startup.sh');
+    writeFileSync(script, `echo ran > ${JSON.stringify(path.join(ws, 'startup.ran').replace(/\\/g, '/'))}\nsleep 100 &\n`);
+    const saved = { BASH_ENV: process.env['BASH_ENV'], ENV: process.env['ENV'] };
+    process.env['BASH_ENV'] = script.replace(/\\/g, '/');
+    process.env['ENV'] = script.replace(/\\/g, '/');
+    try {
+      const r = await bash('echo "[${BASH_ENV-unset}]"');
+      expect(r.stdout).toBe('[unset]\n');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+    expect(existsSync(path.join(ws, 'startup.ran'))).toBe(false);
+  });
+
+  it('after the job helper dies, its calls are killed with it and the next call gets a job from a new helper', async () => {
+    const first = bash(`(sleep 100 & ${WINPID} > orphan.pid); sleep 100`, { timeoutMs: 60_000 });
+    const pidOf = (file: string): number => (existsSync(path.join(ws, file)) ? Number(readFileSync(path.join(ws, file), 'utf8')) : 0);
+    expect(await eventually(() => pidOf('orphan.pid') > 0 && alive(pidOf('orphan.pid')), 20_000)).toBe(true);
+    const helperPid = windowsJobHelperPid();
+    expect(helperPid).toBeGreaterThan(0);
+    process.kill(helperPid ?? 0);
+    const r = await first;
+    expect(r.timedOut).toBe(false);
+    expect(alive(pidOf('orphan.pid'))).toBe(false);
+    rmSync(path.join(ws, 'orphan.pid'));
+    const ac = new AbortController();
+    const second = bash(`(sleep 100 & ${WINPID} > orphan.pid); sleep 100`, { signal: ac.signal, timeoutMs: 60_000 });
+    expect(await eventually(() => pidOf('orphan.pid') > 0 && alive(pidOf('orphan.pid')), 30_000)).toBe(true);
+    expect(windowsJobHelperPid()).not.toBe(helperPid);
+    ac.abort();
+    await expect(second).rejects.toMatchObject({ code: 'cancelled' });
+    expect(alive(pidOf('orphan.pid'))).toBe(false);
   });
 
   it('after a normal exit leaves no background process behind', async () => {

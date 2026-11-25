@@ -1,84 +1,144 @@
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import type { Socket } from 'node:net';
-import path from 'node:path';
+import { z } from 'zod';
 import { errorMessage } from '../core/errors.js';
+import { systemPowerShell } from '../core/windows-powershell.js';
 
-interface ProcessEntry {
+export interface ProcessEntry {
   readonly pid: number;
   readonly ppid: number;
   readonly pgid: number;
   /** Session id; null where the platform does not report it (macOS). */
   readonly sid: number | null;
+  /** When the process started, as the platform reports it: with the pid, it names one process. */
+  readonly start: string;
 }
 
-/** Fields after the command name of `/proc/<pid>/stat`, which may itself hold spaces and parentheses. */
-function parseProcStat(pid: number, stat: string): ProcessEntry | null {
-  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-  const ppid = Number(fields[1]);
-  const pgid = Number(fields[2]);
-  const sid = Number(fields[3]);
-  if (!Number.isInteger(ppid) || !Number.isInteger(pgid) || !Number.isInteger(sid)) return null;
-  return { pid, ppid, pgid, sid };
+/** What the sweep reads and signals; the real one is the OS process table. */
+export interface ProcessTable {
+  list(): ProcessEntry[];
+  /** Start time of each pid that still exists. */
+  startTimes(pids: readonly number[]): Map<number, string>;
+  /** False when the signal was not delivered. */
+  signal(pid: number, sig: NodeJS.Signals): boolean;
 }
 
-function listLinuxProcesses(): ProcessEntry[] {
-  const out: ProcessEntry[] = [];
-  for (const name of readdirSync('/proc')) {
-    const pid = Number(name);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    try {
-      const entry = parseProcStat(pid, readFileSync(`/proc/${name}/stat`, 'utf8'));
-      if (entry) out.push(entry);
-    } catch {}
+/** `/proc/<pid>/stat` after the command name, which may itself hold spaces and parentheses: field 3 is index 0. */
+function procStatFields(stat: string): string[] {
+  return stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+}
+
+function readProcStat(pid: number): string[] | null {
+  try {
+    return procStatFields(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+  } catch {
+    return null;
   }
-  return out;
 }
 
-function listPsProcesses(): ProcessEntry[] {
-  const r = spawnSync('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid='], { encoding: 'utf8' });
-  const out: ProcessEntry[] = [];
-  for (const line of (r.stdout ?? '').split('\n')) {
-    const [pid, ppid, pgid] = line.trim().split(/\s+/).map(Number);
-    if (pid !== undefined && ppid !== undefined && pgid !== undefined && [pid, ppid, pgid].every(Number.isInteger)) {
-      out.push({ pid, ppid, pgid, sid: null });
+const linuxTable: Omit<ProcessTable, 'signal'> = {
+  list() {
+    const out: ProcessEntry[] = [];
+    for (const name of readdirSync('/proc')) {
+      const pid = Number(name);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      const f = readProcStat(pid);
+      const [ppid, pgid, sid] = [f?.[1], f?.[2], f?.[3]].map(Number);
+      const start = f?.[19];
+      if (ppid === undefined || pgid === undefined || sid === undefined || start === undefined || ![ppid, pgid, sid].every(Number.isInteger)) continue;
+      out.push({ pid, ppid, pgid, sid, start });
     }
-  }
-  return out;
+    return out;
+  },
+  startTimes(pids) {
+    const out = new Map<number, string>();
+    for (const pid of pids) {
+      const start = readProcStat(pid)?.[19];
+      if (start !== undefined) out.set(pid, start);
+    }
+    return out;
+  },
+};
+
+/** `ps` rows of `pid ppid pgid lstart`, where `lstart` (a date with spaces) runs to the end of the line. */
+function psRows(args: readonly string[]): string[][] {
+  const r = spawnSync('ps', args, { encoding: 'utf8' });
+  return (r.stdout ?? '').split('\n').flatMap((line) => {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S.*\S)\s*$/.exec(line);
+    return m ? [m.slice(1)] : [];
+  });
 }
 
-function signal(pid: number, sig: NodeJS.Signals): void {
+const psTable: Omit<ProcessTable, 'signal'> = {
+  list() {
+    return psRows(['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=']).map(([pid, ppid, pgid, start]) => ({
+      pid: Number(pid),
+      ppid: Number(ppid),
+      pgid: Number(pgid),
+      sid: null,
+      start: start ?? '',
+    }));
+  },
+  startTimes(pids) {
+    if (pids.length === 0) return new Map();
+    const rows = psRows(['-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=', '-p', pids.join(',')]);
+    return new Map(rows.map(([pid, , , start]) => [Number(pid), start ?? '']));
+  },
+};
+
+function sendSignal(pid: number, sig: NodeJS.Signals): boolean {
   try {
     process.kill(pid, sig);
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
+const osTable: ProcessTable = { ...(process.platform === 'linux' ? linuxTable : psTable), signal: sendSignal };
+
 /**
- * Each process found is stopped before the table is read again, so none can
- * fork a child the sweep misses or exit and orphan one.
+ * Kills every process of the call that `sessionLeader` leads (it was spawned
+ * detached): its process group, its session where the platform reports one,
+ * and every descendant of those, until a round finds nothing new.
  *
- * Group and session ids stay reserved while any member lives, and a stopped
- * process keeps its pid, so no id this matches can belong to an unrelated
- * process.
+ * A pid is only a name: between the read of the table and the stop, its
+ * process can exit and the pid go to an unrelated process. So each process is
+ * stopped first and kept only if its start time still matches the one read
+ * with it; a stopped process cannot exit, so its pid keeps naming it. One
+ * that changed is resumed and left alone, and its pid is returned in
+ * `skipped`. Group and session ids stay reserved while any member lives, so
+ * signals to the group never reach another process.
  */
-export function killPosixTree(sessionLeader: number): void {
-  signal(-sessionLeader, 'SIGSTOP');
-  const list = process.platform === 'linux' ? listLinuxProcesses : listPsProcesses;
-  const found = new Set<number>();
+export function killPosixTree(sessionLeader: number, table: ProcessTable = osTable): { readonly skipped: readonly number[] } {
+  table.signal(-sessionLeader, 'SIGSTOP');
+  const found = new Map<number, string>();
+  const skipped: number[] = [];
   for (let round = 0; round < 100; round++) {
-    let added = false;
-    for (const p of list()) {
-      if (found.has(p.pid) || p.pid === process.pid) continue;
-      if (p.pgid === sessionLeader || p.sid === sessionLeader || found.has(p.ppid)) {
-        found.add(p.pid);
-        signal(p.pid, 'SIGSTOP');
-        added = true;
+    const stopped: ProcessEntry[] = [];
+    for (const p of table.list()) {
+      if (found.has(p.pid) || p.pid === process.pid || skipped.includes(p.pid)) continue;
+      if (p.pgid !== sessionLeader && p.sid !== sessionLeader && !found.has(p.ppid)) continue;
+      if (table.signal(p.pid, 'SIGSTOP')) stopped.push(p);
+    }
+    if (stopped.length === 0) break;
+    const now = table.startTimes(stopped.map((p) => p.pid));
+    for (const p of stopped) {
+      if (now.get(p.pid) === p.start) found.set(p.pid, p.start);
+      else if (now.has(p.pid)) {
+        table.signal(p.pid, 'SIGCONT');
+        skipped.push(p.pid);
       }
     }
-    if (!added) break;
   }
-  signal(-sessionLeader, 'SIGKILL');
-  for (const pid of found) signal(pid, 'SIGKILL');
+  table.signal(-sessionLeader, 'SIGKILL');
+  const before = table.startTimes([...found.keys()]);
+  for (const [pid, start] of found) {
+    if (before.get(pid) === start) table.signal(pid, 'SIGKILL');
+    else if (before.has(pid)) skipped.push(pid);
+  }
+  return { skipped };
 }
 
 /** Node cannot create a Job Object, so a Windows PowerShell process compiles this class and owns them. */
@@ -185,14 +245,18 @@ public static class AcmJobs {
     IntPtr job;
     if (!jobs.TryGetValue(id, out job)) return "err unknown job " + id;
     jobs.Remove(id);
-    TerminateJobObject(job, 1);
+    string failed = TerminateJobObject(job, 1) ? null : Fail("TerminateJobObject");
+    uint active = 0;
     for (int i = 0; i < 200; i++) {
       Accounting a;
-      if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out a, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) || a.ActiveProcesses == 0) break;
+      if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out a, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero)) { failed = failed ?? Fail("QueryInformationJobObject"); break; }
+      active = a.ActiveProcesses;
+      if (active == 0) break;
       System.Threading.Thread.Sleep(25);
     }
     CloseHandle(job);
-    return "ok";
+    if (failed != null) return failed;
+    return active == 0 ? "ok" : "err " + active + " processes still running after the job was terminated";
   }
 
   public static void Serve() {
@@ -224,9 +288,9 @@ class JobHelper {
   #dead: Error | undefined;
 
   constructor() {
-    const powershell = path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const run = systemPowerShell(process.env);
     const encoded = Buffer.from(HELPER_SCRIPT, 'utf16le').toString('base64');
-    this.#child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true });
+    this.#child = spawn(run.file, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { cwd: run.cwd, env: run.env, windowsHide: true });
     this.#child.unref();
     // Child stdio pipes are sockets; unref'd, the idle helper never keeps the process alive.
     for (const s of [this.#child.stdin, this.#child.stdout, this.#child.stderr]) (s as Socket).unref();
@@ -247,6 +311,10 @@ class JobHelper {
 
   get alive(): boolean {
     return this.#dead === undefined;
+  }
+
+  get pid(): number | undefined {
+    return this.#child.pid;
   }
 
   request(line: string): Promise<string> {
@@ -301,7 +369,7 @@ function jobHelper(): Promise<JobHelper> {
     const next = (async () => {
       const h = new JobHelper();
       const first = await h.ready();
-      if (first !== 'ready') throw new Error(`the Windows job helper did not start: ${first}`);
+      if (!ReadyReply.safeParse(first).success) throw new Error(`the Windows job helper did not start: ${first}`);
       started = h;
       return h;
     })();
@@ -313,14 +381,76 @@ function jobHelper(): Promise<JobHelper> {
   return helper;
 }
 
+/** The running helper's process id, for tests that stop it. */
+export function windowsJobHelperPid(): number | undefined {
+  return started?.alive ? started.pid : undefined;
+}
+
+const ReadyReply = z.literal('ready');
+const ErrReply = z
+  .string()
+  .regex(/^err ./)
+  .transform((line) => ({ ok: false as const, reason: line.slice(4) }));
+const AttachReply = z.union([
+  z
+    .string()
+    .regex(/^ok [1-9][0-9]*$/)
+    .transform((line) => ({ ok: true as const, id: line.slice(3) })),
+  ErrReply,
+]);
+const KillReply = z.union([z.literal('ok').transform(() => ({ ok: true as const })), ErrReply]);
+
+/** One request to the helper and its answer line. */
+export type HelperRequest = (line: string) => Promise<string>;
+
 export interface WindowsJob {
+  /** Resolves once the job has no process left; rejects with the reason when that is not confirmed. */
   kill(): Promise<void>;
 }
 
+/**
+ * Puts `pid`, and every process it already started, in a new Job Object
+ * through `request`. Every answer is checked against the protocol.
+ */
+export async function attachJob(pid: number, request: HelperRequest): Promise<WindowsJob> {
+  const attached = AttachReply.safeParse(await request(`attach ${pid}`));
+  if (!attached.success) throw new Error('the Windows job helper answered an attach outside its protocol');
+  if (!attached.data.ok) throw new Error(attached.data.reason);
+  const id = attached.data.id;
+  let killed: Promise<void> | undefined;
+  return {
+    kill: () =>
+      (killed ??= (async () => {
+        let line: string;
+        try {
+          line = await request(`kill ${id}`);
+        } catch {
+          // The helper is gone: the OS closed its handles, and closing a job kills its processes.
+          return;
+        }
+        const reply = KillReply.safeParse(line);
+        if (!reply.success) throw new Error('the Windows job helper answered a kill outside its protocol');
+        if (!reply.data.ok) throw new Error(reply.data.reason);
+      })()),
+  };
+}
+
+/**
+ * Starts `child`, which waits on stdin, only once it is in its own Job
+ * Object: a call `stopped` by then never runs its command, and one whose
+ * job cannot be made is killed while it has started nothing.
+ */
 export async function startInWindowsJob(child: ChildProcess, stopped: () => boolean): Promise<WindowsJob> {
   try {
     if (child.pid === undefined) throw new Error('bash did not start');
-    const job = await attachWindowsJob(child.pid);
+    const pid = child.pid;
+    let job: WindowsJob;
+    try {
+      const h = await jobHelper();
+      job = await attachJob(pid, (line) => h.request(line));
+    } catch (err) {
+      throw new Error(`bash on Windows needs a Job Object to own its processes: ${errorMessage(err)}`);
+    }
     if (stopped()) child.stdin?.destroy();
     else child.stdin?.end('\n');
     return job;
@@ -329,28 +459,4 @@ export async function startInWindowsJob(child: ChildProcess, stopped: () => bool
     child.kill('SIGKILL');
     throw err;
   }
-}
-
-async function attachWindowsJob(pid: number): Promise<WindowsJob> {
-  let h: JobHelper;
-  let answer: string;
-  try {
-    h = await jobHelper();
-    answer = await h.request(`attach ${pid}`);
-  } catch (err) {
-    throw new Error(`bash on Windows needs a Job Object to own its processes: ${errorMessage(err)}`);
-  }
-  const [status, id] = answer.split(' ', 2);
-  if (status !== 'ok' || id === undefined) throw new Error(`bash on Windows needs a Job Object to own its processes: ${answer.replace(/^err /, '')}`);
-  let killed: Promise<void> | undefined;
-  return {
-    kill: () => {
-      // A dead helper already closed the job, which killed its processes.
-      killed ??= h.request(`kill ${id}`).then(
-        () => undefined,
-        () => undefined,
-      );
-      return killed;
-    },
-  };
 }

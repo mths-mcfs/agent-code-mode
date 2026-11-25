@@ -87,7 +87,9 @@ export interface BashRunOptions {
 /**
  * The script `bash -c` runs on Windows: it waits for one line on stdin, sent
  * once the process sits in its Job Object, then runs the command as
- * `bash -c <command>` with stdin closed, as on POSIX.
+ * `bash -c <command>` with stdin closed, as on POSIX. It runs with the
+ * bootstrap environment, so no startup file or exported function of the
+ * user's runs before the gate.
  */
 const WINDOWS_GATE = 'IFS= read -r _ || exit 1; exec "$BASH" -c "$1" </dev/null';
 
@@ -109,7 +111,7 @@ export function spawnAndWait(
     const args = windows ? ['-c', WINDOWS_GATE, 'bash', script] : ['-c', script];
     const child = spawn(shell, args, {
       cwd,
-      env,
+      env: windows ? bootstrapEnv(env) : env,
       stdio: [windows ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: !windows,
       windowsHide: true,
@@ -129,11 +131,15 @@ export function spawnAndWait(
         return undefined;
       });
     }
+    const skipped = new Set<number>();
     const killAll = async (): Promise<void> => {
       killing = true;
       const pid = child.pid;
       if (pid === undefined) return;
-      if (!windows) return killPosixTree(pid);
+      if (!windows) {
+        for (const p of killPosixTree(pid).skipped) skipped.add(p);
+        return;
+      }
       await (await job)?.kill();
     };
 
@@ -148,26 +154,23 @@ export function spawnAndWait(
       clearTimeout(timer);
       if (drainTimer) clearTimeout(drainTimer);
       signal.removeEventListener('abort', onAbort);
-      const result: BashResult = {
-        exitCode: exit.code,
-        signal: exit.signal,
-        stdout: out.text(),
-        stderr: err.text(),
-        truncated: out.truncated || err.truncated,
-        timedOut,
-      };
-      void killAll().then(() => {
-        if (startError) reject(startError);
-        else if (signal.aborted && !timedOut) reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
-        else resolve(result);
-      });
+      const { code, signal: exitSignal } = exit;
+      void killAll().then(
+        () => {
+          if (startError) return reject(startError);
+          if (signal.aborted && !timedOut) return reject(new ToolError('cancelled', 'bash was stopped because the run stopped'));
+          const note = skipped.size === 0 ? '' : `\n[agent-code-mode] cleanup left ${skipped.size} process(es) alone: pid ${[...skipped].join(', ')} now names another process\n`;
+          resolve({ exitCode: code, signal: exitSignal, stdout: out.text(), stderr: err.text() + note, truncated: out.truncated || err.truncated, timedOut });
+        },
+        (e: unknown) => reject(new ToolError('tool-error', `bash could not stop every process of the call: ${errorMessage(e)}`)),
+      );
     };
-    const onAbort = (): void => void killAll();
+    const onAbort = (): void => void killAll().catch(() => undefined);
     const timer = setTimeout(() => {
       // The shell already exited: only its output was still draining.
       if (exit) return finish();
       timedOut = true;
-      void killAll();
+      void killAll().catch(() => undefined);
     }, timeoutMs);
     signal.addEventListener('abort', onAbort, { once: true });
 
