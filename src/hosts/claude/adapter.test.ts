@@ -82,7 +82,7 @@ const containment = { mode: 'none' } as const;
 const SANDBOX = { sandbox: { enabled: true } };
 
 function bash(command: string, cwd: string): PreparedCall {
-  return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 120_000 }, effect: { command, cwd, timeoutMs: 120_000, containment } };
+  return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 120_000 }, effect: { command, shell: { path: '/bin/bash', args: ['-c'] }, cwd, timeoutMs: 120_000, containment } };
 }
 function read(p: string, real = p): PreparedCall {
   return { id: 'c1', tool: 'read', args: { path: p, offset: 1, limit: 2000 }, effect: { absPath: real, offset: 1, limit: 2000 } };

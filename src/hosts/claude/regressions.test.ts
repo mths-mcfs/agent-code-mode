@@ -41,7 +41,7 @@ async function setup(user: Record<string, unknown>, mode: string, argv?: readonl
 }
 
 function bash(command: string, cwd: string): PreparedCall {
-  return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 1000 }, effect: { command, cwd, timeoutMs: 1000, containment: { mode: 'none' } } };
+  return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 1000 }, effect: { command, shell: { path: '/bin/bash', args: ['-c'] }, cwd, timeoutMs: 1000, containment: { mode: 'none' } } };
 }
 function read(p: string): PreparedCall {
   return { id: 'c1', tool: 'read', args: { path: p, offset: 1, limit: 10 }, effect: { absPath: p, offset: 1, limit: 10 } };
