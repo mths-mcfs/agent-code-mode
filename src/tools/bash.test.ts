@@ -247,9 +247,14 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
     expect(first.stdout).toBe('started\n');
     const second = await bash(`sleep 4; ${viaProxy('$HTTP_PROXY')}`, { containment: writable(true) });
     expect(second.stdout).toBe('200');
-    const lateStatus = existsSync(path.join(ws, 'late.txt')) ? readFileSync(path.join(ws, 'late.txt'), 'utf8') : null;
-    expect(lateStatus).not.toBe('200');
-    if (process.platform === 'linux') expect(existsSync(path.join(ws, 'survived.txt'))).toBe(false);
+    if (process.platform === 'linux') {
+      // The PID namespace ends with the call: the child never makes its attempt.
+      expect([existsSync(path.join(ws, 'late.txt')), existsSync(path.join(ws, 'survived.txt'))]).toEqual([false, false]);
+    } else {
+      // On macOS the child outlives its call and tries the network during the later one.
+      expect(await eventually(() => existsSync(path.join(ws, 'survived.txt')), 5000)).toBe(true);
+      expect(readFileSync(path.join(ws, 'late.txt'), 'utf8')).not.toBe('200');
+    }
   });
 
   it('blocks writes under a read-only sandbox', async () => {

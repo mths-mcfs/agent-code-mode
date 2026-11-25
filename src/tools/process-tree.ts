@@ -171,8 +171,10 @@ public static class AcmJobs {
         if (h == IntPtr.Zero) continue;
         long at = CreatedAt(h);
         // A parent id can name an earlier process that had the same pid.
-        if (at >= created[p.Value] && AssignProcessToJobObject(job, h)) { created[p.Key] = at; grew = true; }
+        if (at < created[p.Value]) { CloseHandle(h); continue; }
+        if (!AssignProcessToJobObject(job, h)) { string r = Fail("AssignProcessToJobObject"); CloseHandle(h); CloseHandle(job); return r; }
         CloseHandle(h);
+        created[p.Key] = at; grew = true;
       }
     }
     long id = ++next; jobs[id] = job;
