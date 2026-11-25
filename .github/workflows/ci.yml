@@ -23,12 +23,22 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
+    env:
+      # The bash containment tests fail instead of skipping when the OS sandbox is missing.
+      ACM_REQUIRE_CONTAINMENT: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Install the Linux sandbox dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          # Ubuntu 24.04 blocks the unprivileged user namespaces Bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm ci
       - run: npm run verify
 

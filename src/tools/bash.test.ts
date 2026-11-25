@@ -133,6 +133,11 @@ if (unavailable !== null) {
   console.log(`bash containment tests skipped: ${unavailable}`);
 }
 
+// CI sets ACM_REQUIRE_CONTAINMENT=1 where containment must run, so a skip there fails the job.
+it.runIf(process.env.ACM_REQUIRE_CONTAINMENT === '1')('runs the containment tests where they are required', () => {
+  expect(unavailable).toBeNull();
+});
+
 describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   const readOnly: BashContainment = { mode: 'sandbox', readOnly: true, writableRoots: [], network: false };
 
