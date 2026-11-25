@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,13 +7,27 @@ import { quotePath, unifiedDiff } from './diff.js';
 
 const hasGit = spawnSync('git', ['--version']).status === 0;
 
-/** Applies `diff` with `git apply` in a scratch repo and returns the result. */
+/**
+ * Environment for a `git` that sees no repository above `dir` and none of the
+ * caller's `GIT_*` variables or system and global config, which otherwise
+ * decide where `git apply` writes (a temp dir inside a repository, a hook's GIT_DIR).
+ */
+function isolatedGitEnv(dir: string): NodeJS.ProcessEnv {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
+  return { ...env, GIT_CEILING_DIRECTORIES: path.dirname(dir), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull };
+}
+
+/** Applies `diff` with `git apply` in a scratch directory and returns the result. */
 function gitApply(before: string | null, diff: string): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-diff-'));
+  const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-diff-')));
   try {
     if (before !== null) writeFileSync(path.join(dir, 'f.txt'), before);
     writeFileSync(path.join(dir, 'p.diff'), diff);
-    const r = spawnSync('git', ['-c', 'core.autocrlf=false', 'apply', '--unsafe-paths', '--whitespace=nowarn', 'p.diff'], { cwd: dir, encoding: 'utf8' });
+    const r = spawnSync('git', ['-c', 'core.autocrlf=false', 'apply', '--unsafe-paths', '--whitespace=nowarn', 'p.diff'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: isolatedGitEnv(dir),
+    });
     if (r.status !== 0) throw new Error(`git apply failed: ${r.stderr}\n${diff}`);
     return readFileSync(path.join(dir, 'f.txt'), 'utf8');
   } finally {
