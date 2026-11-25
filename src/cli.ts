@@ -3,14 +3,17 @@ import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import type { HostKind } from './core/types.js';
+import { runContextHook } from './hosts/claude/context-hook.js';
+import { applyPlan, parseInstallArgs, planDiff, planInstall } from './install.js';
 import { createMcpServer } from './server/mcp.js';
 
 const USAGE = `Usage: agent-code-mode <command>
 
 Commands:
   serve [--host claude|codex|generic]   Run the MCP stdio server
-  hook                                  Companion hook entry point (not implemented yet)
-  install                               Register the server with a host (not implemented yet)
+  hook                                  Claude Code companion hook (reads the hook input on stdin, prints nothing)
+  install --host claude|codex [--scope user|project] [--write] [--local]
+                                        Print, and with --write apply, the host configuration
 
 Options:
   --version   Print the version
@@ -57,10 +60,39 @@ export async function main(argv: readonly string[]): Promise<number> {
       await server.connect(new StdioServerTransport());
       return -1; // keep running until stdin closes
     }
-    case 'hook':
-    case 'install':
-      process.stderr.write(`agent-code-mode ${command}: not implemented yet\n`);
-      return 1;
+    case 'hook': {
+      // Prints nothing: Claude Code would read any stdout as the hook's decision.
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      return runContextHook(Buffer.concat(chunks).toString('utf8'));
+    }
+    case 'install': {
+      const opts = parseInstallArgs(rest, { cwd: process.cwd(), env: process.env });
+      if (opts instanceof Error) {
+        process.stderr.write(`${opts.message}\n${USAGE}\n`);
+        return 2;
+      }
+      const plan = await planInstall(opts);
+      process.stdout.write(plan.text);
+      if (!opts.write) {
+        if (plan.changes.length > 0) process.stdout.write('\n# Run again with --write to apply the file changes above.\n');
+        return 0;
+      }
+      if (plan.refusals.length > 0) {
+        process.stderr.write(`agent-code-mode install: nothing written:\n${plan.refusals.map((r) => `  ${r}`).join('\n')}\n`);
+        return 1;
+      }
+      const diff = planDiff(plan);
+      if (diff === '') {
+        process.stdout.write('\n# Nothing to write: the configuration is already in place.\n');
+        return 0;
+      }
+      process.stdout.write(`\n# Writing:\n${diff}`);
+      await applyPlan(plan);
+      for (const c of plan.changes) process.stdout.write(`# wrote ${c.file}\n`);
+      if (plan.commands.length > 0) process.stdout.write(`# Still to run yourself:\n${plan.commands.join('\n')}\n`);
+      return 0;
+    }
     default:
       process.stderr.write(`unknown command ${JSON.stringify(command)}\n${USAGE}\n`);
       return 2;
