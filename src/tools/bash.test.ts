@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { BashContainment, BashResult, PolicySnapshot, SessionContext } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
-import { bootstrapEnv } from './bash.js';
+import { bootstrapEnv, findBash, spawnAndWait, type CallTree } from './bash.js';
 import { NodeToolRuntime } from './runtime.js';
 import { windowsJobHelperPid } from './process-tree.js';
 import { containmentUnavailableReason } from './sandbox.js';
@@ -112,6 +112,33 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     const r = await bash('set -m; sleep 100 & echo $!');
     const pid = Number(r.stdout.trim());
     expect(await eventually(() => !alive(pid))).toBe(true);
+  });
+
+  describe('when the processes cannot be confirmed dead', () => {
+    const run = (tree: CallTree, opts: { timeoutMs?: number; signal?: AbortSignal } = {}) =>
+      spawnAndWait(findBash() ?? 'bash', 'echo $$ > leader.pid; sleep 30', process.env, ws, opts.timeoutMs ?? 60_000, opts.signal ?? new AbortController().signal, 1024, { tree: () => tree, killWaitMs: 300 });
+    const reap = async (): Promise<void> => {
+      await eventually(() => existsSync(path.join(ws, 'leader.pid')));
+      try {
+        process.kill(-Number(readFileSync(path.join(ws, 'leader.pid'), 'utf8')), 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    };
+
+    it('ends a timed-out call with an error when the kill fails, instead of waiting for an exit', async () => {
+      const call = run({ kill: () => Promise.reject(new Error('the job could not be terminated')), exited: () => undefined }, { timeoutMs: 300 });
+      await expect(call).rejects.toMatchObject({ code: 'tool-error', message: expect.stringMatching(/may still be running.*could not be terminated/) });
+      await reap();
+    });
+
+    it('ends a cancelled call with an error when bash does not exit after the kill', async () => {
+      const ac = new AbortController();
+      const call = run({ kill: async () => [], exited: () => undefined }, { signal: ac.signal });
+      setTimeout(() => ac.abort(), 300);
+      await expect(call).rejects.toMatchObject({ code: 'tool-error', message: expect.stringMatching(/did not exit within 300 ms/) });
+      await reap();
+    });
   });
 
   it('never starts when the signal is already aborted', async () => {

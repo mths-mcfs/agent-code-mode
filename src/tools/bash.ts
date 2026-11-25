@@ -1,9 +1,9 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type { BashEffect, BashResult } from '../core/types.js';
-import { killPosixTree, startInWindowsJob, type WindowsJob } from './process-tree.js';
+import { killPosixTree, processClock, sessionLeader, startInWindowsJob } from './process-tree.js';
 import { withSandbox } from './sandbox.js';
 
 /** Default `bash` timeout. */
@@ -93,6 +93,34 @@ export interface BashRunOptions {
  */
 const WINDOWS_GATE = 'IFS= read -r _ || exit 1; exec "$BASH" -c "$1" </dev/null';
 
+/** How long a call waits for bash to exit once it was killed, before it reports that it could not stop it. */
+export const KILL_WAIT_MS = 10_000;
+
+/** The processes of one call. */
+export interface CallTree {
+  /** Kills every process of the call; resolves with the pids it left alone, rejects when it cannot confirm the kill. */
+  kill(): Promise<readonly number[]>;
+  /** The shell exited. */
+  exited(): void;
+}
+
+/** Overrides for tests. */
+export interface SpawnHooks {
+  readonly tree?: (child: ChildProcess) => CallTree;
+  readonly killWaitMs?: number;
+}
+
+function posixTree(child: ChildProcess): CallTree {
+  if (child.pid === undefined) return { kill: async () => [], exited: () => undefined };
+  let leader = sessionLeader(child.pid);
+  return {
+    kill: async () => killPosixTree(leader).skipped,
+    exited: () => {
+      leader = { ...leader, exitedAt: leader.exitedAt ?? processClock() };
+    },
+  };
+}
+
 export function spawnAndWait(
   shell: string,
   script: string,
@@ -101,6 +129,7 @@ export function spawnAndWait(
   timeoutMs: number,
   signal: AbortSignal,
   cap: number,
+  hooks: SpawnHooks = {},
 ): Promise<BashResult> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -124,36 +153,60 @@ export function spawnAndWait(
 
     let startError: ToolError | undefined;
     let killing = false;
-    let job: Promise<WindowsJob | undefined> = Promise.resolve(undefined);
-    if (windows) {
-      job = startInWindowsJob(child, () => killing).catch((e: unknown) => {
+    let tree: CallTree;
+    if (hooks.tree) tree = hooks.tree(child);
+    else if (!windows) tree = posixTree(child);
+    else {
+      const job = startInWindowsJob(child, () => killing).catch((e: unknown) => {
         startError ??= new ToolError('tool-error', errorMessage(e));
         return undefined;
       });
+      tree = {
+        kill: async () => {
+          await (await job)?.kill();
+          return [];
+        },
+        exited: () => undefined,
+      };
     }
     const skipped = new Set<number>();
     const killAll = async (): Promise<void> => {
       killing = true;
-      const pid = child.pid;
-      if (pid === undefined) return;
-      if (!windows) {
-        for (const p of killPosixTree(pid).skipped) skipped.add(p);
-        return;
-      }
-      await (await job)?.kill();
+      for (const p of await tree.kill()) skipped.add(p);
     };
 
     let timedOut = false;
     let settled = false;
     let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     let drainTimer: NodeJS.Timeout | undefined;
+    let killWait: NodeJS.Timeout | undefined;
+
+    const stopTimers = (): void => {
+      clearTimeout(timer);
+      clearTimeout(drainTimer);
+      clearTimeout(killWait);
+      signal.removeEventListener('abort', onAbort);
+    };
+    /** Ends a call whose processes could not be confirmed dead, instead of waiting for an exit that may never come. */
+    const giveUp = (why: string): void => {
+      if (settled) return;
+      settled = true;
+      stopTimers();
+      reject(new ToolError('tool-error', `bash could not be stopped, so processes of the call may still be running: ${why}`));
+    };
+    const stop = (): void => {
+      void killAll().then(
+        () => {
+          killWait ??= setTimeout(() => giveUp(`bash did not exit within ${hooks.killWaitMs ?? KILL_WAIT_MS} ms of being killed`), hooks.killWaitMs ?? KILL_WAIT_MS);
+        },
+        (e: unknown) => giveUp(errorMessage(e)),
+      );
+    };
 
     const finish = (): void => {
       if (settled || !exit) return;
       settled = true;
-      clearTimeout(timer);
-      if (drainTimer) clearTimeout(drainTimer);
-      signal.removeEventListener('abort', onAbort);
+      stopTimers();
       const { code, signal: exitSignal } = exit;
       void killAll().then(
         () => {
@@ -165,24 +218,25 @@ export function spawnAndWait(
         (e: unknown) => reject(new ToolError('tool-error', `bash could not stop every process of the call: ${errorMessage(e)}`)),
       );
     };
-    const onAbort = (): void => void killAll().catch(() => undefined);
+    const onAbort = (): void => stop();
     const timer = setTimeout(() => {
       // The shell already exited: only its output was still draining.
       if (exit) return finish();
       timedOut = true;
-      void killAll().catch(() => undefined);
+      stop();
     }, timeoutMs);
     signal.addEventListener('abort', onAbort, { once: true });
 
     child.once('error', (e) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
+      stopTimers();
       reject(new ToolError('tool-error', `bash failed to start: ${e.message}`));
     });
     child.once('exit', (code, sig) => {
+      tree.exited();
       exit = { code, signal: sig };
+      clearTimeout(killWait);
       // Background children may keep the pipes open; do not wait for them long.
       drainTimer = setTimeout(finish, DRAIN_MS);
     });

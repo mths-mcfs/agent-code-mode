@@ -11,15 +11,17 @@ export interface ProcessEntry {
   readonly pgid: number;
   /** Session id; null where the platform does not report it (macOS). */
   readonly sid: number | null;
-  /** When the process started, as the platform reports it: with the pid, it names one process. */
-  readonly start: string;
+  /** When the process started, on the table's clock: with the pid, it names one process. */
+  readonly start: number;
 }
 
 /** What the sweep reads and signals; the real one is the OS process table. */
 export interface ProcessTable {
   list(): ProcessEntry[];
   /** Start time of each pid that still exists. */
-  startTimes(pids: readonly number[]): Map<number, string>;
+  startTimes(pids: readonly number[]): Map<number, number>;
+  /** The current time on the clock of `start`. */
+  now(): number;
   /** False when the signal was not delivered. */
   signal(pid: number, sig: NodeJS.Signals): boolean;
 }
@@ -37,6 +39,14 @@ function readProcStat(pid: number): string[] | null {
   }
 }
 
+let clockTicks: number | undefined;
+
+/** Clock ticks per second of `/proc/<pid>/stat` start times. */
+function ticksPerSecond(): number {
+  clockTicks ??= Number(spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).stdout?.trim()) || 100;
+  return clockTicks;
+}
+
 const linuxTable: Omit<ProcessTable, 'signal'> = {
   list() {
     const out: ProcessEntry[] = [];
@@ -44,47 +54,57 @@ const linuxTable: Omit<ProcessTable, 'signal'> = {
       const pid = Number(name);
       if (!Number.isInteger(pid) || pid <= 0) continue;
       const f = readProcStat(pid);
-      const [ppid, pgid, sid] = [f?.[1], f?.[2], f?.[3]].map(Number);
-      const start = f?.[19];
-      if (ppid === undefined || pgid === undefined || sid === undefined || start === undefined || ![ppid, pgid, sid].every(Number.isInteger)) continue;
+      const [ppid, pgid, sid, start] = [f?.[1], f?.[2], f?.[3], f?.[19]].map(Number);
+      if (ppid === undefined || pgid === undefined || sid === undefined || start === undefined || ![ppid, pgid, sid, start].every(Number.isInteger)) continue;
       out.push({ pid, ppid, pgid, sid, start });
     }
     return out;
   },
   startTimes(pids) {
-    const out = new Map<number, string>();
+    const out = new Map<number, number>();
     for (const pid of pids) {
-      const start = readProcStat(pid)?.[19];
-      if (start !== undefined) out.set(pid, start);
+      const start = Number(readProcStat(pid)?.[19]);
+      if (Number.isInteger(start)) out.set(pid, start);
     }
     return out;
   },
+  now() {
+    const uptime = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+    return Math.ceil(uptime * ticksPerSecond());
+  },
 };
 
-/** `ps` rows of `pid ppid pgid lstart`, where `lstart` (a date with spaces) runs to the end of the line. */
-function psRows(args: readonly string[]): string[][] {
-  const r = spawnSync('ps', args, { encoding: 'utf8' });
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `ps -o lstart` in the C locale, such as `Wed Nov 25 18:00:00 2026`, as epoch milliseconds (whole seconds). */
+function parseLstart(text: string): number | undefined {
+  const m = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(text);
+  const month = m ? MONTHS.indexOf(m[1] ?? '') : -1;
+  if (!m || month < 0) return undefined;
+  return new Date(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])).getTime();
+}
+
+/** `ps` rows of `pid ppid pgid start`, where `lstart` (a date with spaces) runs to the end of the line. */
+function psRows(args: readonly string[]): { pid: number; ppid: number; pgid: number; start: number }[] {
+  const r = spawnSync('ps', args, { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
   return (r.stdout ?? '').split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S.*\S)\s*$/.exec(line);
-    return m ? [m.slice(1)] : [];
+    const start = m ? parseLstart(m[4] ?? '') : undefined;
+    return m && start !== undefined ? [{ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), start }] : [];
   });
 }
 
+const PS_COLUMNS = ['-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart='];
+
 const psTable: Omit<ProcessTable, 'signal'> = {
   list() {
-    return psRows(['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=']).map(([pid, ppid, pgid, start]) => ({
-      pid: Number(pid),
-      ppid: Number(ppid),
-      pgid: Number(pgid),
-      sid: null,
-      start: start ?? '',
-    }));
+    return psRows(['-A', ...PS_COLUMNS]).map((r) => ({ ...r, sid: null }));
   },
   startTimes(pids) {
     if (pids.length === 0) return new Map();
-    const rows = psRows(['-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=', '-p', pids.join(',')]);
-    return new Map(rows.map(([pid, , , start]) => [Number(pid), start ?? '']));
+    return new Map(psRows([...PS_COLUMNS, '-p', pids.join(',')]).map((r) => [r.pid, r.start]));
   },
+  now: () => Date.now(),
 };
 
 function sendSignal(pid: number, sig: NodeJS.Signals): boolean {
@@ -98,28 +118,55 @@ function sendSignal(pid: number, sig: NodeJS.Signals): boolean {
 
 const osTable: ProcessTable = { ...(process.platform === 'linux' ? linuxTable : psTable), signal: sendSignal };
 
+/** The shell a call spawned detached, so it leads its own session and process group. */
+export interface SessionLeader {
+  readonly pid: number;
+  /** Its start time, read at spawn; undefined when it could not be read. */
+  readonly start: number | undefined;
+  /** When its exit was seen, on the table's clock; undefined while it runs. */
+  readonly exitedAt?: number;
+}
+
+/** Reads the identity of a just-spawned leader, before Node can reap it. */
+export function sessionLeader(pid: number, table: ProcessTable = osTable): SessionLeader {
+  return { pid, start: table.startTimes([pid]).get(pid) };
+}
+
+export function processClock(table: ProcessTable = osTable): number {
+  return table.now();
+}
+
 /**
- * Kills every process of the call that `sessionLeader` leads (it was spawned
- * detached): its process group, its session where the platform reports one,
- * and every descendant of those, until a round finds nothing new.
+ * Kills every process of the call that `leader` leads: its process group, its
+ * session where the platform reports one, and every descendant of those,
+ * until a round finds nothing new.
  *
- * A pid is only a name: between the read of the table and the stop, its
- * process can exit and the pid go to an unrelated process. So each process is
- * stopped first and kept only if its start time still matches the one read
- * with it; a stopped process cannot exit, so its pid keeps naming it. One
- * that changed is resumed and left alone, and its pid is returned in
- * `skipped`. Group and session ids stay reserved while any member lives, so
- * signals to the group never reach another process.
+ * A pid or group id is only a number, which the OS hands to another process
+ * once its own is gone. So:
+ * - Each process is stopped first and kept only if its start time still
+ *   matches the one read with it; a stopped process cannot exit, so its pid
+ *   keeps naming it. One that changed is resumed and returned in `skipped`.
+ * - The group is signalled by its id only while the leader, checked by start
+ *   time right before, still lives in it.
+ * - Once the leader is gone, a process counts as a member by its group or
+ *   session id only if it started before the leader's exit was seen: the id
+ *   stays reserved while any member lives, so it could have gone to another
+ *   process only after every member exited.
  */
-export function killPosixTree(sessionLeader: number, table: ProcessTable = osTable): { readonly skipped: readonly number[] } {
-  table.signal(-sessionLeader, 'SIGSTOP');
-  const found = new Map<number, string>();
+export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTable): { readonly skipped: readonly number[] } {
+  const id = leader.pid;
+  const leaderAlive = (): boolean => leader.start !== undefined && table.startTimes([id]).get(id) === leader.start;
+  const bound = leader.exitedAt ?? table.now();
+  const groupOurs = leaderAlive();
+  if (groupOurs) table.signal(-id, 'SIGSTOP');
+  const found = new Map<number, number>();
   const skipped: number[] = [];
   for (let round = 0; round < 100; round++) {
     const stopped: ProcessEntry[] = [];
     for (const p of table.list()) {
       if (found.has(p.pid) || p.pid === process.pid || skipped.includes(p.pid)) continue;
-      if (p.pgid !== sessionLeader && p.sid !== sessionLeader && !found.has(p.ppid)) continue;
+      const member = (p.pgid === id || p.sid === id) && (groupOurs || p.start <= bound);
+      if (!member && !found.has(p.ppid)) continue;
       if (table.signal(p.pid, 'SIGSTOP')) stopped.push(p);
     }
     if (stopped.length === 0) break;
@@ -132,7 +179,7 @@ export function killPosixTree(sessionLeader: number, table: ProcessTable = osTab
       }
     }
   }
-  table.signal(-sessionLeader, 'SIGKILL');
+  if (leaderAlive()) table.signal(-id, 'SIGKILL');
   const before = table.startTimes([...found.keys()]);
   for (const [pid, start] of found) {
     if (before.get(pid) === start) table.signal(pid, 'SIGKILL');
