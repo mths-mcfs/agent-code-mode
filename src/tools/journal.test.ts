@@ -267,6 +267,23 @@ describe.skipIf(IS_WINDOWS)('crash recovery', () => {
     expect(read('a.txt')).toBe('a1\n');
   });
 
+  it('never restores a path a protected pattern names after ~, whatever its spelling', async () => {
+    const tx = rt.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('unreachable');
+    await write('a.txt', 'a1\n', tx);
+    abandon(tx);
+    const prevHome = process.env['HOME'];
+    process.env['HOME'] = ws;
+    try {
+      if (os.homedir() !== ws) return; // os.homedir ignores HOME on this platform
+      const recovered = await recoverStaleJournals(stateDir, [ws], ['~/./a.txt']);
+      expect(recovered[0]?.report.skipped).toEqual([{ path: path.join(ws, 'a.txt'), reason: 'error', detail: expect.stringContaining('protected') }]);
+    } finally {
+      process.env['HOME'] = prevHome;
+    }
+    expect(read('a.txt')).toBe('a1\n');
+  });
+
   it.skipIf(IS_WINDOWS)('reads and deletes nothing in a journal directory other users can write', async () => {
     const tx = rt.beginTransaction();
     if (!(tx instanceof FileTransaction)) throw new Error('unreachable');

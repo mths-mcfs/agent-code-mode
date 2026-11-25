@@ -165,12 +165,24 @@ export function windowsPathProblem(target: string): string | null {
   return null;
 }
 
-/** Expands a leading `~` or `~/` to the home directory. */
+function afterTilde(p: string): string | undefined {
+  if (p === '~') return '';
+  if (p.startsWith('~/') || (IS_WINDOWS && p.startsWith('~\\'))) return p.slice(2);
+  return undefined;
+}
+
+/** Expands a leading `~` or `~/` to the home directory, normalized like `path.join` (for path patterns). */
 export function expandTilde(p: string, home: string = os.homedir()): string {
-  if (p === '~') return home;
-  // Not path.join: a `..` after a link must be resolved from the link's target, not removed lexically.
-  if (p.startsWith('~/') || (IS_WINDOWS && p.startsWith('~\\'))) return `${home.endsWith(path.sep) ? home : home + path.sep}${p.slice(2)}`;
-  return p;
+  const rest = afterTilde(p);
+  return rest === undefined ? p : path.join(home, rest);
+}
+
+/** Expands a leading `~` or `~/` and keeps every segment, so a `..` after a link resolves from its target. */
+function expandTildeVerbatim(p: string, home: string = os.homedir()): string {
+  const rest = afterTilde(p);
+  if (rest === undefined) return p;
+  if (rest === '') return home;
+  return `${home.endsWith(path.sep) ? home : home + path.sep}${rest}`;
 }
 
 /** Whether any segment of `absPath` is a `.git` directory (as Windows would also open it). */
@@ -326,7 +338,7 @@ export class Jail {
       const problem = windowsPathProblem(input);
       if (problem) throw new ToolError('outside-workspace', `${input}: ${problem}`);
     }
-    const expanded = expandTilde(input);
+    const expanded = expandTildeVerbatim(input);
     let r: Resolution;
     try {
       r = await resolvePhysical(expanded, this.cwd);
