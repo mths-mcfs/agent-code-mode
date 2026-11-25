@@ -426,10 +426,16 @@ function isGone(err: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
+function depth(p: string): number {
+  return path.resolve(p).split(/[\\/]+/).filter(Boolean).length;
+}
+
+/** Counts levels rather than comparing names: Windows can spell `firstCreated` differently (case, 8.3 names). */
 async function syncParentsOfCreated(dir: string, firstCreated: string | undefined, sync: (dir: string) => Promise<void>): Promise<void> {
+  const created = firstCreated === undefined ? 0 : Math.max(0, depth(dir) - depth(firstCreated));
   let parent = path.dirname(dir);
   await sync(parent);
-  while (firstCreated !== undefined && parent !== path.dirname(firstCreated)) {
+  for (let i = 0; i < created; i++) {
     parent = path.dirname(parent);
     await sync(parent);
   }

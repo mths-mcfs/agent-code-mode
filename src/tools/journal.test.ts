@@ -544,6 +544,24 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     expect(flushed).toContain(journalRoot(stateDir));
   });
 
+  it('flushes each directory mkdir created for the journal once, however mkdir spells the path', async () => {
+    const mkdir = fsp.mkdir.bind(fsp);
+    vi.spyOn(fsp, 'mkdir').mockImplementation(async (p, opts) => {
+      const first = await mkdir(p, opts);
+      return typeof first === 'string' ? first.toUpperCase() : first;
+    });
+    const flushed: string[] = [];
+    const tx = new FileTransaction(stateDir, {
+      syncDir: async (dir) => {
+        flushed.push(dir);
+        if (flushed.length > 50) throw new Error('flushing without end');
+      },
+      removeDir: held,
+    });
+    await write('a.txt', 'a1\n', tx);
+    expect(flushed.filter((d) => d === base || d === stateDir)).toEqual([stateDir, base]);
+  });
+
   it('flushes the journal ancestors again after a flush of them failed', async () => {
     let failing = true;
     const flushed: string[] = [];
