@@ -14,7 +14,10 @@ const hasGit = spawnSync('git', ['--version']).status === 0;
  */
 function isolatedGitEnv(dir: string): NodeJS.ProcessEnv {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
-  return { ...env, GIT_CEILING_DIRECTORIES: path.dirname(dir), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull };
+  // An empty file, not os.devNull: git on Windows cannot open \\.\nul as a config file.
+  const emptyConfig = path.join(dir, 'empty.gitconfig');
+  writeFileSync(emptyConfig, '');
+  return { ...env, GIT_CEILING_DIRECTORIES: path.dirname(dir), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: emptyConfig };
 }
 
 /** Applies `diff` with `git apply` in a scratch directory and returns the result. */
