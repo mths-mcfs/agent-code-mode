@@ -280,9 +280,10 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
   });
 
   it('a process left behind by a call never reaches the network of a later call', async () => {
-    const late = `sleep 2; ${viaProxy('$HTTP_PROXY')} > late.txt; echo alive > survived.txt`;
+    const late = `echo > detached.txt; sleep 2; ${viaProxy('$HTTP_PROXY')} > late.txt; echo alive > survived.txt`;
     const detach = `(perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sh -c ${JSON.stringify(late)} >/dev/null 2>&1 &)`;
-    const first = await bash(`${detach}; echo started`, { containment: writable(false) });
+    // The call ends only once the child has left the session: before that, the sweep still finds it.
+    const first = await bash(`${detach}; until [ -e detached.txt ]; do sleep 0.1; done; echo started`, { containment: writable(false), timeoutMs: 15_000 });
     expect(first.stdout).toBe('started\n');
     const second = await bash(`sleep 4; ${viaProxy('$HTTP_PROXY')}`, { containment: writable(true) });
     expect(second.stdout).toBe('200');
