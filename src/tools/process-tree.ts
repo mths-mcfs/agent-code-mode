@@ -18,8 +18,8 @@ export interface ProcessEntry {
 /** What the sweep reads and signals; the real one is the OS process table. */
 export interface ProcessTable {
   list(): ProcessEntry[];
-  /** Start time of each pid that still exists. */
-  startTimes(pids: readonly number[]): Map<number, number>;
+  /** The entry of each of `pids` that still exists, read without listing the whole table. */
+  read(pids: readonly number[]): Map<number, ProcessEntry>;
   /** The current time on the clock of `start`. */
   now(): number;
   /** The granularity of `start`, in its units: a start time names that whole interval. */
@@ -49,24 +49,28 @@ function ticksPerSecond(): number {
   return clockTicks;
 }
 
+function linuxEntry(pid: number): ProcessEntry | undefined {
+  const f = readProcStat(pid);
+  const [ppid, pgid, sid, start] = [f?.[1], f?.[2], f?.[3], f?.[19]].map(Number);
+  if (ppid === undefined || pgid === undefined || sid === undefined || start === undefined || ![ppid, pgid, sid, start].every(Number.isInteger)) return undefined;
+  return { pid, ppid, pgid, sid, start };
+}
+
 const linuxTable: Omit<ProcessTable, 'signal'> = {
   list() {
     const out: ProcessEntry[] = [];
     for (const name of readdirSync('/proc')) {
       const pid = Number(name);
-      if (!Number.isInteger(pid) || pid <= 0) continue;
-      const f = readProcStat(pid);
-      const [ppid, pgid, sid, start] = [f?.[1], f?.[2], f?.[3], f?.[19]].map(Number);
-      if (ppid === undefined || pgid === undefined || sid === undefined || start === undefined || ![ppid, pgid, sid, start].every(Number.isInteger)) continue;
-      out.push({ pid, ppid, pgid, sid, start });
+      const entry = Number.isInteger(pid) && pid > 0 ? linuxEntry(pid) : undefined;
+      if (entry) out.push(entry);
     }
     return out;
   },
-  startTimes(pids) {
-    const out = new Map<number, number>();
+  read(pids) {
+    const out = new Map<number, ProcessEntry>();
     for (const pid of pids) {
-      const start = Number(readProcStat(pid)?.[19]);
-      if (Number.isInteger(start)) out.set(pid, start);
+      const entry = linuxEntry(pid);
+      if (entry) out.set(pid, entry);
     }
     return out;
   },
@@ -102,9 +106,9 @@ const psTable: Omit<ProcessTable, 'signal'> = {
   list() {
     return psRows(['-A', ...PS_COLUMNS]).map((r) => ({ ...r, sid: null }));
   },
-  startTimes(pids) {
+  read(pids) {
     if (pids.length === 0) return new Map();
-    return new Map(psRows([...PS_COLUMNS, '-p', pids.join(',')]).map((r) => [r.pid, r.start]));
+    return new Map(psRows([...PS_COLUMNS, '-p', pids.join(',')]).map((r) => [r.pid, { ...r, sid: null }]));
   },
   now: () => Date.now(),
   resolution: 1000,
@@ -132,8 +136,8 @@ export interface SessionLeader {
 
 /** Identifies the sentinel `pid` reported, by its start time, if it is in the group `groupId`. */
 export function sentinelOf(pid: number, groupId: number, table: ProcessTable = osTable): { pid: number; start: number } | undefined {
-  const row = table.list().find((p) => p.pid === pid && p.pgid === groupId);
-  return row ? { pid, start: row.start } : undefined;
+  const row = table.read([pid]).get(pid);
+  return row?.pgid === groupId ? { pid, start: row.start } : undefined;
 }
 
 export function processClock(table: ProcessTable = osTable): number {
@@ -165,7 +169,10 @@ export function processClock(table: ProcessTable = osTable): number {
 export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTable): { readonly skipped: readonly number[] } {
   const id = leader.pid;
   const s = leader.sentinel;
-  const sentinelHolds = (): boolean => s !== undefined && table.list().some((p) => p.pid === s.pid && p.start === s.start && p.pgid === id);
+  const sentinelHolds = (): boolean => {
+    const row = s === undefined ? undefined : table.read([s.pid]).get(s.pid);
+    return row !== undefined && row.start === s?.start && row.pgid === id;
+  };
   const groupOurs = leader.exitedAt === undefined || sentinelHolds();
   const bound = groupOurs || leader.exitedAt === undefined ? Infinity : Math.floor(leader.exitedAt / table.resolution) * table.resolution;
   if (groupOurs) table.signal(-id, 'SIGSTOP');
@@ -184,19 +191,21 @@ export function killPosixTree(leader: SessionLeader, table: ProcessTable = osTab
       if (table.signal(p.pid, 'SIGSTOP')) stopped.push(p);
     }
     if (stopped.length === 0) break;
-    const now = table.startTimes(stopped.map((p) => p.pid));
+    const now = table.read(stopped.map((p) => p.pid));
     for (const p of stopped) {
-      if (now.get(p.pid) === p.start) found.set(p.pid, p.start);
+      if (now.get(p.pid)?.start === p.start) found.set(p.pid, p.start);
       else if (now.has(p.pid)) {
         table.signal(p.pid, 'SIGCONT');
         skipped.push(p.pid);
       }
     }
+    // The sentinel never forks, so a round that stopped only it leaves nothing new to find.
+    if (stopped.every((p) => p.pid === s?.pid)) break;
   }
   if (leader.exitedAt === undefined || sentinelHolds()) table.signal(-id, 'SIGKILL');
-  const before = table.startTimes([...found.keys()]);
+  const before = table.read([...found.keys()]);
   for (const [pid, start] of found) {
-    if (before.get(pid) === start) table.signal(pid, 'SIGKILL');
+    if (before.get(pid)?.start === start) table.signal(pid, 'SIGKILL');
     else if (before.has(pid)) skipped.push(pid);
   }
   return { skipped };

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -112,6 +112,22 @@ describe.skipIf(IS_WINDOWS)('bash', () => {
     const r = await bash('set -m; sleep 100 & echo $!');
     const pid = Number(r.stdout.trim());
     expect(await eventually(() => !alive(pid))).toBe(true);
+  });
+
+  it('kills at once on timeout, even while the shell still runs its startup file', async () => {
+    const script = path.join(base, 'slow-startup.sh');
+    writeFileSync(script, 'sleep 0.8\n');
+    const saved = process.env['BASH_ENV'];
+    process.env['BASH_ENV'] = script;
+    try {
+      const started = Date.now();
+      const r = await bash('true', { timeoutMs: 100 });
+      expect([r.timedOut, r.signal]).toEqual([true, 'SIGKILL']);
+      expect(Date.now() - started).toBeLessThan(500);
+    } finally {
+      if (saved === undefined) delete process.env['BASH_ENV'];
+      else process.env['BASH_ENV'] = saved;
+    }
   });
 
   it('arms no kill watchdog when the kill confirms only after bash exited and closed', async () => {
@@ -329,6 +345,33 @@ describe.skipIf(unavailable !== null)('bash containment (OS sandbox)', () => {
     const [own, earlier] = second.stdout.split('\n');
     expect(own).toBe('200');
     expect(earlier).not.toBe('200');
+  });
+
+  it.runIf(process.platform === 'linux')('starts no sentinel outside the PID namespace of a contained call', async () => {
+    const sentinels = (): number[] => {
+      const leaders = new Set<number>();
+      const rows: { pid: number; pgid: number; cmd: string }[] = [];
+      for (const name of readdirSync('/proc')) {
+        try {
+          const fields = readFileSync(`/proc/${name}/stat`, 'utf8').split(') ')[1]?.split(' ') ?? [];
+          const cmd = readFileSync(`/proc/${name}/cmdline`, 'utf8');
+          if (Number(fields[1]) === process.pid) leaders.add(Number(name));
+          rows.push({ pid: Number(name), pgid: Number(fields[2]), cmd });
+        } catch {
+          // Gone while read.
+        }
+      }
+      return rows.filter((r) => leaders.has(r.pgid) && r.cmd.includes('kill -STOP')).map((r) => r.pid);
+    };
+    const call = bash('sleep 1.5', { containment: writable(false) });
+    const seen = new Set<number>();
+    const end = Date.now() + 1200;
+    while (Date.now() < end) {
+      for (const pid of sentinels()) seen.add(pid);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await call;
+    expect([...seen]).toEqual([]);
   });
 
   it('a process left behind by a call never reaches the network of a later call', async () => {

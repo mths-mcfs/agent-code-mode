@@ -1,6 +1,6 @@
 import { ToolError, errorMessage } from '../core/errors.js';
 import type { BashContainment } from '../core/types.js';
-import { bootstrapEnv, spawnAndWait } from './bash.js';
+import { SANDBOX_NEEDS_SENTINEL, bootstrapEnv, spawnAndWait } from './bash.js';
 
 /**
  * OS containment for `bash` through `@anthropic-ai/sandbox-runtime`
@@ -67,7 +67,7 @@ async function probe(m: Manager, shell: string, signal: AbortSignal): Promise<vo
   try {
     const wrapped = asShellScript(await m.wrapWithSandboxArgv('true', shell, { filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } }));
     const env = bootstrapEnv({ ...process.env, ...wrapped.env });
-    const r = await spawnAndWait(wrapped.shell, wrapped.script, env, process.cwd(), PROBE_TIMEOUT_MS, signal, 4096);
+    const r = await spawnAndWait(wrapped.shell, wrapped.script, env, process.cwd(), PROBE_TIMEOUT_MS, signal, 4096, { sentinel: SANDBOX_NEEDS_SENTINEL });
     if (r.exitCode === 0) return;
     const how = r.timedOut ? `no exit within ${PROBE_TIMEOUT_MS} ms` : `exit ${r.exitCode ?? r.signal}`;
     const first = r.stderr.trim().split('\n')[0] ?? '';

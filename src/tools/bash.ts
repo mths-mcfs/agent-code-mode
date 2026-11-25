@@ -105,11 +105,23 @@ export interface CallTree {
   exited(): void;
 }
 
-/** Overrides for tests. */
-export interface SpawnHooks {
+export interface SpawnOptions {
+  /**
+   * Whether to start the call's sentinel (default true). A command inside
+   * Bubblewrap needs none: its PID namespace ends with the call, and a
+   * sentinel outside it would prove nothing about the processes inside.
+   */
+  readonly sentinel?: boolean;
+  /** Overrides for tests. */
   readonly tree?: (child: ChildProcess) => CallTree;
   readonly killWaitMs?: number;
 }
+
+/** Sandboxed commands on Linux run in their own PID namespace. */
+export const SANDBOX_NEEDS_SENTINEL = process.platform !== 'linux';
+
+/** After the shell exited, how long to wait for the sentinel's report it may not have read yet. */
+const SENTINEL_REPORT_MS = 100;
 
 /**
  * Run first on POSIX: starts the call's sentinel, a bash that keeps stopping
@@ -143,7 +155,12 @@ function posixTree(child: ChildProcess): CallTree {
   });
   return {
     kill: async () => {
-      await sentinel;
+      // While the shell is not reaped it holds the group itself: no need to wait for the report.
+      if (leader.exitedAt !== undefined) {
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([sentinel, new Promise<void>((resolve) => (timer = setTimeout(resolve, SENTINEL_REPORT_MS)))]);
+        clearTimeout(timer);
+      }
       return killPosixTree(leader).skipped;
     },
     exited: () => {
@@ -160,7 +177,7 @@ export function spawnAndWait(
   timeoutMs: number,
   signal: AbortSignal,
   cap: number,
-  hooks: SpawnHooks = {},
+  opts: SpawnOptions = {},
 ): Promise<BashResult> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -168,11 +185,12 @@ export function spawnAndWait(
       return;
     }
     const windows = process.platform === 'win32';
-    const args = windows ? ['-c', WINDOWS_GATE, 'bash', script] : ['-c', POSIX_SENTINEL + script];
+    const sentinel = !windows && opts.sentinel !== false;
+    const args = windows ? ['-c', WINDOWS_GATE, 'bash', script] : ['-c', sentinel ? POSIX_SENTINEL + script : script];
     const child = spawn(shell, args, {
       cwd,
       env: windows ? bootstrapEnv(env) : env,
-      stdio: windows ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'pipe'],
+      stdio: windows ? ['pipe', 'pipe', 'pipe'] : sentinel ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       detached: !windows,
       windowsHide: true,
     });
@@ -185,7 +203,7 @@ export function spawnAndWait(
     let startError: ToolError | undefined;
     let killing = false;
     let tree: CallTree;
-    if (hooks.tree) tree = hooks.tree(child);
+    if (opts.tree) tree = opts.tree(child);
     else if (!windows) tree = posixTree(child);
     else {
       const job = startInWindowsJob(child, () => killing).catch((e: unknown) => {
@@ -229,7 +247,7 @@ export function spawnAndWait(
       void killAll().then(
         () => {
           if (settled) return;
-          killWait ??= setTimeout(() => giveUp(`bash did not exit within ${hooks.killWaitMs ?? KILL_WAIT_MS} ms of being killed`), hooks.killWaitMs ?? KILL_WAIT_MS);
+          killWait ??= setTimeout(() => giveUp(`bash did not exit within ${opts.killWaitMs ?? KILL_WAIT_MS} ms of being killed`), opts.killWaitMs ?? KILL_WAIT_MS);
         },
         (e: unknown) => giveUp(errorMessage(e)),
       );
@@ -304,6 +322,8 @@ export async function runBash(effect: BashEffect, signal: AbortSignal, opts: Bas
   }
   return withSandbox(effect.command, shell, effect.cwd, containment, opts.denyWrite ?? [], signal, (wrapped) => {
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-    return spawnAndWait(wrapped.shell, wrapped.script, bootstrapEnv({ ...process.env, ...wrapped.env }), effect.cwd, effect.timeoutMs, signal, cap);
+    return spawnAndWait(wrapped.shell, wrapped.script, bootstrapEnv({ ...process.env, ...wrapped.env }), effect.cwd, effect.timeoutMs, signal, cap, {
+      sentinel: SANDBOX_NEEDS_SENTINEL,
+    });
   });
 }

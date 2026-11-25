@@ -10,12 +10,12 @@ function fakeTable(rows: ProcessEntry[], opts: { reused?: number[]; unstoppable?
   const stoppedOnce = new Set<number>();
   const table: ProcessTable = {
     list: () => rows.filter((r) => !opts.gone?.includes(r.pid)),
-    startTimes: (pids) => {
-      const out = new Map<number, number>();
+    read: (pids) => {
+      const out = new Map<number, ProcessEntry>();
       for (const pid of pids) {
         const row = rows.find((r) => r.pid === pid);
         if (!row || opts.gone?.includes(pid)) continue;
-        out.set(pid, opts.reused?.includes(pid) && stoppedOnce.has(pid) ? row.start + 1 : row.start);
+        out.set(pid, opts.reused?.includes(pid) && stoppedOnce.has(pid) ? { ...row, start: row.start + 1 } : row);
       }
       return out;
     },
