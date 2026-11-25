@@ -1,9 +1,8 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CONTAINED, callAt, claudeServer, codexServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
+import { BASH_SANDBOX_AVAILABLE, callAt, claudeServer, codexServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
 
-/** Example hook bodies (the harness prepends reading the hook JSON into `input`). */
 const BODIES = {
   crash: `throw new Error('example hook crashed');`,
   hang: `setInterval(() => {}, 1000);`,
@@ -74,7 +73,7 @@ describe.runIf(posix)('a hook rewrite (updatedInput) cannot leave the jail', () 
     expect(snapshot(lab.base)).toEqual(before);
   });
 
-  it.runIf(CONTAINED)('Claude: a rewritten bash command is re-checked against the deny rules', async () => {
+  it.runIf(BASH_SANDBOX_AVAILABLE)('Claude: a rewritten bash command is re-checked against the deny rules', async () => {
     lab = makeLab({ 'victim.txt': 'keep\n' });
     const hook = lab.hook(
       'rewrite-bash',
@@ -108,7 +107,7 @@ describe.runIf(posix)('a hook rewrite (updatedInput) cannot leave the jail', () 
 describe.runIf(posix)('the example deny-rm hook blocks a call made inside run', () => {
   const DENY_RM = `if (String(input.tool_input?.command ?? '').includes('rm ')) { process.stderr.write('rm is blocked by the example hook'); process.exit(2); }`;
 
-  it.runIf(CONTAINED)('Claude: write and read pass, rm is denied by the hook, the file survives', async () => {
+  it.runIf(BASH_SANDBOX_AVAILABLE)('Claude: write and read pass, rm is denied by the hook, the file survives', async () => {
     lab = makeLab();
     const hook = lab.hook('deny-rm', DENY_RM);
     server = await claudeServer(lab, {

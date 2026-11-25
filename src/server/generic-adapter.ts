@@ -1,17 +1,9 @@
 import path from 'node:path';
 import type { Decision, HostAdapter, PolicySnapshot, PreparedCall, SessionContext } from '../core/types.js';
 
-/** Why the generic policy refuses mutations; shown in the call log and to the script. */
-export const GENERIC_ASK_REASON =
+export const GENERIC_DENY_REASON =
   'no Claude Code or Codex host was detected (start the server with --host claude or --host codex), so its permission rules and hooks cannot be applied: only read, grep and glob inside the workspace are allowed';
 
-/**
- * The policy for a client that is neither Claude Code nor Codex. The server
- * cannot see that client's rules or hooks, so it allows only what cannot
- * change anything: `read`, `grep` and `glob` inside the workspace roots (the
- * tool runtime's jail enforces the roots). `bash`, `write` and `edit` ask,
- * which the dispatcher turns into a deny.
- */
 export class GenericHostAdapter implements HostAdapter<null> {
   readonly host = 'generic' as const;
   readonly #stateDir: string;
@@ -38,7 +30,7 @@ export class GenericHostAdapter implements HostAdapter<null> {
       case 'bash':
       case 'write':
       case 'edit':
-        return { kind: 'ask', reason: GENERIC_ASK_REASON };
+        return { kind: 'deny', source: 'rule', reason: GENERIC_DENY_REASON };
     }
   }
 

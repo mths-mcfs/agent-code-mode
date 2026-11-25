@@ -8,12 +8,6 @@ import { claudeConfigDir } from './hosts/claude/settings.js';
 import { REGISTERED_SERVER_NAME } from './server/runtime.js';
 import { unifiedDiff } from './tools/diff.js';
 
-/**
- * `agent-code-mode install`: prints (and with `--write` applies) the host
- * configuration that registers the server and, for Claude Code, the
- * companion context hook.
- */
-
 export type InstallHost = 'claude' | 'codex';
 export type InstallScope = 'user' | 'project';
 
@@ -21,14 +15,12 @@ export interface InstallOptions {
   readonly host: InstallHost;
   readonly scope: InstallScope;
   readonly write: boolean;
-  /** Run this checkout's `cli.js` with the current Node instead of `npx -y agent-code-mode` (unpublished builds). */
   readonly local: boolean;
   readonly cwd: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly home: string;
 }
 
-/** One file change `--write` would make. */
 export interface FileChange {
   readonly file: string;
   readonly before: string | null;
@@ -36,22 +28,16 @@ export interface FileChange {
 }
 
 export interface InstallPlan {
-  /** What to show the user: commands, config snippets and notes. */
   readonly text: string;
-  /** Files `--write` changes. */
   readonly changes: readonly FileChange[];
-  /** Commands the user runs themselves (never run by `install`). */
   readonly commands: readonly string[];
-  /** Why `--write` refuses to apply the plan (it then writes nothing). */
   readonly refusals: readonly string[];
 }
 
 const RUN_TOOL = `mcp__${REGISTERED_SERVER_NAME}__run`;
 
-/** Codex tool timeout written by `install`: room for the 120 s default run plus long ones up to 290 s. */
 export const INSTALL_CODEX_TOOL_TIMEOUT_SEC = 300;
 
-/** The command (argv) that starts this package's CLI. */
 export function cliArgv(local: boolean): readonly string[] {
   if (!local) return ['npx', '-y', REGISTERED_SERVER_NAME];
   return [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))];
@@ -97,12 +83,10 @@ function objectAt(obj: Record<string, unknown>, key: string, file: string): Reco
   return parsed.data;
 }
 
-/** The companion hook entry, Claude settings `hooks.PreToolUse` shape. */
 export function companionHookEntry(local: boolean): { matcher: string; hooks: { type: 'command'; command: string }[] } {
   return { matcher: RUN_TOOL, hooks: [{ type: 'command', command: shellLine([...cliArgv(local), 'hook']) }] };
 }
 
-/** Claude settings with the companion hook added (unchanged when an identical command is already registered for the matcher). */
 function withCompanionHook(text: string | null, file: string, local: boolean): string {
   const settings = parseJsonObject(text, file);
   const hooks = objectAt(settings, 'hooks', file);
@@ -120,7 +104,6 @@ function withCompanionHook(text: string | null, file: string, local: boolean): s
   return `${JSON.stringify(next, null, 2)}\n`;
 }
 
-/** The `.mcp.json` server entry for Claude Code. */
 export function mcpJsonEntry(local: boolean): { type: 'stdio'; command: string; args: string[] } {
   const [command = 'npx', ...args] = [...cliArgv(local), 'serve', '--host', 'claude'];
   return { type: 'stdio', command, args };
@@ -138,7 +121,6 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-/** The `[mcp_servers.agent-code-mode]` block for Codex `config.toml`. */
 export function codexServerBlock(local: boolean): string {
   const [command = 'npx', ...args] = [...cliArgv(local), 'serve', '--host', 'codex'];
   return [
@@ -165,20 +147,11 @@ function parseTomlTable(text: string): Record<string, unknown> | Error {
   }
 }
 
-/** The server entry the block declares, as a parsed TOML value. */
 function codexServerEntry(local: boolean): unknown {
   const parsed = parseTomlTable(codexServerBlock(local));
   return parsed instanceof Error ? undefined : TomlTableSchema.safeParse(parsed['mcp_servers']).data?.[REGISTERED_SERVER_NAME];
 }
 
-/**
- * How to add the server block to a Codex config. The existing file is read
- * through a TOML parser, so the table is found however its key is spelled
- * (`agent-code-mode`, `'agent-code-mode'`, `"agent-code-mode"`, dotted or
- * inline). The block is only ever appended, so everything already in the file
- * (comments included) stays byte-identical, and the result is parsed again
- * before it is offered for writing.
- */
 function planCodexConfig(before: string | null, file: string, local: boolean): { after?: string; note?: string; refusal?: string } {
   const current = before === null ? {} : parseTomlTable(before);
   if (current instanceof Error) return { refusal: `${file} is not valid TOML (${current.message.split('\n')[0] ?? ''}); fix it or add the block by hand` };
@@ -202,7 +175,6 @@ function planCodexConfig(before: string | null, file: string, local: boolean): {
 }
 
 
-/** Builds what `install` shows and, with `--write`, changes. */
 export async function planInstall(o: InstallOptions): Promise<InstallPlan> {
   const lines: string[] = [];
   const changes: FileChange[] = [];
@@ -249,7 +221,6 @@ export async function planInstall(o: InstallOptions): Promise<InstallPlan> {
   return { text: `${lines.join('\n')}\n`, changes, commands, refusals };
 }
 
-/** The diff of every change, for showing before `--write` applies it. */
 export function planDiff(plan: InstallPlan): string {
   return plan.changes.map((c) => unifiedDiff(c.file, c.before, c.after)).join('');
 }
@@ -262,7 +233,6 @@ export async function applyPlan(plan: InstallPlan): Promise<void> {
   }
 }
 
-/** Parses `install` arguments. */
 export function parseInstallArgs(
   args: readonly string[],
   base: { readonly cwd: string; readonly env: Readonly<Record<string, string | undefined>>; readonly home?: string },

@@ -155,13 +155,12 @@ export class Dispatcher<P = unknown> {
   readonly #warnings: string[] = [];
   #deniedCount = 0;
   #bashCommits = 0;
-  /** The session cwd as a real path, the form prepared paths take. */
   readonly #realCwd: string;
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
     this.#now = opts.now ?? (() => performance.now());
-    this.#realCwd = realPath(opts.ctx.cwd);
+    this.#realCwd = realPathOrResolved(opts.ctx.cwd);
   }
 
   /** Signal aborted when the dispatcher stops. */
@@ -585,8 +584,7 @@ function isLowering(v: unknown): v is SearchLowering {
   return typeof v === 'object' && v !== null && 'command' in v && typeof v.command === 'string' && v.command !== '' && 'parse' in v && typeof v.parse === 'function';
 }
 
-/** Real path of `p`, or `p` resolved lexically when it does not exist. */
-function realPath(p: string): string {
+function realPathOrResolved(p: string): string {
   try {
     return realpathSync.native(p);
   } catch {
@@ -594,7 +592,6 @@ function realPath(p: string): string {
   }
 }
 
-/** The prepared call with `requestedPath` taken from the call the script made, never from the tool runtime. */
 function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall {
   const { requestedPath: _fromRuntime, ...rest } = prepared;
   const requested = call.tool === 'bash' ? undefined : call.args.path;

@@ -2,7 +2,6 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { claudeServer, makeLab, snapshot, type Lab, type Server } from './harness.js';
 
-/** Scripts that try to reach the host from inside the QuickJS VM. None may have an effect on disk or on the server process. */
 describe('sandbox escape attempts through run', () => {
   let lab: Lab;
   let server: Server;
@@ -10,7 +9,6 @@ describe('sandbox escape attempts through run', () => {
 
   beforeAll(async () => {
     lab = makeLab({ 'a.txt': 'hello\n' });
-    // bypassPermissions: only the sandbox itself stands between the script and the host here.
     server = await claudeServer(lab, {});
     before = snapshot(lab.base);
   });
@@ -61,7 +59,6 @@ describe('sandbox escape attempts through run', () => {
       Array.prototype.push = () => { throw new Error('hijacked'); };
       JSON.parse = () => ({ path: '/etc/passwd' });
       Object.defineProperty(Object.prototype, 'path', { get() { return '../outside/secret.txt'; }, configurable: true });
-      // A binding call whose args inherit a polluted "path": only own properties count.
       let r;
       try { r = await read({}); } catch (e) { r = e.name + ':' + e.code; }
       const w = await write({ path: 'own.txt', content: 'x', ['__proto__']: { path: '../outside/evil.txt' } }).then(() => 'written', (e) => e.name + ':' + e.code);
@@ -72,7 +69,6 @@ describe('sandbox escape attempts through run', () => {
     expect(Object.prototype.hasOwnProperty.call(Object.prototype, 'path')).toBe(false);
     const clean = await server.run(`return { polluted: ({}).polluted, path: ({}).path };`);
     expect(clean.result).toEqual({});
-    // Nothing outside the workspace changed; the only write allowed is the workspace file the script named itself.
     const after = snapshot(lab.base);
     const changed = Object.keys(after).filter((k) => after[k] !== before[k] && !k.startsWith(lab.stateDir));
     expect(changed.every((k) => k === path.join(lab.ws, 'own.txt'))).toBe(true);

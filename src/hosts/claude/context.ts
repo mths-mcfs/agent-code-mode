@@ -163,7 +163,6 @@ function absoluteRoots(roots: readonly string[]): string[] {
   return roots.filter((r) => path.isAbsolute(r));
 }
 
-/** Claude Code: session id from env, tool-use id from `_meta`, the rest from the companion-hook record when present. */
 export class ClaudeContextProvider implements ContextProvider {
   constructor(private readonly store?: HookContextStore) {}
 
@@ -184,7 +183,6 @@ export class ClaudeContextProvider implements ContextProvider {
       } catch {
         record = undefined;
       }
-      // Only a record for this exact call and session is trusted.
       if (record && record.toolUseId === toolUseId && (sessionId === undefined || record.sessionId === sessionId)) {
         b.set('sessionId', record.sessionId, 'ctx-file');
         if (record.cwd !== undefined && path.isAbsolute(record.cwd) && (roots.length === 0 || roots.some((r) => isInside(record.cwd ?? '', r)))) {

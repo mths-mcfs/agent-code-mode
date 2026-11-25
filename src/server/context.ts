@@ -5,7 +5,6 @@ function metaObject(meta: unknown): Record<string, unknown> {
   return meta !== null && typeof meta === 'object' && !Array.isArray(meta) ? Object.fromEntries(Object.entries(meta)) : {};
 }
 
-/** Any other client: cwd from the first absolute MCP root, else the server cwd; everything else default. */
 export class GenericContextProvider implements ContextProvider {
   async resolve(input: ContextInput): Promise<SessionContext> {
     const roots = input.roots.filter((r) => path.isAbsolute(r));

@@ -225,7 +225,6 @@ describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  /** A transaction whose owner is a process that has exited, as after a crash. */
   async function crashedWrite(file: string, content: string): Promise<void> {
     const tools = new NodeToolRuntime({ stateDir });
     const tx = tools.beginTransaction();

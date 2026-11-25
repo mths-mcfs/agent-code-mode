@@ -32,7 +32,6 @@ export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 export interface NodeToolRuntimeOptions {
   /** Server state directory; transaction journals live under `<stateDir>/journal/`. */
   readonly stateDir: string;
-  /** Extra absolute directories the tools may touch besides the session cwd, MCP roots and the policy's `additionalRoots`. */
   readonly additionalRoots?: readonly string[];
   /** Bytes kept of each of bash stdout and stderr. */
   readonly bashOutputCapBytes?: number;
@@ -52,7 +51,6 @@ interface CallMeta {
   readonly identity?: PathIdentity;
   /** For grep and glob: the search path and what it named at prepare. */
   readonly searchTop?: SearchTop;
-  /** For grep and glob: the policy's Read filter. */
   readonly readFilter?: (realAbsPath: string) => boolean;
 }
 

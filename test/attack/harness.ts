@@ -19,28 +19,15 @@ import type { Runtime } from '../../src/server/runtime.js';
 import { NodeToolRuntime } from '../../src/tools/runtime.js';
 import { containmentUnavailableReason } from '../../src/tools/sandbox.js';
 
-/**
- * Attack-suite harness: the real MCP server with the real QuickJS sandbox,
- * the real tool runtime and a real host adapter, configured from fixture
- * files in a temp directory. Every script goes through the `run` tool.
- */
-
 export const posix = process.platform !== 'win32';
 
-/**
- * Whether bash can run inside the OS sandbox here. Claude runs bash only
- * contained or by an exact allow rule, so the cases that need a Claude bash
- * call to run skip without it; CI requires it (`src/tools/bash.test.ts`).
- */
-export const CONTAINED = (await containmentUnavailableReason()) === null;
+export const BASH_SANDBOX_AVAILABLE = (await containmentUnavailableReason()) === null;
 
-/** Shape of the JSON text the `run` tool returns. */
 export const RunOutputSchema = z.looseObject({
   ok: z.boolean(),
   result: z.unknown().optional(),
   error: z.looseObject({ name: z.string(), message: z.string(), kind: z.string() }).optional(),
   logs: z.array(z.string()).optional(),
-  // Long call logs are shaped: entries past the cap become a string note, which is dropped here.
   calls: z
     .array(z.union([z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() }), z.string()]))
     .transform((xs) => xs.filter((x) => typeof x !== 'string'))
@@ -53,20 +40,15 @@ export const RunOutputSchema = z.looseObject({
 export type RunOutput = z.infer<typeof RunOutputSchema>;
 
 export interface Lab {
-  /** Temp base: holds ws/, outside/, home/ and state/. */
   readonly base: string;
-  /** Workspace (session cwd). */
   readonly ws: string;
-  /** A directory outside the workspace with a file the script must never touch. */
   readonly outside: string;
   readonly home: string;
   readonly stateDir: string;
-  /** Writes an example hook script (Node) and returns its absolute path. */
   hook(name: string, body: string): string;
   cleanup(): void;
 }
 
-/** Creates the temp layout. `files` are written under the workspace. */
 export function makeLab(files: Record<string, string> = {}): Lab {
   const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-attack-')));
   const ws = path.join(base, 'ws');
@@ -75,7 +57,6 @@ export function makeLab(files: Record<string, string> = {}): Lab {
   const stateDir = path.join(base, 'state');
   const hooksDir = path.join(base, 'hooks');
   for (const d of [ws, outside, home, hooksDir]) mkdirSync(d, { recursive: true });
-  // Private, as the server creates it: companion-hook records are trusted only there.
   mkdirSync(stateDir, { mode: 0o700 });
   mkdirSync(path.join(stateDir, 'ctx'), { mode: 0o700 });
   writeFileSync(path.join(outside, 'secret.txt'), 'outside secret\n');
@@ -98,7 +79,6 @@ export function makeLab(files: Record<string, string> = {}): Lab {
   };
 }
 
-/** Every entry under `dir` (links not followed) with its content, to compare before and after an attack. */
 export function snapshot(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   const walk = (d: string): void => {
@@ -117,9 +97,7 @@ export function snapshot(dir: string): Record<string, string> {
 }
 
 export interface Server {
-  /** Calls `run` and returns the parsed result. */
   run(code: string, opts?: { transaction?: boolean; timeoutMs?: number; signal?: AbortSignal }): Promise<RunOutput>;
-  /** Calls `run` and returns the raw text of the response. */
   runText(code: string): Promise<string>;
   close(): Promise<void>;
 }
@@ -189,7 +167,6 @@ export async function claudeServer(lab: Lab, settings: Record<string, unknown>, 
   return serve(runtime, lab, meta, true);
 }
 
-/** A Codex command hook entry for `hooks.json`. */
 export interface CodexHook {
   readonly matcher?: string;
   readonly script: string;
@@ -220,7 +197,6 @@ export async function codexServer(
     })
     .join('\n');
   const sandboxMode = opts.sandboxMode ?? 'danger-full-access';
-  // The turn metadata can only narrow the configured sandbox mode, so the mode is configured too.
   writeFileSync(path.join(codexHome, 'config.toml'), `approval_policy = "never"\nsandbox_mode = "${sandboxMode}"\n${opts.extraToml ?? ''}\n[features]\nhooks = true\n\n${state}`);
   if (opts.rules) writeFileSync(path.join(codexHome, 'rules', 'default.rules'), opts.rules);
   const io = { ...nodeConfigIo({ CODEX_HOME: codexHome }), home: lab.home, systemDir: path.join(lab.base, 'etc-codex'), parentArgv: () => ['codex', 'exec'] };
@@ -240,7 +216,6 @@ export async function codexServer(
   return serve(runtime, lab, async () => meta, false);
 }
 
-/** The call-log entry of the n-th call (1-based). */
 export function callAt(out: RunOutput, n: number): { decision: string; reason?: string | undefined } | undefined {
   return out.calls?.find((c) => c.id === `c${n}`);
 }

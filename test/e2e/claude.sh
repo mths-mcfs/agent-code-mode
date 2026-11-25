@@ -28,7 +28,6 @@ cli="$repo/dist/cli.js"
 cp "$repo/test/e2e/deny-rm.sh" "$project/.claude/deny-rm.sh"
 (cd "$project" && node "$cli" install --host claude --scope project --local --write >"$work/install.txt")
 
-# Add the example hook next to the companion hook that install wrote, turn on the sandbox, and add the run log to the MCP entry.
 node - "$project" "$log" <<'JS'
 const fs = require('node:fs');
 const [project, log] = process.argv.slice(2);

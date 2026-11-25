@@ -49,18 +49,11 @@ export interface McpServerOptions {
   readonly createRuntime?: RuntimeFactory;
   /** How long to wait for `roots/list`. */
   readonly rootsTimeoutMs?: number;
-  /** Restore journals that crashed server processes left, at start and once per new workspace root. Default true. */
   readonly recoverJournals?: boolean;
 }
 
-/** Env var naming an absolute file where the server appends one JSON line per run and per crash recovery. Off when unset. */
 export const RUN_LOG_ENV = 'AGENT_CODE_MODE_LOG';
 
-/**
- * Protected paths crash recovery never restores into, besides the run's own
- * policy: host configuration, hooks, MCP registrations, git internals and the
- * state dir. Startup recovery has no policy yet and uses only these.
- */
 export function recoveryProtectedPaths(stateDir: string, home: string = os.homedir()): string[] {
   return [
     path.join(stateDir, '**'),
@@ -74,7 +67,6 @@ export function recoveryProtectedPaths(stateDir: string, home: string = os.homed
   ];
 }
 
-/** What one recovery pass did, in the run log's shape. */
 interface RecoveryLog {
   readonly trigger: 'startup' | 'first-run';
   readonly roots: readonly string[];
@@ -101,7 +93,6 @@ function recoveryLog(trigger: RecoveryLog['trigger'], roots: readonly string[], 
   };
 }
 
-/** Warnings for the model about what recovery restored or left alone. Finalized journals are only cleanup. */
 function recoveryWarnings(log: RecoveryLog): string[] {
   return log.journals.flatMap((j) => [
     ...(j.restored.length > 0 ? [`an earlier run (${j.id}) was cut off mid-transaction; restored: ${j.restored.join(', ')}`] : []),
@@ -156,7 +147,6 @@ export function createMcpServer(opts: McpServerOptions): Server {
   const factory = opts.createRuntime ?? ((host: HostKind) => createRuntime(host, { env, serverCwd, stateDir }));
   const runLog = env[RUN_LOG_ENV];
   const recoverJournals = opts.recoverJournals ?? true;
-  /** One recovery per workspace root; a run waits for the passes of its roots, including the startup pass. */
   const recoveries = new Map<string, Promise<RecoveryLog | undefined>>();
   const recover = (trigger: RecoveryLog['trigger'], roots: readonly string[], protectedPaths: () => Promise<readonly string[]>): Promise<RecoveryLog | undefined> => {
     const pass = (async () => {
@@ -171,11 +161,6 @@ export function createMcpServer(opts: McpServerOptions): Server {
   };
   if (recoverJournals) void recover('startup', [serverCwd], async () => recoveryProtectedPaths(stateDir));
   let startupReported = false;
-  /**
-   * Waits for the recovery of every root of this run, starting a pass for
-   * roots not seen yet, and returns the passes this run reports: the one it
-   * started and, for the first run, the startup pass.
-   */
   const recoverFor = async (ctx: SessionContext, runtime: Runtime): Promise<RecoveryLog[]> => {
     if (!recoverJournals) return [];
     const roots = [...new Set([ctx.cwd, ...ctx.roots])];

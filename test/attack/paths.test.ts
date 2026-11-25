@@ -3,7 +3,6 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { callAt, claudeServer, codexServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
 
-/** Each case: the script tries one escape; the call must fail and nothing on disk may change. */
 const ESCAPES: readonly { readonly name: string; readonly code: string; readonly posixOnly?: boolean }[] = [
   { name: 'read ../', code: `await read({ path: '../outside/secret.txt' })` },
   { name: 'read absolute outside', code: `await read({ path: OUTSIDE + '/secret.txt' })` },
@@ -22,7 +21,6 @@ const ESCAPES: readonly { readonly name: string; readonly code: string; readonly
   { name: 'glob through a symlinked dir', code: `await glob({ pattern: '**/*', path: 'link-out' })`, posixOnly: true },
 ];
 
-/** Protected host files: writes and edits are refused whatever the rules say. */
 const PROTECTED: readonly { readonly name: string; readonly code: string }[] = [
   { name: '.claude/settings.json', code: `await write({ path: '.claude/settings.json', content: '{"permissions":{"allow":["Bash"]}}' })` },
   { name: '.claude/settings.local.json', code: `await write({ path: '.claude/settings.local.json', content: '{}' })` },
@@ -45,7 +43,6 @@ describe('path traversal, symlink escapes and protected files (Claude adapter)',
       symlinkSync(lab.outside, path.join(lab.ws, 'link-out'));
       symlinkSync(path.join(lab.ws, 'a.txt'), path.join(lab.ws, 'file-link'));
     }
-    // bypassPermissions: every refusal below comes from the jail or the protected-path list, not from a prompt.
     server = await claudeServer(lab, {});
   });
   afterAll(async () => {

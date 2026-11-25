@@ -2,7 +2,8 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ERROR_CAP_CHARS, SUCCESS_CAP_CHARS } from '../../src/core/output.js';
-import { CONTAINED, claudeServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
+import { DEFAULT_STOP_GRACE_MS } from '../../src/core/run.js';
+import { BASH_SANDBOX_AVAILABLE, claudeServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
 
 let lab: Lab | undefined;
 let server: Server | undefined;
@@ -71,7 +72,6 @@ describe('overlapping transactional runs on the same workspace', () => {
     writeFileSync(path.join(lab.ws, 'gateB'), 'go');
     expect((await b).ok).toBe(false);
     expect(readFileSync(path.join(lab.ws, 'x'), 'utf8')).toBe('original');
-    // Once the first run ended, the file is free again.
     const later = await server.run(`await write({ path: 'x', content: 'C' }); throw new Error('abort C');`, { transaction: true });
     expect(later.ok).toBe(false);
     expect(readFileSync(path.join(lab.ws, 'x'), 'utf8')).toBe('original');
@@ -85,28 +85,23 @@ describe('cancellation', () => {
     const controller = new AbortController();
     const pending = server.run(`for (let i = 0; ; i++) await write({ path: 'out/f' + i + '.txt', content: String(i) });`, { signal: controller.signal });
     const outDir = path.join(lab.ws, 'out');
-    // Only completed targets count: writes land by an atomic rename, so f<n>.txt exists only once it is whole;
-    // the in-flight `.f<n>.txt.acm-*.tmp` temp file is not a write.
     const completed = (): string[] => (existsSync(outDir) ? readdirSync(outDir).filter((n) => /^f\d+\.txt$/.test(n)).sort() : []);
     const temps = (): string[] => (existsSync(outDir) ? readdirSync(outDir).filter((n) => n.endsWith('.tmp')) : []);
-    // Explicit signal: the third file of the sequence is complete (writes are serialized, so f0..f2 are too).
     const third = path.join(outDir, 'f2.txt');
     for (let i = 0; i < 600 && !existsSync(third); i++) await sleep(25);
     expect(existsSync(third)).toBe(true);
     controller.abort();
     await expect(pending).rejects.toThrow();
-    // The dispatcher's settle grace is 2 s: a commit already running when the run stopped may still land within it.
-    await sleep(3_000);
+    await sleep(DEFAULT_STOP_GRACE_MS + 1_000);
     const settled = completed();
     expect(settled.length).toBeGreaterThanOrEqual(3);
     await sleep(2_000);
-    // Strict: after the run stopped and settled, not one more file and no write in progress.
     expect(completed()).toEqual(settled);
     expect(temps()).toEqual([]);
     for (const name of settled) expect(readFileSync(path.join(outDir, name), 'utf8')).toBe(name.slice(1, -4));
   });
 
-  it.runIf(posix && CONTAINED)('a cancelled bash call is killed and its later effect never happens', async () => {
+  it.runIf(posix && BASH_SANDBOX_AVAILABLE)('a cancelled bash call is killed and its later effect never happens', async () => {
     const { lab, server } = await start({});
     const controller = new AbortController();
     const pending = server.run(`await bash({ command: 'sleep 2 && echo late > late.txt' });`, { signal: controller.signal });
@@ -132,7 +127,7 @@ describe('oversized outputs are capped', () => {
     expect(text).toMatch(/overflow/i);
   });
 
-  it.runIf(posix && CONTAINED)('bash output is cut and flagged as truncated', async () => {
+  it.runIf(posix && BASH_SANDBOX_AVAILABLE)('bash output is cut and flagged as truncated', async () => {
     const { server } = await start({});
     const out = await server.run(`const r = await bash({ command: 'head -c 20000000 /dev/zero | tr "\\\\0" a' }); return { len: r.stdout.length, truncated: r.truncated };`);
     expect(out.ok).toBe(true);

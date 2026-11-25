@@ -26,7 +26,6 @@ afterEach(() => {
 
 function value<T>(reply: CallReply): T {
   if (!reply.ok) throw new Error(`expected success, got ${JSON.stringify(reply.error)}`);
-  // The test knows which tool it called.
   return reply.value as T;
 }
 

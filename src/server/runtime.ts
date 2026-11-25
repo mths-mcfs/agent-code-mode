@@ -9,7 +9,6 @@ import { NodeToolRuntime } from '../tools/runtime.js';
 import { GenericContextProvider } from './context.js';
 import { GenericHostAdapter } from './generic-adapter.js';
 
-/** Name the server is registered under in the host configs (`mcp__<name>__run`, `[mcp_servers.<name>]`). */
 export const REGISTERED_SERVER_NAME = 'agent-code-mode';
 
 /** The components that serve `run` for one host. */
@@ -28,7 +27,6 @@ export type RuntimeFactory = (host: HostKind) => Runtime;
 /** Codex `tool_timeout_sec` assumed when the config does not set it (the documented default). */
 export const CODEX_ASSUMED_TOOL_TIMEOUT_SEC = 60;
 
-/** Margin kept below Codex's tool timeout so the run returns its own result before Codex gives up on the call. */
 export const CODEX_TIMEOUT_MARGIN_MS = 10_000;
 
 /**
@@ -48,12 +46,6 @@ export interface RuntimeOptions {
   readonly stateDir: string;
 }
 
-/**
- * Builds the runtime for a host: the QuickJS-ng sandbox, the Node tool
- * runtime and the host's own adapter and context provider. A `generic` host
- * (neither detected nor given with `--host`) gets a built-in policy that
- * allows reads inside the workspace only.
- */
 export function createRuntime(host: HostKind, opts: RuntimeOptions): Runtime {
   const { env, stateDir } = opts;
   const tools = new NodeToolRuntime({ stateDir });

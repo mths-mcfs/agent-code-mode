@@ -86,13 +86,6 @@ export interface ClaudePolicy {
   /** `blockReadsOutsideWorkingDirectories` / `blockWritesOutsideWorkingDirectories` from any source. */
   readonly blockReadsOutside: boolean;
   readonly blockWritesOutside: boolean;
-  /**
-   * Whether a Read deny or ask rule covers a real absolute path. Exposed to
-   * the tool runtime as `PolicySnapshot.readFilter`, which drops such files
-   * from grep and glob results: a recursive search otherwise returns what
-   * `read` would refuse.
-   */
-  readonly isReadDenied: (absPath: string) => boolean;
 }
 
 export interface ClaudeHostAdapterOptions {
@@ -116,11 +109,6 @@ function governs(rule: Rule, tool: NativeToolName): boolean {
   return false;
 }
 
-/**
- * Paths a file call touches: the path as the script wrote it (resolved
- * lexically against the cwd, `~` expanded, symlinks not followed), the
- * normalized path in args and the real path of the effect.
- */
 function callPaths(prepared: PreparedCall, cwd: string, home: string): string[] {
   const written = prepared.requestedPath === undefined ? [] : [resolveWritten(prepared.requestedPath, cwd, home)];
   switch (prepared.tool) {
@@ -147,7 +135,6 @@ type Verdict = 'match' | 'maybe' | 'no';
 interface CallView {
   readonly prepared: PreparedCall;
   readonly native: NativeCall;
-  /** `callPaths` of the call. */
   readonly paths: readonly string[];
   readonly analysis: BashAnalysis | undefined;
 }
@@ -598,9 +585,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const canonical = await Promise.all(lexicalProtected.map(canonicalPatterns));
     const protectedPaths = [...new Set([...lexicalProtected, ...canonical.flat()])];
 
-    // Read rules that refuse a path: deny, and ask (an ask is a deny here).
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
-    const isReadDenied = (absPath: string): boolean =>
+    const isReadRestricted = (absPath: string): boolean =>
       readRestrictions.some((r) => r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)));
 
     return {
@@ -608,7 +594,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       bashContainment,
       protectedPaths,
       additionalRoots: [...new Set(additionalDirs)],
-      readFilter: (realAbsPath: string): boolean => !isReadDenied(realAbsPath),
+      readFilter: (realAbsPath: string): boolean => !isReadRestricted(realAbsPath),
       payload: {
         projectRoot,
         cwd: sessionCwd,
@@ -627,7 +613,6 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         sandboxLimitsWrites,
         blockReadsOutside,
         blockWritesOutside,
-        isReadDenied,
       },
     };
   }

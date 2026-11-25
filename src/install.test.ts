@@ -47,7 +47,6 @@ describe('install', () => {
     });
     const mcp: unknown = JSON.parse(readFileSync(path.join(project, '.mcp.json'), 'utf8'));
     expect(mcp).toEqual({ mcpServers: { 'agent-code-mode': { type: 'stdio', command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'claude'] } } });
-    // Idempotent: a second run changes nothing.
     expect((await planInstall(opts({}))).changes).toEqual([]);
   });
 
@@ -77,7 +76,6 @@ describe('install', () => {
     });
     const io = { ...nodeConfigIo({ CODEX_HOME: codexHome }), home, systemDir: path.join(base, 'etc'), parentArgv: () => undefined };
     expect(codexToolTimeoutSec(project, 'agent-code-mode', io)).toBe(300);
-    // Already configured: --write leaves it alone.
     expect((await planInstall(opts({ host: 'codex', scope: 'user', env: { CODEX_HOME: codexHome } }))).changes).toEqual([]);
   });
 

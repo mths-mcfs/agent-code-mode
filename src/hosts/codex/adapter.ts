@@ -451,11 +451,6 @@ function parentAwareEnv(): Record<string, string | undefined> {
   return env;
 }
 
-/**
- * `mcp_servers.<serverName>.tool_timeout_sec` as the Codex configuration for
- * `cwd` sets it (the layers `loadPolicy` reads), or undefined when it is not
- * set, not a positive number, or the configuration cannot be loaded.
- */
 export function codexToolTimeoutSec(cwd: string, serverName: string, io: ConfigIo = nodeConfigIo(parentAwareEnv())): number | undefined {
   let merged;
   try {

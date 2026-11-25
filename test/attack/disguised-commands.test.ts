@@ -1,9 +1,8 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { CONTAINED, callAt, claudeServer, codexServer, makeLab, posix, type Lab, type Server } from './harness.js';
+import { BASH_SANDBOX_AVAILABLE, callAt, claudeServer, codexServer, makeLab, posix, type Lab, type Server } from './harness.js';
 
-/** `rm` dressed up so a naive prefix match misses it. Every one must be denied and `victim.txt` must survive. */
 const DISGUISES: readonly string[] = [
   `rm -f victim.txt`,
   `env -S 'rm -f victim.txt'`,
@@ -44,7 +43,7 @@ function suite(name: string, start: (lab: Lab) => Promise<Server>): void {
       lab.cleanup();
     });
 
-    it.runIf(CONTAINED)('runs a harmless command (control)', async () => {
+    it.runIf(BASH_SANDBOX_AVAILABLE)('runs a harmless command (control)', async () => {
       const out = await server.run(`return (await bash({ command: 'echo ok' })).stdout`);
       expect(out.result).toBe('ok\n');
     });
