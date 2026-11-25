@@ -286,6 +286,23 @@ describe.runIf(IS_WINDOWS)('bash on Windows', { timeout: 60_000 }, () => {
     expect(alive(pidOf('orphan.pid'))).toBe(false);
   });
 
+  it('refuses bash when the job helper cannot list the processes to put in the job', async () => {
+    const restartHelper = async (): Promise<void> => {
+      const pid = windowsJobHelperPid();
+      if (pid !== undefined) process.kill(pid);
+      expect(await eventually(() => windowsJobHelperPid() === undefined, 10_000)).toBe(true);
+    };
+    await restartHelper();
+    process.env['ACM_TEST_JOB_SNAPSHOT_FAILS'] = '1';
+    try {
+      await expect(bash('echo ran > ran.txt')).rejects.toMatchObject({ code: 'tool-error', message: expect.stringMatching(/CreateToolhelp32Snapshot/) });
+      expect(existsSync(path.join(ws, 'ran.txt'))).toBe(false);
+    } finally {
+      delete process.env['ACM_TEST_JOB_SNAPSHOT_FAILS'];
+      await restartHelper();
+    }
+  });
+
   it('after a normal exit leaves no background process behind', async () => {
     const r = await bash(`sleep 100 & ${WINPID}`);
     const pid = Number(r.stdout.trim());

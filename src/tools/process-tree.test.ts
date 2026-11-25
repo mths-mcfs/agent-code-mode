@@ -110,6 +110,10 @@ describe('Windows job helper protocol', () => {
     await expect(job.kill()).rejects.toThrow(/still running/);
   });
 
+  it('refuses an attach the helper reports as failed, such as a process snapshot it could not take', async () => {
+    await expect(attachJob(42, helper({ attach: 'err CreateToolhelp32Snapshot failed (error 5)' }))).rejects.toThrow(/CreateToolhelp32Snapshot failed/);
+  });
+
   it('refuses answers outside the protocol', async () => {
     for (const bad of ['ok', 'ok 0', 'ok 7 extra', 'yes', 'err ']) {
       await expect(attachJob(42, helper({ attach: bad })), bad).rejects.toThrow();

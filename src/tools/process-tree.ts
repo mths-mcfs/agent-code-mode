@@ -271,7 +271,8 @@ public static class AcmJobs {
 
   static List<KeyValuePair<uint, uint>> Snapshot() {
     var all = new List<KeyValuePair<uint, uint>>();
-    IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    // Tests set this to make the snapshot fail as Windows can, to prove Attach then refuses.
+    IntPtr snap = Environment.GetEnvironmentVariable("ACM_TEST_JOB_SNAPSHOT_FAILS") == "1" ? new IntPtr(-1) : CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == new IntPtr(-1)) return all;
     var e = new ProcessEntry(); e.dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry));
     for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e)) all.Add(new KeyValuePair<uint, uint>(e.th32ProcessID, e.th32ParentProcessID));
