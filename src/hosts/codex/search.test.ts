@@ -65,8 +65,8 @@ describe('parsing the rg output', () => {
   });
 
   it('reports output cut by the runtime cap as truncated and drops the cut record', () => {
-    expect(parseGrep(grep({ maxResults: 9 }), out(`${match('/w/a', 1, 'x')}{"type":"ma`, { truncated: true, filtered: 0 }))).toEqual({ matches: [{ file: '/w/a', line: 1, text: 'x' }], truncated: true, filtered: 0 });
-    expect(parseGlob(glob({ maxResults: 9 }), out('/w/a\0/w/b\0/w/partia', { truncated: true, filtered: 0 }))).toEqual({ files: ['/w/a', '/w/b'], truncated: true, filtered: 0 });
+    expect(parseGrep(grep({ maxResults: 9 }), out(`${match('/w/a', 1, 'x')}{"type":"ma`, { truncated: true }))).toEqual({ matches: [{ file: '/w/a', line: 1, text: 'x' }], truncated: true, filtered: 0 });
+    expect(parseGlob(glob({ maxResults: 9 }), out('/w/a\0/w/b\0/w/partia', { truncated: true }))).toEqual({ files: ['/w/a', '/w/b'], truncated: true, filtered: 0 });
   });
 
   it('keeps names with newlines, clips long lines and decodes non-UTF-8 lines', () => {

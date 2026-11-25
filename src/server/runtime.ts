@@ -1,9 +1,16 @@
 import type { ContextProvider, HostAdapter, HostKind, Sandbox, ToolRuntime } from '../core/types.js';
 import { MAX_RUN_TIMEOUT_MS } from '../core/schemas.js';
-import { FakeSandbox } from '../testing/fake-sandbox.js';
-import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
-import { StaticHostAdapter } from '../testing/static-host-adapter.js';
-import { ClaudeContextProvider, CodexContextProvider, GenericContextProvider } from './context.js';
+import { ClaudeHostAdapter } from '../hosts/claude/adapter.js';
+import { createClaudeContextProvider } from '../hosts/claude/context.js';
+import { CodexHostAdapter, codexToolTimeoutSec } from '../hosts/codex/adapter.js';
+import { CodexContextProvider } from '../hosts/codex/context.js';
+import { QuickJsSandbox } from '../sandbox/quickjs-sandbox.js';
+import { NodeToolRuntime } from '../tools/runtime.js';
+import { GenericContextProvider } from './context.js';
+import { GenericHostAdapter } from './generic-adapter.js';
+
+/** Name the server is registered under in the host configs (`mcp__<name>__run`, `[mcp_servers.<name>]`). */
+export const REGISTERED_SERVER_NAME = 'agent-code-mode';
 
 /** The components that serve `run` for one host. */
 export interface Runtime {
@@ -18,29 +25,66 @@ export interface Runtime {
 
 export type RuntimeFactory = (host: HostKind) => Runtime;
 
-/**
- * Codex's documented MCP tool timeout is 60 s and progress notifications do
- * not extend it, so runs are capped below it.
- */
-export const CODEX_MAX_TIMEOUT_MS = 55_000;
+/** Codex `tool_timeout_sec` assumed when the config does not set it (the documented default). */
+export const CODEX_ASSUMED_TOOL_TIMEOUT_SEC = 60;
+
+/** Margin kept below Codex's tool timeout so the run returns its own result before Codex gives up on the call. */
+export const CODEX_TIMEOUT_MARGIN_MS = 10_000;
 
 /**
- * Builds the runtime for a host. Today it returns the test fakes (the
- * sandbox, host adapters and tool runtime are built in separate parts);
- * the integration part switches each piece to the real implementation.
+ * Run timeout cap under Codex: `tool_timeout_sec` minus 10 s, because
+ * progress notifications do not extend Codex's tool timeout. Never below 1 s
+ * nor above the server-wide cap.
  */
-export function createRuntime(host: HostKind): Runtime {
-  const contextProvider = host === 'claude' ? new ClaudeContextProvider() : host === 'codex' ? new CodexContextProvider() : new GenericContextProvider();
-  return {
-    host,
-    contextProvider,
-    adapter: new StaticHostAdapter({
-      host,
-      recordCalls: false,
-      rules: [(p) => (p.tool === 'bash' && /^\s*rm\s/.test(p.effect.command) ? { kind: 'deny', reason: 'rm is denied by the placeholder policy' } : undefined)],
-    }),
-    tools: new MemoryToolRuntime({ recordCalls: false }),
-    sandbox: new FakeSandbox({ recordRuns: false }),
-    maxTimeoutMs: host === 'codex' ? CODEX_MAX_TIMEOUT_MS : MAX_RUN_TIMEOUT_MS,
-  };
+export function codexMaxTimeoutMs(toolTimeoutSec: number | undefined): number {
+  const seconds = toolTimeoutSec ?? CODEX_ASSUMED_TOOL_TIMEOUT_SEC;
+  return Math.max(1_000, Math.min(MAX_RUN_TIMEOUT_MS, Math.floor(seconds * 1000) - CODEX_TIMEOUT_MARGIN_MS));
+}
+
+export interface RuntimeOptions {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  /** Server process cwd (Codex starts the server in the session cwd). */
+  readonly serverCwd: string;
+  readonly stateDir: string;
+}
+
+/**
+ * Builds the runtime for a host: the QuickJS-ng sandbox, the Node tool
+ * runtime and the host's own adapter and context provider. A `generic` host
+ * (neither detected nor given with `--host`) gets a built-in policy that
+ * allows reads inside the workspace only.
+ */
+export function createRuntime(host: HostKind, opts: RuntimeOptions): Runtime {
+  const { env, stateDir } = opts;
+  const tools = new NodeToolRuntime({ stateDir });
+  const sandbox = new QuickJsSandbox();
+  switch (host) {
+    case 'claude':
+      return {
+        host,
+        contextProvider: createClaudeContextProvider({ stateDir }),
+        adapter: new ClaudeHostAdapter({ env, stateDir }),
+        tools,
+        sandbox,
+        maxTimeoutMs: MAX_RUN_TIMEOUT_MS,
+      };
+    case 'codex':
+      return {
+        host,
+        contextProvider: new CodexContextProvider(),
+        adapter: new CodexHostAdapter({ stateDir }),
+        tools,
+        sandbox,
+        maxTimeoutMs: codexMaxTimeoutMs(codexToolTimeoutSec(opts.serverCwd, REGISTERED_SERVER_NAME)),
+      };
+    case 'generic':
+      return {
+        host,
+        contextProvider: new GenericContextProvider(),
+        adapter: new GenericHostAdapter({ stateDir }),
+        tools,
+        sandbox,
+        maxTimeoutMs: MAX_RUN_TIMEOUT_MS,
+      };
+  }
 }

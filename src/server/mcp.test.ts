@@ -1,15 +1,23 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Sandbox, SessionContext } from '../core/types.js';
 import { FakeSandbox } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter } from '../testing/static-host-adapter.js';
-import { ClaudeContextProvider, CodexContextProvider, GenericContextProvider } from './context.js';
-import { PLACEHOLDER_EXAMPLE, createMcpServer } from './mcp.js';
+import { ClaudeContextProvider } from '../hosts/claude/context.js';
+import { CodexContextProvider } from '../hosts/codex/context.js';
+import { FileTransaction } from '../tools/journal.js';
+import { NodeToolRuntime } from '../tools/runtime.js';
+import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
+import { GenericContextProvider } from './context.js';
+import { RUN_LOG_ENV, createMcpServer } from './mcp.js';
 import type { Runtime } from './runtime.js';
 
 const root = os.tmpdir();
@@ -18,7 +26,7 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; sandbox?: Sandbox; defaultRuntime?: boolean } = {}) {
+async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; sandbox?: Sandbox } = {}) {
   const seen: SessionContext[] = [];
   const tools = new MemoryToolRuntime({ root, files: { 'notes.txt': 'hello\n' } });
   const adapter = new StaticHostAdapter({
@@ -42,7 +50,8 @@ async function connect(opts: { env?: Record<string, string>; host?: 'claude' | '
     env: opts.env ?? {},
     serverCwd: root,
     stateDir: `${root}/acm-test-state`,
-    ...(opts.defaultRuntime ? {} : { createRuntime: runtime }),
+    createRuntime: runtime,
+    recoverJournals: false,
     ...(opts.host ? { host: opts.host } : {}),
   });
   const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
@@ -166,19 +175,6 @@ describe('MCP server', () => {
     expect(textOf(invalid).length).toBeLessThanOrEqual(9_500);
   });
 
-  it('describes the placeholder runtime it serves by default and runs its example', async () => {
-    const { client } = await connect({ defaultRuntime: true });
-    expect(client.getInstructions()).toContain(`Example code: ${PLACEHOLDER_EXAMPLE}`);
-    expect(client.getInstructions()).not.toContain('async JavaScript function');
-    const [tool] = (await client.listTools()).tools;
-    expect(tool?.description).toContain('placeholder');
-    expect(JSON.stringify(tool?.inputSchema)).not.toContain('JavaScript');
-
-    const result = await client.callTool({ name: 'run', arguments: { code: PLACEHOLDER_EXAMPLE } });
-    expect(result.isError).toBe(false);
-    expect(JSON.parse(textOf(result))).toMatchObject({ ok: true, result: [{ created: true }, { content: 'hello\n' }] });
-  });
-
   it('stops a fake script at its deadline before a later write, even when no timer could fire', async () => {
     let clock = 0;
     const { client, tools } = await connect({ sandbox: new FakeSandbox({ now: () => (clock += 1_000) }) });
@@ -196,5 +192,102 @@ describe('MCP server', () => {
     expect(textOf(bad)).toContain('invalid run arguments');
     const unknown = await client.callTool({ name: 'nope', arguments: {} });
     expect(unknown.isError).toBe(true);
+  });
+});
+
+async function connectReal(opts: { serverCwd: string; stateDir: string; roots?: readonly string[]; env?: Record<string, string> }) {
+  const server = createMcpServer({ version: '0.0.0-test', env: opts.env ?? {}, serverCwd: opts.serverCwd, stateDir: opts.stateDir });
+  const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
+  client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: (opts.roots ?? []).map((r) => ({ uri: pathToFileURL(r).href })) }));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  closers.push(async () => {
+    await client.close();
+    await server.close();
+  });
+  return client;
+}
+
+describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
+  let base: string;
+  let workspace: string;
+  let stateDir: string;
+
+  beforeEach(() => {
+    base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-mcp-')));
+    workspace = path.join(base, 'ws');
+    stateDir = path.join(base, 'state');
+    mkdirSync(workspace);
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  /** A transaction whose owner is a process that has exited, as after a crash. */
+  async function crashedWrite(file: string, content: string): Promise<void> {
+    const tools = new NodeToolRuntime({ stateDir });
+    const tx = tools.beginTransaction();
+    if (!(tx instanceof FileTransaction)) throw new Error('expected a disk journal');
+    const ctx = { host: 'generic' as const, cwd: workspace, roots: [workspace], permissionMode: 'default', sources: {} };
+    const policy = { host: 'generic' as const, bashContainment: { mode: 'none' as const }, protectedPaths: [], payload: null };
+    const prepared = await tools.prepare({ id: 'c1', tool: 'write', args: { path: file, content } }, ctx, policy);
+    await tools.commit(prepared, new AbortController().signal, tx);
+    const dead = Number(execFileSync(process.execPath, ['-p', 'process.pid'], { encoding: 'utf8' }));
+    const manifest = path.join(tx.dir, 'manifest.json');
+    writeFileSync(manifest, readFileSync(manifest, 'utf8').replace(`"pid":${process.pid},`, `"pid":${dead},`));
+  }
+
+  it('runs JavaScript in the real sandbox and applies the generic policy: reads only', async () => {
+    writeFileSync(path.join(workspace, 'a.txt'), 'hello\n');
+    const client = await connectReal({ serverCwd: workspace, stateDir });
+    const code = `const r = await read({ path: 'a.txt' });
+let w; try { await write({ path: 'b.txt', content: 'x' }); w = 'written'; } catch (e) { w = e.name; }
+return { content: r.content, w };`;
+    const body = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code } })));
+    expect(body).toMatchObject({ ok: true, result: { content: 'hello', w: 'PermissionDenied' } });
+    expect(body.calls.map((c: { decision: string }) => c.decision)).toEqual(['allowed', 'denied']);
+  });
+
+  it('restores what a crashed run left in the server cwd at start, and reports it in the first run and the run log', async () => {
+    writeFileSync(path.join(workspace, 'a.txt'), 'original');
+    await crashedWrite('a.txt', 'half-done');
+    const log = path.join(base, 'run.log');
+    const client = await connectReal({ serverCwd: workspace, stateDir, env: { [RUN_LOG_ENV]: log } });
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return (await read({ path: 'a.txt' })).content;` } })));
+    expect(first.result).toBe('original');
+    expect(first.warnings.join('\n')).toContain(`restored: ${path.join(workspace, 'a.txt')}`);
+    const second = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: 'return 1;' } })));
+    expect(second.warnings).toEqual([]);
+    const lines = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines.map((l) => l.event)).toEqual(['recovery', 'run', 'run']);
+    expect(lines[0]).toMatchObject({ trigger: 'startup', journals: [{ restored: [path.join(workspace, 'a.txt')], conflicts: [], leftoverTemps: [] }] });
+    expect(lines[1]).toMatchObject({ recovery: [{ trigger: 'startup' }], calls: [{ decision: 'allowed' }] });
+    expect(lines[2].recovery).toBeUndefined();
+  });
+
+  it('recovers a workspace root once, on the first run that names it', async () => {
+    const elsewhere = path.join(base, 'elsewhere');
+    mkdirSync(elsewhere);
+    writeFileSync(path.join(workspace, 'a.txt'), 'original');
+    await crashedWrite('a.txt', 'half-done');
+    const client = await connectReal({ serverCwd: elsewhere, stateDir, roots: [workspace] });
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return (await read({ path: 'a.txt' })).content;` } })));
+    expect(first.result).toBe('original');
+    expect(first.warnings.join('\n')).toContain('restored');
+    await crashedWrite('a.txt', 'again');
+    const second = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return (await read({ path: 'a.txt' })).content;` } })));
+    expect(second.result).toBe('again');
+  });
+
+  it('reports a file changed since the crash as a conflict and leaves it alone', async () => {
+    writeFileSync(path.join(workspace, 'a.txt'), 'original');
+    await crashedWrite('a.txt', 'half-done');
+    writeFileSync(path.join(workspace, 'a.txt'), 'edited by hand');
+    const client = await connectReal({ serverCwd: workspace, stateDir });
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return (await read({ path: 'a.txt' })).content;` } })));
+    expect(first.result).toBe('edited by hand');
+    expect(first.warnings.join('\n')).toContain('was not restored (changed-externally');
   });
 });

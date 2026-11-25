@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONTEXT_TTL_MS, runContextHook } from './context-hook.js';
-import { FileHookContextStore, createClaudeContextProvider } from './context.js';
+import type { HookContextRecord, HookContextStore } from '../../core/types.js';
+import { ClaudeContextProvider, FileHookContextStore, createClaudeContextProvider } from './context.js';
 
 const posix = process.platform !== 'win32';
 
@@ -162,5 +163,40 @@ describe.skipIf(!posix)('context record provenance', () => {
     await runContextHook(hookInput(), { stateDir: dir });
     await chmod(path.join(dir, 'ctx'), 0o755);
     expect(await new FileHookContextStore(dir).lookup('toolu_01ABC')).toBeUndefined();
+  });
+});
+
+const store = (record: HookContextRecord | undefined): HookContextStore => ({ lookup: async () => record });
+
+describe('ClaudeContextProvider', () => {
+  it('Claude: falls back to conservative defaults', async () => {
+    const ctx = await new ClaudeContextProvider().resolve({ env: {}, meta: 'garbage', roots: [], serverCwd: '/srv' });
+    expect(ctx).toMatchObject({ host: 'claude', cwd: '/srv', permissionMode: 'default', sources: { cwd: 'default', permissionMode: 'default' } });
+    expect(ctx.sessionId).toBeUndefined();
+  });
+
+  it('Claude: ignores invalid meta values', async () => {
+    const ctx = await new ClaudeContextProvider().resolve({ env: {}, meta: { 'claudecode/toolUseId': 123 }, roots: ['/ws'], serverCwd: '/srv' });
+    expect(ctx.toolUseId).toBeUndefined();
+    expect(ctx.cwd).toBe('/ws');
+  });
+
+  it('Claude: uses a companion-hook record only for the same call and session', async () => {
+    const record: HookContextRecord = { sessionId: 's1', toolUseId: 't1', permissionMode: 'acceptEdits', agentId: 'a1', agentType: 'helper', cwd: '/ws/sub' };
+    const input = { env: { CLAUDE_CODE_SESSION_ID: 's1' }, meta: { 'claudecode/toolUseId': 't1' }, roots: ['/ws'], serverCwd: '/srv' };
+    const good = await new ClaudeContextProvider(store(record)).resolve(input);
+    expect(good).toMatchObject({ permissionMode: 'acceptEdits', agentId: 'a1', cwd: '/ws/sub', sources: { permissionMode: 'ctx-file' } });
+
+    const nested = await new ClaudeContextProvider(store({ ...record, cwd: '/ws/..samples' })).resolve(input);
+    expect(nested.cwd).toBe('/ws/..samples');
+
+    const otherSession = await new ClaudeContextProvider(store({ ...record, sessionId: 's2' })).resolve(input);
+    expect(otherSession.permissionMode).toBe('default');
+    const otherCall = await new ClaudeContextProvider(store({ ...record, toolUseId: 't2' })).resolve(input);
+    expect(otherCall.permissionMode).toBe('default');
+    const outsideRoots = await new ClaudeContextProvider(store({ ...record, cwd: '/elsewhere' })).resolve(input);
+    expect(outsideRoots.cwd).toBe('/ws');
+    const throwing = await new ClaudeContextProvider({ lookup: () => Promise.reject(new Error('io')) }).resolve(input);
+    expect(throwing.permissionMode).toBe('default');
   });
 });

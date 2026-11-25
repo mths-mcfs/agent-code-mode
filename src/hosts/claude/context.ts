@@ -4,8 +4,7 @@ import { lstat, open, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { stateDirPath } from '../../core/state-dir.js';
-import type { ContextProvider, HookContextRecord, HookContextStore } from '../../core/types.js';
-import { ClaudeContextProvider } from '../../server/context.js';
+import type { ContextInput, ContextProvider, ContextSource, HookContextRecord, HookContextStore, HostKind, SessionContext } from '../../core/types.js';
 
 /**
  * Verified on Claude Code 2.1.325: the hook's `tool_use_id` equals the
@@ -107,4 +106,97 @@ export class FileHookContextStore implements HookContextStore {
  */
 export function createClaudeContextProvider(opts: { readonly stateDir?: string } = {}): ContextProvider {
   return new ClaudeContextProvider(new FileHookContextStore(opts.stateDir ?? stateDirPath()));
+}
+
+const id = z.string().min(1).max(512);
+
+/** `_meta` fields Claude Code sends on `tools/call`. */
+export const ClaudeMetaSchema = z.object({
+  'claudecode/toolUseId': id.optional().catch(undefined),
+});
+
+const DEFAULT_PERMISSION_MODE = 'default';
+
+function metaObject(meta: unknown): Record<string, unknown> {
+  return meta !== null && typeof meta === 'object' && !Array.isArray(meta) ? Object.fromEntries(Object.entries(meta)) : {};
+}
+
+function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+class Builder {
+  readonly fields: Record<string, string | undefined> = {};
+  readonly sources: Record<string, ContextSource> = {};
+
+  set(field: string, value: string | undefined, source: ContextSource): void {
+    if (value === undefined || this.fields[field] !== undefined) return;
+    this.fields[field] = value;
+    this.sources[field] = source;
+  }
+
+  build(host: HostKind, roots: readonly string[], fallbackCwd: string): SessionContext {
+    this.set('cwd', fallbackCwd, 'default');
+    this.set('permissionMode', DEFAULT_PERMISSION_MODE, 'default');
+    const f = this.fields;
+    const optional = (key: string): Record<string, string> => (f[key] === undefined ? {} : { [key]: f[key] });
+    return {
+      host,
+      cwd: f['cwd'] ?? fallbackCwd,
+      roots: [...roots],
+      permissionMode: f['permissionMode'] ?? DEFAULT_PERMISSION_MODE,
+      ...optional('sessionId'),
+      ...optional('transcriptPath'),
+      ...optional('agentId'),
+      ...optional('agentType'),
+      ...optional('toolUseId'),
+      ...optional('turnId'),
+      ...optional('model'),
+      ...optional('sandboxMode'),
+      sources: { ...this.sources },
+    };
+  }
+}
+
+function absoluteRoots(roots: readonly string[]): string[] {
+  return roots.filter((r) => path.isAbsolute(r));
+}
+
+/** Claude Code: session id from env, tool-use id from `_meta`, the rest from the companion-hook record when present. */
+export class ClaudeContextProvider implements ContextProvider {
+  constructor(private readonly store?: HookContextStore) {}
+
+  async resolve(input: ContextInput): Promise<SessionContext> {
+    const b = new Builder();
+    const roots = absoluteRoots(input.roots);
+    const envSession = input.env['CLAUDE_CODE_SESSION_ID'];
+    const sessionId = envSession !== undefined && id.safeParse(envSession).success ? envSession : undefined;
+    b.set('sessionId', sessionId, 'env');
+    const meta = ClaudeMetaSchema.parse(metaObject(input.meta));
+    const toolUseId = meta['claudecode/toolUseId'];
+    b.set('toolUseId', toolUseId, 'meta');
+
+    if (toolUseId !== undefined && this.store) {
+      let record;
+      try {
+        record = await this.store.lookup(toolUseId);
+      } catch {
+        record = undefined;
+      }
+      // Only a record for this exact call and session is trusted.
+      if (record && record.toolUseId === toolUseId && (sessionId === undefined || record.sessionId === sessionId)) {
+        b.set('sessionId', record.sessionId, 'ctx-file');
+        if (record.cwd !== undefined && path.isAbsolute(record.cwd) && (roots.length === 0 || roots.some((r) => isInside(record.cwd ?? '', r)))) {
+          b.set('cwd', record.cwd, 'ctx-file');
+        }
+        b.set('transcriptPath', record.transcriptPath, 'ctx-file');
+        b.set('permissionMode', record.permissionMode, 'ctx-file');
+        b.set('agentId', record.agentId, 'ctx-file');
+        b.set('agentType', record.agentType, 'ctx-file');
+      }
+    }
+    b.set('cwd', roots[0], 'roots');
+    return b.build('claude', roots, input.serverCwd);
+  }
 }
