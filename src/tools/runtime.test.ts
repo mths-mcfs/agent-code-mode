@@ -110,10 +110,10 @@ describe('path traversal', () => {
     expect(await code(prep('write', { path: 'a\0b', content: 'x' }))).toBe('invalid-args');
     const long = `${'a'.repeat(250)}/`.repeat(40) + 'f.txt';
     const result = await code(run('write', { path: long, content: 'x' }));
-    // Windows with long-path support accepts it; it must then be inside the workspace.
+    // Windows with long-path support accepts it; it must then be inside the workspace. Rooted operations refuse it there for now.
     if (result === 'resolved') expect(readFileSync(path.join(ws, long), 'utf8')).toBe('x');
     else {
-      expect(['invalid-args', 'tool-error']).toContain(result);
+      expect(['invalid-args', 'tool-error', ...(ROOTED_OPS_REFUSED ? ['containment-unavailable'] : [])]).toContain(result);
       expect(readdirSync(ws)).toEqual([]);
     }
   });
