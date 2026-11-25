@@ -142,6 +142,8 @@ export class FileTransaction implements Transaction {
   readonly #flushable = new Set<string>();
   #bytes = 0;
   #created = false;
+  /** Whether the journal root was flushed after this journal's directory was created in it. */
+  #dirFlushed = false;
   #closed = false;
   #finalized: Finalized | undefined;
   #queue: Promise<unknown> = Promise.resolve();
@@ -188,7 +190,10 @@ export class FileTransaction implements Transaction {
       unflushedAncestors.delete(root);
       await fs.mkdir(this.dir, { mode: 0o700 });
       this.#created = true;
-      await this.#io.syncDir(root);
+    }
+    if (!this.#dirFlushed) {
+      await this.#io.syncDir(path.dirname(this.dir));
+      this.#dirFlushed = true;
     }
     const next = path.join(this.dir, `${MANIFEST}.next`);
     await writeDurable(next, JSON.stringify(this.#manifest()));

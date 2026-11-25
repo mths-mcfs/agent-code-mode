@@ -474,6 +474,25 @@ describe.skipIf(IS_WINDOWS)('finalization', () => {
     expect(existsSync(path.join(ws, 'sub', 'new.txt'))).toBe(false);
   });
 
+  it('flushes the journal root again when the flush after creating the journal failed', async () => {
+    let failing = true;
+    const flushed: string[] = [];
+    const tx = new FileTransaction(stateDir, {
+      syncDir: async (dir) => {
+        flushed.push(dir);
+        if (failing && dir === journalRoot(stateDir)) throw new Error('EIO: flush failed');
+        await syncDirStrict(dir);
+      },
+      removeDir: held,
+    });
+    await expect(write('a.txt', 'a1\n', tx)).rejects.toThrow(/EIO/);
+    expect(read('a.txt')).toBe('a0\n');
+    failing = false;
+    flushed.length = 0;
+    await write('a.txt', 'a1\n', tx);
+    expect(flushed).toContain(journalRoot(stateDir));
+  });
+
   it('flushes the journal ancestors again after a flush of them failed', async () => {
     let failing = true;
     const flushed: string[] = [];

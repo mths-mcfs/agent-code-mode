@@ -141,7 +141,7 @@ describe('4. abort stops a write that already entered commit', () => {
   });
 });
 
-describe.skipIf(IS_WINDOWS)('5. concurrent commits on one path', () => {
+describe('5. concurrent commits on one path', () => {
   it('lets only the first of two writes prepared against the same content succeed', async () => {
     writeFileSync(path.join(ws, 'f'), 'old');
     const a = await prepWrite('f', 'first');
@@ -152,7 +152,8 @@ describe.skipIf(IS_WINDOWS)('5. concurrent commits on one path', () => {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
-    const tx = new SlowTransaction(path.join(base, 'state'));
+    // Windows cannot flush a directory, so the journal's flushes are skipped here: this test is about the path lock.
+    const tx = new SlowTransaction(path.join(base, 'state'), { syncDir: async () => undefined, removeDir: (dir) => fsp.rm(dir, { recursive: true, force: true }) });
     const signal = new AbortController().signal;
     const results = await Promise.allSettled([rt.commit(a, signal, tx), rt.commit(b, signal, tx)]);
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
