@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { linkSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import nodeFs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -106,6 +106,51 @@ describe.skipIf(IS_WINDOWS)('2. crash recovery never deletes through a link', ()
     );
     await recoverStaleJournals(path.join(base, 'state'), [ws], []);
     expect(existsSync(path.join(outside, 'empty'))).toBe(true);
+  });
+});
+
+describe.skipIf(IS_WINDOWS)('2b. rollback never changes a file through a parent swapped for a link', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Swaps `ws/sub` for a link to `outside` right before each `name` syscall, and back right after. */
+  function swapAround(name: 'unlinkSync' | 'renameSync'): void {
+    const original = nodeFs[name] as (...args: unknown[]) => void;
+    vi.spyOn(nodeFs, name).mockImplementation(((...args: unknown[]) => {
+      renameSync(path.join(ws, 'sub'), path.join(ws, 'sub-real'));
+      symlinkSync(outside, path.join(ws, 'sub'), 'dir');
+      try {
+        original(...args);
+      } finally {
+        rmSync(path.join(ws, 'sub'));
+        renameSync(path.join(ws, 'sub-real'), path.join(ws, 'sub'));
+      }
+    }) as never);
+  }
+
+  beforeEach(() => {
+    mkdirSync(path.join(ws, 'sub'));
+    writeFileSync(path.join(ws, 'sub', 'old.txt'), 'original\n');
+    // Outside holds exactly what the run writes, so content and name alone would match.
+    writeFileSync(path.join(outside, 'new.txt'), 'run bytes\n');
+    writeFileSync(path.join(outside, 'old.txt'), 'run bytes\n');
+  });
+
+  it.each([
+    ['removes the created file', 'unlinkSync', 'sub/new.txt'],
+    ['restores the edited file', 'renameSync', 'sub/old.txt'],
+  ] as const)('%s inside the workspace when the swap lands inside the final syscall', async (_label, syscall, rel) => {
+    const tx = rt.beginTransaction();
+    await rt.commit(await prepWrite(rel, 'run bytes\n'), new AbortController().signal, tx);
+    swapAround(syscall);
+    await tx.rollback();
+    vi.restoreAllMocks();
+    expect(readFileSync(path.join(outside, 'new.txt'), 'utf8')).toBe('run bytes\n');
+    expect(readFileSync(path.join(outside, 'old.txt'), 'utf8')).toBe('run bytes\n');
+    expect(readdirSync(outside).sort()).toEqual(['new.txt', 'old.txt', 'secret']);
+    expect(existsSync(path.join(ws, 'sub', 'new.txt'))).toBe(false);
+    expect(readFileSync(path.join(ws, 'sub', 'old.txt'), 'utf8')).toBe('original\n');
   });
 });
 
