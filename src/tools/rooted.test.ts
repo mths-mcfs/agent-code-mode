@@ -73,6 +73,24 @@ describe.skipIf(!IS_WINDOWS)('Windows', () => {
   it('refuses rooted operations with the reason', () => {
     expect(() => within(rooted(ws, path.join(ws, 'a')), () => undefined)).toThrow(/not available on Windows/);
   });
+
+  it('refuses read, write, edit, grep and glob through the runtime', async () => {
+    writeFileSync(path.join(ws, 'a', 'f.txt'), 'x\n');
+    const rt = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
+    const ctx = makeContext(ws);
+    const calls: ToolCall[] = [
+      { id: 'r', tool: 'read', args: { path: 'a/f.txt' } },
+      { id: 'w', tool: 'write', args: { path: 'a/f.txt', content: 'y\n' } },
+      { id: 'e', tool: 'edit', args: { path: 'a/f.txt', oldString: 'x', newString: 'y' } },
+      { id: 'g', tool: 'grep', args: { pattern: 'x' } },
+      { id: 'G', tool: 'glob', args: { pattern: '**/*' } },
+    ];
+    for (const call of calls) {
+      const outcome = rt.prepare(call, ctx, policy).then((prepared) => rt.commit(prepared, new AbortController().signal));
+      await expect(outcome).rejects.toMatchObject({ code: 'containment-unavailable' });
+    }
+    expect(readFileSync(path.join(ws, 'a', 'f.txt'), 'utf8')).toBe('x\n');
+  });
 });
 
 const ATTACKER = `
