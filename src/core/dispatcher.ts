@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
 import { frozenCopy } from './freeze.js';
@@ -153,10 +154,13 @@ export class Dispatcher<P = unknown> {
   readonly #warnings: string[] = [];
   #deniedCount = 0;
   #bashCommits = 0;
+  /** The session cwd as a real path, the form prepared paths take. */
+  readonly #realCwd: string;
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
     this.#now = opts.now ?? (() => performance.now());
+    this.#realCwd = realPath(opts.ctx.cwd);
   }
 
   /** Signal aborted when the dispatcher stops. */
@@ -393,7 +397,7 @@ export class Dispatcher<P = unknown> {
       if (returned === ABORTED) return this.#stoppedFailure();
       // A dispatcher-owned deep-frozen copy: what is authorized and then
       // committed cannot be changed by the runtime or anyone holding its object.
-      prepared = frozenCopy(returned);
+      prepared = frozenCopy(withRequestedPath(returned, call));
     } catch (err) {
       return this.#toolFailure(err);
     }
@@ -559,7 +563,7 @@ export class Dispatcher<P = unknown> {
   }
 
   #addChanged(absPath: string): void {
-    const shown = displayPath(absPath, this.#opts.ctx.cwd);
+    const shown = displayPath(absPath, this.#realCwd);
     if (!this.#changed.includes(shown)) this.#changed.push(shown);
   }
 
@@ -574,6 +578,22 @@ function isBashResult(r: ToolResult): r is BashResult {
 
 function isLowering(v: unknown): v is SearchLowering {
   return typeof v === 'object' && v !== null && 'command' in v && typeof v.command === 'string' && v.command !== '' && 'parse' in v && typeof v.parse === 'function';
+}
+
+/** Real path of `p`, or `p` resolved lexically when it does not exist. */
+function realPath(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** The prepared call with `requestedPath` taken from the call the script made, never from the tool runtime. */
+function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall {
+  const { requestedPath: _fromRuntime, ...rest } = prepared;
+  const requested = call.tool === 'bash' ? undefined : call.args.path;
+  return requested === undefined ? rest : { ...rest, requestedPath: requested };
 }
 
 /** Path relative to `cwd` when inside it, else the absolute path. */

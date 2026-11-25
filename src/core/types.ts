@@ -161,10 +161,14 @@ export interface WriteResult {
 }
 
 /**
- * How `edit` located `oldString`. `exact` is a byte-for-byte match; the other
- * strategies are tolerant fallbacks the tool runtime may implement.
+ * How `edit` located `oldString`: the rung of the tolerant-match ladder that
+ * found it, tried in this order. `exact` is a byte-for-byte match;
+ * `line-endings` ignores CRLF/LF differences; `line-numbers` strips line
+ * numbers copied from `read` output; `trailing-whitespace` ignores spaces at
+ * line ends; `indentation` ignores a uniform indentation shift; `punctuation`
+ * also folds typographic quotes and dashes to ASCII.
  */
-export type MatchStrategy = 'exact' | 'line-trimmed' | 'whitespace-normalized' | 'indentation-flexible';
+export type MatchStrategy = 'exact' | 'line-endings' | 'line-numbers' | 'trailing-whitespace' | 'indentation' | 'punctuation';
 
 /** Result of `edit`. */
 export interface EditResult {
@@ -192,6 +196,8 @@ export interface GrepResult {
   readonly matches: readonly GrepMatch[];
   /** True when more matches existed than were returned. */
   readonly truncated: boolean;
+  /** Files left out of the search, never opened, because the host's Read rules refuse them (`PolicySnapshot.readFilter`). */
+  readonly filtered: number;
 }
 
 /** Result of `glob`. */
@@ -200,6 +206,8 @@ export interface GlobResult {
   readonly files: readonly string[];
   /** True when more files existed than were returned. */
   readonly truncated: boolean;
+  /** Matching files left out because the host's Read rules refuse them (`PolicySnapshot.readFilter`). */
+  readonly filtered: number;
 }
 
 /** Maps each tool to its result type. */
@@ -339,6 +347,14 @@ export type PreparedCall = {
     readonly tool: K;
     readonly args: ToolArgsMap[K];
     readonly effect: ToolEffectMap[K];
+    /**
+     * The `path` argument exactly as the script wrote it (before `~`
+     * expansion, cwd resolution and symlink resolution), for host rules that
+     * must also match the path as written. Absent for `bash` and for a grep
+     * or glob without a path. The dispatcher sets it from the call it
+     * prepared and replaces any value the tool runtime returns.
+     */
+    readonly requestedPath?: string;
   };
 }[ToolName];
 
@@ -442,6 +458,20 @@ export interface PolicySnapshot<P = unknown> {
    * tool runtime refuses writes and edits there with `ToolError('protected-path')`.
    */
   readonly protectedPaths: readonly string[];
+  /**
+   * The host's additional working directories (Claude
+   * `permissions.additionalDirectories` and `--add-dir`, Codex writable roots
+   * in `workspace-write`): absolute directories the tools may touch besides
+   * the session cwd and roots.
+   */
+  readonly additionalRoots?: readonly string[];
+  /**
+   * Whether the host's Read rules allow reading a real absolute path. The
+   * tool runtime drops every grep file and glob entry it returns false for,
+   * counting them in `filtered`. Absent: every path in the workspace is
+   * readable.
+   */
+  readonly readFilter?: (realAbsPath: string) => boolean;
   readonly payload: P;
 }
 

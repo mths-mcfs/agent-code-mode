@@ -458,9 +458,9 @@ describe('Dispatcher search lowering', () => {
   }
 
   it('checks, authorizes and commits the bash command, and returns the parsed result', async () => {
-    const adapter = new Lowering(() => ({ command: 'list-files', parse: (r: BashResult) => ({ files: [r.stdout.trim()], truncated: false }) }));
+    const adapter = new Lowering(() => ({ command: 'list-files', parse: (r: BashResult) => ({ files: [r.stdout.trim()], truncated: false, filtered: 0 }) }));
     const { reply, tools, dispatcher } = await run(adapter);
-    expect(reply).toEqual({ ok: true, value: { files: ['fake: list-files'], truncated: false } });
+    expect(reply).toEqual({ ok: true, value: { files: ['fake: list-files'], truncated: false, filtered: 0 } });
     expect(adapter.staticChecked.map((p) => p.tool)).toEqual(['bash']);
     expect(adapter.authorized.map((p) => (p.tool === 'bash' ? p.effect.command : p.tool))).toEqual(['list-files']);
     expect(tools.commits.map((c) => c.target)).toEqual(['list-files']);
@@ -474,7 +474,7 @@ describe('Dispatcher search lowering', () => {
     }));
     expect(thrown.reply).toMatchObject({ ok: false, error: { code: 'invalid-args' } });
     expect(thrown.tools.commits).toEqual([]);
-    const empty = await run(new Lowering(() => ({ command: '', parse: () => ({ files: [], truncated: false }) })));
+    const empty = await run(new Lowering(() => ({ command: '', parse: () => ({ files: [], truncated: false, filtered: 0 }) })));
     expect(empty.reply).toMatchObject({ ok: false, error: { code: 'denied', source: 'rule' } });
     expect(empty.tools.commits).toEqual([]);
   });
@@ -499,7 +499,7 @@ describe('Dispatcher search lowering', () => {
       }
     }
     const tools = new Rewriting({ root: '/ws' });
-    const { reply } = await run(new Lowering(() => ({ command: 'list-files', parse: () => ({ files: [], truncated: false }) })), tools);
+    const { reply } = await run(new Lowering(() => ({ command: 'list-files', parse: () => ({ files: [], truncated: false, filtered: 0 }) })), tools);
     expect(reply).toMatchObject({ ok: false, error: { code: 'tool-error' } });
     expect(tools.commits).toEqual([]);
   });
@@ -510,7 +510,7 @@ describe('Dispatcher search lowering', () => {
         return { kind: 'allow', updatedArgs: { command: 'other' } };
       }
     }
-    const { reply, tools } = await run(new RewritingHook(() => ({ command: 'list-files', parse: () => ({ files: [], truncated: false }) })));
+    const { reply, tools } = await run(new RewritingHook(() => ({ command: 'list-files', parse: () => ({ files: [], truncated: false, filtered: 0 }) })));
     expect(reply).toMatchObject({ ok: false, error: { code: 'denied', source: 'hook' } });
     expect(tools.commits).toEqual([]);
   });

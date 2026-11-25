@@ -3,7 +3,6 @@ import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
 import type {
   BashContainment,
-  MatchStrategy,
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
@@ -16,7 +15,7 @@ import type {
 } from '../core/types.js';
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
-import { applySearchReplace, type MatchHow } from './edit-match.js';
+import { applySearchReplace } from './edit-match.js';
 import { type DirId, type InstallId, type PathIdentity, type RegularFile, atomicWrite, captureIdentity, decodeText, errnoCode, isBinary, readRegularFile, sha256 } from './fs-ops.js';
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
@@ -30,23 +29,10 @@ export const READ_CAP_BYTES = 256 * 1024;
 /** Largest file `read`, `write` (existing content) and `edit` load. */
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 
-/**
- * How each Turnpack rung is reported in the frozen `MatchStrategy` type,
- * which has fewer names than the ladder has rungs.
- */
-const STRATEGY: Record<MatchHow, MatchStrategy> = {
-  exact: 'exact',
-  'line-endings': 'whitespace-normalized',
-  'line-numbers': 'line-trimmed',
-  'trailing-whitespace': 'line-trimmed',
-  indentation: 'indentation-flexible',
-  punctuation: 'whitespace-normalized',
-};
-
 export interface NodeToolRuntimeOptions {
   /** Server state directory; transaction journals live under `<stateDir>/journal/`. */
   readonly stateDir: string;
-  /** Extra absolute directories the tools may touch besides the session cwd and MCP roots. */
+  /** Extra absolute directories the tools may touch besides the session cwd, MCP roots and the policy's `additionalRoots`. */
   readonly additionalRoots?: readonly string[];
   /** Bytes kept of each of bash stdout and stderr. */
   readonly bashOutputCapBytes?: number;
@@ -66,10 +52,16 @@ interface CallMeta {
   readonly identity?: PathIdentity;
   /** For grep and glob: the search path and what it named at prepare. */
   readonly searchTop?: SearchTop;
+  /** For grep and glob: the policy's Read filter. */
+  readonly readFilter?: (realAbsPath: string) => boolean;
 }
 
 /** Most prepared calls whose metadata is kept while they wait for commit. */
 const MAX_PENDING_META = 4096;
+
+function readFilterOf(policy: PolicySnapshot): { readonly readFilter?: (realAbsPath: string) => boolean } {
+  return policy.readFilter ? { readFilter: policy.readFilter } : {};
+}
 
 function metaKey(prepared: PreparedCall): string {
   return sha256(JSON.stringify([prepared.id, prepared.tool, prepared.effect]));
@@ -163,7 +155,7 @@ export class NodeToolRuntime implements ToolRuntime {
   async #prepareInJail(call: ToolCall, ctx: SessionContext, policy: PolicySnapshot): Promise<PreparedCall> {
     const jail = await Jail.create({
       cwd: ctx.cwd,
-      roots: [...ctx.roots, ...(this.#opts.additionalRoots ?? [])],
+      roots: [...ctx.roots, ...(policy.additionalRoots ?? []), ...(this.#opts.additionalRoots ?? [])],
       protectedPaths: policy.protectedPaths,
     });
     const meta = (abs: string, denyWrite: readonly string[] = []): CallMeta => ({
@@ -270,7 +262,7 @@ export class NodeToolRuntime implements ToolRuntime {
             afterContent: outcome.text,
             diff: unifiedDiff(m.display, text, outcome.text),
             matchedOldString: outcome.matched,
-            matchStrategy: STRATEGY[outcome.how],
+            matchStrategy: outcome.how,
             replacements: outcome.count,
           },
         };
@@ -290,7 +282,7 @@ export class NodeToolRuntime implements ToolRuntime {
           maxResults: call.args.maxResults ?? DEFAULT_GREP_MAX_RESULTS,
         };
         const prepared: PreparedCallOf<'grep'> = { id: call.id, tool: 'grep', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot) });
+        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot), ...readFilterOf(policy) });
         return prepared;
       }
       case 'glob': {
@@ -300,7 +292,7 @@ export class NodeToolRuntime implements ToolRuntime {
         normalizeGlob(call.args.pattern, absRoot);
         const effect = { absRoot, pattern: call.args.pattern, maxResults: call.args.maxResults ?? DEFAULT_GLOB_MAX_RESULTS };
         const prepared: PreparedCallOf<'glob'> = { id: call.id, tool: 'glob', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot) });
+        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot), ...readFilterOf(policy) });
         return prepared;
       }
     }
@@ -330,10 +322,10 @@ export class NodeToolRuntime implements ToolRuntime {
     return meta;
   }
 
-  #searchTopOf(prepared: PreparedCall): SearchTop {
-    const { searchTop: top } = this.#metaOf(prepared);
+  #searchOf(prepared: PreparedCall): { readonly top: SearchTop; readonly readFilter?: (realAbsPath: string) => boolean } {
+    const { searchTop: top, readFilter } = this.#metaOf(prepared);
     if (top === undefined) throw new ToolError('tool-error', `this ${prepared.tool} call was not prepared by this tool runtime; prepare it again`);
-    return top;
+    return { top, ...(readFilter ? { readFilter } : {}) };
   }
 
   async commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult> {
@@ -360,10 +352,12 @@ export class NodeToolRuntime implements ToolRuntime {
       case 'edit':
         return this.#commitWrite(prepared, signal, tx);
       case 'grep': {
-        return runGrep(prepared.effect, this.#searchTopOf(prepared), signal, this.#opts.grepFileBudgetMs);
+        const { top, readFilter } = this.#searchOf(prepared);
+        return runGrep(prepared.effect, top, signal, this.#opts.grepFileBudgetMs, readFilter);
       }
       case 'glob': {
-        return runGlob(prepared.effect, this.#searchTopOf(prepared), signal);
+        const { top, readFilter } = this.#searchOf(prepared);
+        return runGlob(prepared.effect, top, signal, readFilter);
       }
     }
   }

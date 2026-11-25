@@ -27,7 +27,7 @@ function setup(onCall?: (tool: string, args: unknown) => Promise<CallReply>, max
     hooks: {
       onCall: (tool, args) => {
         calls.push({ tool, args });
-        return onCall ? onCall(tool, args) : Promise.resolve({ ok: true, value: { files: [], truncated: false } satisfies ToolResult });
+        return onCall ? onCall(tool, args) : Promise.resolve({ ok: true, value: { files: [], truncated: false, filtered: 0 } satisfies ToolResult });
       },
       onLog: (level, text) => logs.push({ level, text }),
       send: (m) => sent.push(m),
@@ -53,7 +53,7 @@ describe('ChildSession: valid traffic', () => {
     t.line({ type: 'log', level: 'warn', text: 'careful' });
     await tick();
     expect(t.calls).toEqual([{ tool: 'glob', args: { pattern: '*.ts' } }]);
-    expect(t.sent).toEqual([{ type: 'reply', id: 1, reply: { ok: true, value: { files: [], truncated: false } } }]);
+    expect(t.sent).toEqual([{ type: 'reply', id: 1, reply: { ok: true, value: { files: [], truncated: false, filtered: 0 } } }]);
     expect(t.logs).toEqual([{ level: 'warn', text: 'careful' }]);
     t.line({ type: 'done', outcome: { ok: true, value: '{"a":[1,2]}' } });
     expect(await t.session.outcome).toEqual({ ok: true, value: { a: [1, 2] } });
@@ -151,7 +151,7 @@ describe('ChildSession: hostile child messages', () => {
       const t = setup(() => new Promise<CallReply>((resolve) => (answer = resolve)), 100_000, 2);
       t.line({ type: 'call', id: 1, tool: 'read', args: '{"path":"sample.txt"}' });
       expect(t.calls).toHaveLength(1);
-      answer({ ok: true, value: { files: [], truncated: false } });
+      answer({ ok: true, value: { files: [], truncated: false, filtered: 0 } });
       expect(await t.session.outcome).toMatchObject({ ok: false, kind: 'timeout' });
       expect(t.sent).toEqual([]);
     } finally {
@@ -233,7 +233,7 @@ describe('ChildSession: hostile child messages', () => {
     t.session.kill('stopped by test');
     t.line({ type: 'call', id: 2, tool: 'read', args: '{}' });
     t.line({ type: 'log', level: 'log', text: 'late' });
-    release({ ok: true, value: { files: [], truncated: false } });
+    release({ ok: true, value: { files: [], truncated: false, filtered: 0 } });
     await tick();
     expect(await killed(t.session)).toBe('stopped by test');
     expect(t.calls).toHaveLength(1);

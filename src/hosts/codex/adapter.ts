@@ -178,6 +178,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       host: 'codex',
       bashContainment,
       protectedPaths,
+      // Configured writable roots and --add-dir widen the tools' workspace in workspace-write only; /tmp and $TMPDIR do not.
+      ...(sandboxMode === 'workspace-write' ? { additionalRoots: unique(config.writableRoots.map((p) => path.resolve(p))) } : {}),
       payload: {
         sandboxMode,
         approvalPolicy: config.approvalPolicy,

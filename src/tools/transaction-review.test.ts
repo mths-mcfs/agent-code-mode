@@ -267,15 +267,16 @@ describe('output limits', () => {
         { file: ws('b.txt'), line: 2, text: 'needle' },
       ],
       truncated: true,
+      filtered: 0,
     });
   });
 
   it.skipIf(ROOTED_OPS_REFUSED)('caps glob after sorting and distinguishes exact fit from truncation', async () => {
     for (const name of ['z.txt', 'a.txt', 'b.txt']) writeFileSync(ws(name), '');
     await expect(runtimeCall({ id: 'fit', tool: 'glob', args: { pattern: '*.txt', maxResults: 3 } }))
-      .resolves.toEqual({ files: [ws('a.txt'), ws('b.txt'), ws('z.txt')], truncated: false });
+      .resolves.toEqual({ files: [ws('a.txt'), ws('b.txt'), ws('z.txt')], truncated: false, filtered: 0 });
     await expect(runtimeCall({ id: 'spill', tool: 'glob', args: { pattern: '*.txt', maxResults: 2 } }))
-      .resolves.toEqual({ files: [ws('a.txt'), ws('b.txt')], truncated: true });
+      .resolves.toEqual({ files: [ws('a.txt'), ws('b.txt')], truncated: true, filtered: 0 });
   });
 
   it.skipIf(windows)('keeps returned stdout and stderr within the byte cap after UTF-8 decoding', async () => {

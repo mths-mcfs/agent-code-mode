@@ -295,7 +295,7 @@ describe('write and edit', () => {
     writeFileSync(path.join(ws, 'f.js'), 'function f() {\n    if (x) {\n        return 1;\n    }\n}\n');
     const prepared = await prep('edit', { path: 'f.js', oldString: 'if (x) {\n    return 1;\n}', newString: 'if (x) {\n    return 2;\n}' });
     if (prepared.tool !== 'edit') throw new Error('unreachable');
-    expect(prepared.effect.matchStrategy).toBe('indentation-flexible');
+    expect(prepared.effect.matchStrategy).toBe('indentation');
     expect(prepared.effect.matchedOldString).toBe('    if (x) {\n        return 1;\n    }');
     expect(prepared.effect.diff).toContain('--- a/f.js\n+++ b/f.js\n');
     expect(prepared.effect.diff).toContain('-        return 1;\n+        return 2;\n');

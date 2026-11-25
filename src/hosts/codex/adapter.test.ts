@@ -510,11 +510,11 @@ describe.runIf(posix)('dispatcher integration', () => {
     });
     const a = adapter(managed([{ matcher: 'Bash', hooks: [{ type: 'command', command: hooks.record }] }]), { argv: ['codex', '-s', 'danger-full-access'] });
     const d = new Dispatcher({ adapter: a, tools, ctx: c, policy: await a.loadPolicy(c) });
-    expect(await d.dispatch('grep', { pattern: 'x', maxResults: 7 })).toEqual({ ok: true, value: { matches: [{ file: `${WS}/a.ts`, line: 1, text: 'x' }], truncated: false } });
+    expect(await d.dispatch('grep', { pattern: 'x', maxResults: 7 })).toEqual({ ok: true, value: { matches: [{ file: `${WS}/a.ts`, line: 1, text: 'x' }], truncated: false, filtered: 0 } });
     const input: unknown = JSON.parse(readFileSync(path.join(tmp, 'stdin.json'), 'utf8'));
     expect(input).toMatchObject({ tool_name: 'Bash', tool_input: { command: tools.commits[0]?.target } });
     expect(tools.commits[0]?.target).toMatch(/^rg --json .* -e 'x' -- .* \| head -n 24$/);
-    expect(await d.dispatch('glob', { pattern: '*.ts' })).toEqual({ ok: true, value: { files: [`${WS}/a.ts`], truncated: false } });
+    expect(await d.dispatch('glob', { pattern: '*.ts' })).toEqual({ ok: true, value: { files: [`${WS}/a.ts`], truncated: false, filtered: 0 } });
     expect(d.bashCommits).toBe(0);
     expect(d.calls.map((x) => x.tool)).toEqual(['grep', 'glob']);
   });
