@@ -8,6 +8,7 @@ import { makeContext } from '../testing/index.js';
 import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
 import { syncDirStrict } from './fs-ops.js';
+import { cutBeforeRename, pinTempMtime } from '../testing/install-faults.js';
 
 let base: string;
 let workspace: string;
@@ -54,18 +55,7 @@ function installId(file: string) {
 }
 
 function coarseMtime() {
-  const open = fs.open.bind(fs);
-  vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
-    const handle = await open(file, flags, mode);
-    if (typeof file === 'string' && path.dirname(file) === workspace && file.endsWith('.tmp')) {
-      const sync = handle.sync.bind(handle);
-      vi.spyOn(handle, 'sync').mockImplementation(async () => {
-        await handle.utimes(time, time);
-        await sync();
-      });
-    }
-    return handle;
-  });
+  pinTempMtime(vi, time);
 }
 
 class UnconfirmedInstall extends FileTransaction {
@@ -76,22 +66,12 @@ class UnconfirmedInstall extends FileTransaction {
 
 it('reports the temp left by a crash immediately before rename and preserves old target', async () => {
   const tx = new FileTransaction(state);
-  const rename = fs.rename.bind(fs);
-  let temp = '';
-  vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-    if (to === target) {
-      temp = String(from);
-      expect(readFileSync(path.join(tx.dir, 'manifest.json'), 'utf8')).toContain(installId(temp));
-      throw new Error('cut immediately before rename');
-    }
-    await rename(from, to);
-  });
-  const rm = fs.rm.bind(fs);
-  vi.spyOn(fs, 'rm').mockImplementation(async (file, options) => {
-    if (file !== temp) await rm(file, options);
+  const cut = cutBeforeRename(vi, target, 'cut immediately before rename', (temp) => {
+    expect(readFileSync(path.join(tx.dir, 'manifest.json'), 'utf8')).toContain(installId(temp));
   });
   await expect(write(tx)).rejects.toThrow('cut immediately before rename');
   vi.restoreAllMocks();
+  const temp = cut.temp();
   expect(existsSync(temp)).toBe(true);
   abandon(tx);
   // Adjusted: recovery reports the leftover temp file and deletes nothing.

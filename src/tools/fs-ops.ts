@@ -1,20 +1,19 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { constants as FS, type Stats } from 'node:fs';
-import fs, { type FileHandle } from 'node:fs/promises';
+import nodeFs, { constants as FS, type BigIntStats } from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError } from '../core/errors.js';
+import { type RootedPath, childOf, lstatRooted, openRooted, rooted, splitParent, within } from './rooted.js';
 
 /**
  * File operations that do not let a symlink or a race widen what was
- * prepared. Every open of a final component uses `O_NOFOLLOW` where the
- * platform has it; the opened file is then checked to be the one at the path
- * (Linux: `/proc/self/fd`; elsewhere: `fstat` vs `lstat` identity).
+ * prepared. Every workspace path is reached through `rooted.ts`: no
+ * directory on the way is a link, and none is looked up again by path
+ * between the check and the use.
  */
 
-const NOFOLLOW = FS.O_NOFOLLOW ?? 0;
 /** Opening a FIFO or a device for reading must not wait for a writer before the type check. */
 const NONBLOCK = FS.O_NONBLOCK ?? 0;
-const IS_LINUX = process.platform === 'linux';
 const IS_WINDOWS = process.platform === 'win32';
 
 export function sha256(data: Buffer | string): string {
@@ -26,80 +25,65 @@ export function errnoCode(err: unknown): string | undefined {
   return undefined;
 }
 
-function sameFile(a: Stats, b: Stats): boolean {
-  return a.ino === b.ino && a.dev === b.dev;
+function settle<T>(run: (done: (err: NodeJS.ErrnoException | null, value: T) => void) => void): Promise<T> {
+  return new Promise((resolve, reject) => run((err, value) => (err ? reject(err) : resolve(value))));
 }
 
-/** Throws `stale` unless the real path of `dir` is still exactly `dir`. */
-export async function assertDirUnchanged(dir: string): Promise<void> {
-  let real: string;
-  try {
-    real = await fs.realpath(dir);
-  } catch (err) {
-    throw new ToolError('stale', `${dir} changed since prepared (${errnoCode(err) ?? 'unresolvable'})`);
-  }
-  const same = IS_WINDOWS ? real.toLowerCase() === dir.toLowerCase() : real === dir;
-  if (!same) throw new ToolError('stale', `file changed since prepared: ${dir} now resolves to ${real}`);
-}
+const fdStat = (fd: number): Promise<BigIntStats> => settle((done) => nodeFs.fstat(fd, { bigint: true }, done));
+const fdSync = (fd: number): Promise<void> => settle((done) => nodeFs.fsync(fd, (err) => done(err, undefined)));
+const fdRead = (fd: number, buf: Buffer): Promise<number> => settle((done) => nodeFs.read(fd, buf, 0, buf.length, null, done));
 
-/** Verifies an open handle is the file at `abs` and not something reached through a link. */
-async function assertHandleAt(handle: FileHandle, abs: string): Promise<Stats> {
-  const st = await handle.stat();
-  if (IS_LINUX) {
-    let actual: string | undefined;
-    try {
-      actual = await fs.readlink(`/proc/self/fd/${handle.fd}`);
-    } catch {
-      actual = undefined;
-    }
-    if (actual !== undefined && actual !== abs) {
-      throw new ToolError('stale', `file changed since prepared: ${abs} opened as ${actual}`);
-    }
-  }
-  const lst = await fs.lstat(abs).catch(() => null);
-  if (!lst || lst.isSymbolicLink() || !sameFile(st, lst)) {
-    throw new ToolError('stale', `file changed since prepared: ${abs} was replaced while it was opened`);
-  }
-  // Without /proc, the directory holding the opened file must still be itself:
-  // a parent swapped for a link would make `lstat(abs)` agree with the handle.
-  if (!IS_LINUX) await assertDirUnchanged(path.dirname(abs));
-  return st;
-}
-
-/**
- * Opens a regular file for reading and checks the handle is the file at
- * `abs` reached without any link (final component or parent). Returns null
- * when the file is not there or not a regular file reachable that way.
- */
-export async function readFileInside(abs: string, maxBytes: number): Promise<Buffer | null> {
-  let handle: FileHandle;
-  try {
-    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW | NONBLOCK);
-  } catch {
-    return null;
-  }
-  try {
-    const st = await assertHandleAt(handle, abs);
-    if (!st.isFile() || st.size > maxBytes) return null;
-    return await readAtMost(handle, maxBytes);
-  } catch {
-    return null;
-  } finally {
-    await handle.close();
+async function fdWriteAll(fd: number, bytes: Buffer): Promise<void> {
+  for (let off = 0; off < bytes.length; ) {
+    off += await settle<number>((done) => nodeFs.write(fd, bytes, off, bytes.length - off, null, done));
   }
 }
 
 /** Reads an open file to its end, or returns null once it holds more than `maxBytes` (it may grow after the size check). */
-async function readAtMost(handle: FileHandle, maxBytes: number): Promise<Buffer | null> {
+async function readAtMost(fd: number, maxBytes: number): Promise<Buffer | null> {
   const chunks: Buffer[] = [];
   let total = 0;
   for (;;) {
     const chunk = Buffer.allocUnsafe(64 * 1024);
-    const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+    const bytesRead = await fdRead(fd, chunk);
     if (bytesRead === 0) return Buffer.concat(chunks, total);
     total += bytesRead;
     if (total > maxBytes) return null;
     chunks.push(chunk.subarray(0, bytesRead));
+  }
+}
+
+/** Opens `file` for reading through its rooted directory; null when it or a directory on the way is missing. */
+function openForRead(file: RootedPath): number | null {
+  try {
+    return openRooted(file, FS.O_RDONLY | NONBLOCK);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw err;
+  }
+}
+
+/**
+ * Reads a regular file of at most `maxBytes` (grep). Returns null when it is
+ * missing, not a regular file, a link, or larger.
+ */
+export async function readFileInside(file: RootedPath, maxBytes: number): Promise<Buffer | null> {
+  let fd: number | null;
+  try {
+    fd = openForRead(file);
+  } catch {
+    return null;
+  }
+  if (fd === null) return null;
+  try {
+    const st = await fdStat(fd);
+    if (!st.isFile() || st.size > BigInt(maxBytes)) return null;
+    return await readAtMost(fd, maxBytes);
+  } catch {
+    return null;
+  } finally {
+    nodeFs.closeSync(fd);
   }
 }
 
@@ -217,31 +201,33 @@ export interface RegularFile {
 }
 
 /**
- * Reads a regular file without following a link at its final component.
+ * Reads a regular file without following a link anywhere on its path.
  * Returns null when it does not exist. `maxBytes` bounds the read.
  */
-export async function readRegularFile(abs: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<RegularFile | null> {
-  let handle: FileHandle;
+export async function readRegularFile(file: RootedPath, maxBytes = Number.MAX_SAFE_INTEGER): Promise<RegularFile | null> {
+  const abs = file.abs;
+  let fd: number | null;
   try {
-    handle = await fs.open(abs, FS.O_RDONLY | NOFOLLOW | NONBLOCK);
+    fd = openForRead(file);
   } catch (err) {
+    if (err instanceof ToolError) throw err;
     const code = errnoCode(err);
-    if (code === 'ENOENT') return null;
     if (code === 'ELOOP' || code === 'EMLINK') throw new ToolError('stale', `${abs} is a symbolic link`);
     if (code === 'EISDIR') throw new ToolError('invalid-args', `${abs} is a directory`);
     throw new ToolError('tool-error', `cannot open ${abs}: ${code ?? String(err)}`);
   }
+  if (fd === null) return null;
   try {
-    const st = await assertHandleAt(handle, abs);
+    const st = await fdStat(fd);
     if (st.isDirectory()) throw new ToolError('invalid-args', `${abs} is a directory`);
     if (!st.isFile()) throw new ToolError('invalid-args', `${abs} is not a regular file`);
-    const tooBig = (size: number | string): ToolError => new ToolError('tool-error', `${abs} is ${size} bytes, more than the ${maxBytes}-byte limit`);
-    if (st.size > maxBytes) throw tooBig(st.size);
-    const bytes = await readAtMost(handle, maxBytes);
+    const tooBig = (size: bigint | string): ToolError => new ToolError('tool-error', `${abs} is ${size} bytes, more than the ${maxBytes}-byte limit`);
+    if (st.size > BigInt(maxBytes)) throw tooBig(st.size);
+    const bytes = await readAtMost(fd, maxBytes);
     if (bytes === null) throw tooBig(`over ${maxBytes}`);
-    return { bytes, mode: st.mode & 0o7777, id: fileId(await handle.stat({ bigint: true })) };
+    return { bytes, mode: Number(st.mode) & 0o7777, id: fileId(await fdStat(fd)) };
   } finally {
-    await handle.close();
+    nodeFs.closeSync(fd);
   }
 }
 
@@ -261,23 +247,25 @@ export interface WriteOutcome {
   readonly dirId: DirId;
 }
 
-async function missingDirs(dir: string): Promise<string[]> {
-  const missing: string[] = [];
-  let cursor = dir;
-  for (;;) {
-    const st = await fs.lstat(cursor).catch(() => null);
-    if (st) {
-      if (st.isSymbolicLink() || !st.isDirectory()) {
-        throw new ToolError('stale', `file changed since prepared: ${cursor} is not a directory`);
-      }
+/** The directories from the deepest existing one down to `dir` that are missing, outermost first. */
+function missingDirs(dir: RootedPath): RootedPath[] {
+  const missing: RootedPath[] = [];
+  for (let cursor = dir; ; ) {
+    try {
+      within(cursor, () => undefined);
       break;
+    } catch (err) {
+      if (errnoCode(err) === 'ENOTDIR') throw new ToolError('stale', `file changed since prepared: ${cursor.abs} is not a directory`);
+      if (errnoCode(err) !== 'ENOENT' || cursor.parts.length === 0) throw err;
     }
     missing.push(cursor);
-    const parent = path.dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
+    cursor = splitParent(cursor).dir;
   }
   return missing.reverse();
+}
+
+function dirIdAt(dir: RootedPath): DirId {
+  return within(dir, (at) => dirId(nodeFs.lstatSync(at('.'), { bigint: true })));
 }
 
 export interface AtomicWriteOptions {
@@ -300,9 +288,9 @@ function hashMatches(expect: Expectation, current: RegularFile | null): boolean 
   return current !== null && sha256(current.bytes) === expect.sha256;
 }
 
-/** Atomically replaces (or creates) `abs` under its per-path lock; see `writeLocked`. */
-export function atomicWrite(abs: string, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions = {}): Promise<WriteOutcome> {
-  return withPathLock(abs, () => writeLocked(abs, bytes, expect, opts));
+/** Atomically replaces (or creates) `file` under its per-path lock; see `writeLocked`. */
+export function atomicWrite(file: RootedPath, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions = {}): Promise<WriteOutcome> {
+  return withPathLock(file.abs, () => writeLocked(file, bytes, expect, opts));
 }
 
 function assertNotAborted(signal: AbortSignal | undefined, abs: string): void {
@@ -310,26 +298,26 @@ function assertNotAborted(signal: AbortSignal | undefined, abs: string): void {
 }
 
 /**
- * Replaces (or creates) `abs` with `bytes`, holding its per-path lock:
- * 1. the parent directory must still resolve to itself (no symlink swapped in);
- * 2. the identity recorded at prepare and the content must match (else `stale`, no write);
- * 3. the bytes go to a temp file in the same directory (fsync), keep the old mode,
+ * Replaces (or creates) `file` with `bytes`, holding its per-path lock:
+ * 1. the identity recorded at prepare and the content must match (else `stale`, no write);
+ * 2. missing directories are created one at a time, each in the rooted directory above it;
+ * 3. the bytes go to a temp file in the same rooted directory (fsync), keep the old mode,
  *    and are renamed over the target; a create uses `link` so it never replaces
  *    a file that appeared meanwhile.
  * Right before the rename the signal, the identity and the content hash are
- * checked again. `beforeWrite` runs after the checks and before anything is written (the
- * transaction journal snapshots the original there).
+ * checked again, and the temp file must still be the one written. `beforeWrite`
+ * runs after the checks and before anything is written (the transaction journal
+ * snapshots the original there).
  */
-async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions): Promise<WriteOutcome> {
+async function writeLocked(file: RootedPath, bytes: Buffer, expect: Expectation, opts: AtomicWriteOptions): Promise<WriteOutcome> {
   const { beforeWrite, signal, identity } = opts;
+  const abs = file.abs;
   assertNotAborted(signal, abs);
   if (identity) await assertIdentity(identity);
-  const dir = path.dirname(abs);
-  const toCreate = await missingDirs(dir);
-  const existingAncestor = toCreate.length > 0 ? path.dirname(toCreate[0] ?? dir) : dir;
-  await assertDirUnchanged(existingAncestor);
+  const { dir, name } = splitParent(file);
+  const toCreate = missingDirs(dir);
 
-  const before = await readRegularFile(abs);
+  const before = await readRegularFile(file);
   if (expect.kind === 'absent' && before !== null) {
     throw new ToolError('stale', `file changed since prepared: ${abs} was created after the call was prepared`);
   }
@@ -338,99 +326,120 @@ async function writeLocked(abs: string, bytes: Buffer, expect: Expectation, opts
     if (sha256(before.bytes) !== expect.sha256) throw new ToolError('stale', `file changed since prepared: ${abs}`);
   }
 
-  await beforeWrite?.(before, toCreate);
+  await beforeWrite?.(
+    before,
+    toCreate.map((d) => d.abs),
+  );
 
   const createdDirs: string[] = [];
   for (const d of toCreate) {
+    const { dir: parent, name: dirName } = splitParent(d);
     try {
-      await fs.mkdir(d);
-      createdDirs.push(d);
-      opts.onDirCreated?.(d, dirId(await fs.lstat(d, { bigint: true })), await currentDirId(path.dirname(d)));
+      within(parent, (at) => nodeFs.mkdirSync(at(dirName)));
     } catch (err) {
       if (errnoCode(err) !== 'EEXIST') throw err;
+      continue;
     }
-    await assertDirUnchanged(d);
+    createdDirs.push(d.abs);
+    opts.onDirCreated?.(d.abs, dirIdAt(d), dirIdAt(parent));
   }
-  await assertDirUnchanged(dir);
 
-  const tmp = path.join(dir, `.acm-${randomBytes(6).toString('hex')}.tmp`);
+  const tmpName = `.acm-${randomBytes(6).toString('hex')}.tmp`;
+  const tmp = childOf(dir, tmpName);
   const mode = opts.mode ?? before?.mode ?? 0o666;
-  const handle = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | NOFOLLOW, mode);
+  const fd = openRooted(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL, mode);
   let install: InstallId;
   let dirIdentity: DirId;
   try {
     try {
-      await handle.writeFile(bytes);
-      if ((opts.mode !== undefined || before) && !IS_WINDOWS) await handle.chmod(mode);
-      await handle.sync();
-      install = installIdOf(await handle.stat({ bigint: true }));
+      await fdWriteAll(fd, bytes);
+      if (opts.mode !== undefined || before) nodeFs.fchmodSync(fd, mode);
+      await fdSync(fd);
+      install = installIdOf(await fdStat(fd));
     } finally {
-      await handle.close();
+      nodeFs.closeSync(fd);
     }
-    await opts.beforeInstall?.(install, tmp);
+    await opts.beforeInstall?.(install, tmp.abs);
     // Last checks before the irreversible step.
-    await assertDirUnchanged(dir);
-    dirIdentity = dirId(await fs.lstat(dir, { bigint: true }));
     if (identity) await assertIdentity(identity);
-    if (!hashMatches(expect, await readRegularFile(abs))) {
+    if (!hashMatches(expect, await readRegularFile(file))) {
       throw new ToolError('stale', `file changed since prepared: ${abs} changed while it was being written`);
     }
     assertNotAborted(signal, abs);
-    if (expect.kind === 'absent') {
-      try {
-        await fs.link(tmp, abs);
-      } catch (err) {
-        const code = errnoCode(err);
-        if (code === 'EEXIST') throw new ToolError('stale', `file changed since prepared: ${abs} was created meanwhile`);
-        throw err;
+    dirIdentity = within(dir, (at) => {
+      const temp = nodeFs.lstatSync(at(tmpName), { bigint: true });
+      if (!temp.isFile() || installIdOf(temp) !== install) throw new ToolError('stale', `the temp file for ${abs} was replaced before it was installed`);
+      const here = dirId(nodeFs.lstatSync(at('.'), { bigint: true }));
+      if (expect.kind === 'absent') {
+        try {
+          nodeFs.linkSync(at(tmpName), at(name));
+        } catch (err) {
+          if (errnoCode(err) === 'EEXIST') throw new ToolError('stale', `file changed since prepared: ${abs} was created meanwhile`);
+          throw err;
+        }
+      } else {
+        nodeFs.renameSync(at(tmpName), at(name));
       }
-    } else {
-      await fs.rename(tmp, abs);
-    }
+      return here;
+    });
   } finally {
     // After `link` the temp name is still there; after `rename` it is gone.
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    try {
+      within(dir, (at) => nodeFs.rmSync(at(tmpName), { force: true }));
+    } catch {
+      // The directory is no longer reachable without a link; the temp file stays.
+    }
   }
-  const st = await fs.lstat(abs, { bigint: true }).catch(() => null);
+  const st = lstatOrNull(file);
   const id = st !== null && installIdOf(st) === install ? fileId(st) : undefined;
   return { before, createdDirs, install, id, dirId: dirIdentity };
 }
 
+function lstatOrNull(p: RootedPath): BigIntStats | null {
+  try {
+    return lstatRooted(p);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Removes `abs` when it is a regular file holding `expectHash`, reached
- * without any link (its directory must still resolve to itself).
+ * Removes `file` when it is a regular file holding `expectHash`, reached
+ * without any link, and still the file that was read.
  */
-export function removeRegularFile(abs: string, expectHash: string): Promise<void> {
-  return withPathLock(abs, async () => {
-    await assertDirUnchanged(path.dirname(abs));
-    const current = await readRegularFile(abs);
+export function removeRegularFile(file: RootedPath, expectHash: string): Promise<void> {
+  return withPathLock(file.abs, async () => {
+    const current = await readRegularFile(file);
     if (current === null) return;
-    if (sha256(current.bytes) !== expectHash) throw new ToolError('stale', `${abs} changed; not removed`);
-    await fs.unlink(abs);
+    if (sha256(current.bytes) !== expectHash) throw new ToolError('stale', `${file.abs} changed; not removed`);
+    const { dir, name } = splitParent(file);
+    within(dir, (at) => {
+      if (fileId(nodeFs.lstatSync(at(name), { bigint: true })) !== current.id) throw new ToolError('stale', `${file.abs} changed; not removed`);
+      nodeFs.unlinkSync(at(name));
+    });
   });
 }
 
 /**
- * Removes `dir` when it is an empty real directory (not a link, not reached
- * through one) strictly inside one of `roots`, and, when `id` is given, still
- * the directory with that identity. Returns whether it was removed.
+ * Removes `dir` when it is an empty real directory strictly inside one of
+ * `roots`, reached without any link, and, when `id` is given, still the
+ * directory with that identity. Returns whether it was removed.
  */
 export async function removeEmptyDirInside(dir: string, roots: readonly string[], id?: DirId): Promise<boolean> {
   if (!path.isAbsolute(dir)) return false;
-  const st = await fs.lstat(dir, { bigint: true }).catch(() => null);
-  if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
-  if (id !== undefined && dirId(st) !== id) return false;
-  const real = await fs.realpath(dir).catch(() => null);
-  const same = real !== null && (IS_WINDOWS ? real.toLowerCase() === dir.toLowerCase() : real === dir);
-  if (!same) return false;
-  const inside = roots.some((root) => {
-    const rel = path.relative(IS_WINDOWS ? root.toLowerCase() : root, IS_WINDOWS ? dir.toLowerCase() : dir);
+  const root = roots.find((r) => {
+    const rel = path.relative(r, dir);
     return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
   });
-  if (!inside) return false;
+  if (root === undefined) return false;
+  const { dir: parent, name } = splitParent(rooted(root, dir));
   try {
-    await fs.rmdir(dir);
-    return true;
+    return within(parent, (at) => {
+      const st = nodeFs.lstatSync(at(name), { bigint: true });
+      if (!st.isDirectory() || (id !== undefined && dirId(st) !== id)) return false;
+      nodeFs.rmdirSync(at(name));
+      return true;
+    });
   } catch {
     return false;
   }

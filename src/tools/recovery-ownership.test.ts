@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import fs from 'node:fs/promises';
+import nodeFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -133,7 +133,9 @@ it('preserves a committed write between two unfinished journals with matching by
 
 it('preserves later committed bytes after an earlier prepared write failed to land', async () => {
   const one = start();
-  vi.spyOn(fs, 'link').mockRejectedValueOnce(Object.assign(new Error('no space'), { code: 'ENOSPC' }));
+  vi.spyOn(nodeFs, 'linkSync').mockImplementationOnce(() => {
+    throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
+  });
   await expect(write('a', 'first', one)).rejects.toThrow(/no space/);
   const committed = start();
   await write('a', 'first', committed);

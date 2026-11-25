@@ -2,13 +2,14 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import fsp from 'node:fs/promises';
+import nodeFs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolError, TransactionFinalizeError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
 import { COMMITTED, FileTransaction, type JournalIo, journalRoot, recoverStaleJournals } from './journal.js';
 import { atomicWrite, sha256, syncDirStrict } from './fs-ops.js';
+import { rooted } from './rooted.js';
 import { NodeToolRuntime } from './runtime.js';
 
 let base: string;
@@ -135,7 +136,9 @@ describe('transactions', () => {
 
   it('rolls back the directories a write created before it failed', async () => {
     const tx = rt.beginTransaction();
-    vi.spyOn(fsp, 'link').mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    vi.spyOn(nodeFs, 'linkSync').mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    });
     await expect(write('fresh/deep/file.txt', 'x', tx)).rejects.toThrow(/ENOSPC/);
     await tx.rollback();
     expect(existsSync(path.join(ws, 'fresh'))).toBe(false);
@@ -147,7 +150,7 @@ describe('transactions', () => {
     const dir = path.join(ws, 'shared');
     const abs = path.join(dir, 'x.txt');
     const bytes = Buffer.from('x\n');
-    const outcome = await atomicWrite(abs, bytes, { kind: 'absent' }, {
+    const outcome = await atomicWrite(rooted(ws, abs), bytes, { kind: 'absent' }, {
       beforeWrite: async (before, dirs) => {
         await tx.record(abs, ws, before, dirs);
         // Another writer creates the directory between the checks and the write.

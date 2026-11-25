@@ -1,8 +1,9 @@
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import nodeFs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import type { PolicySnapshot, PreparedCall, SessionContext, ToolCall } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
@@ -53,29 +54,21 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-describe.skipIf(IS_WINDOWS)('1. grep and glob re-check every directory and file they open', () => {
-  /** Swaps `ws/sub` for a link to `outside` around the walk's listing of it. */
-  async function withSwap<T>(when: 'before-list' | 'after-list', fn: () => Promise<T>): Promise<T> {
+describe.skipIf(IS_WINDOWS)('1. grep and glob reach every directory and file without a link', () => {
+  /** Swaps `ws/sub` for a link to `outside` right after the walk lists the directory that holds `name`. */
+  function swapAfterListing(name: string): void {
     const sub = path.join(ws, 'sub');
-    const original = fsp.readdir;
+    const readdirSync = nodeFs.readdirSync;
     let swapped = false;
-    const swap = async (): Promise<void> => {
-      swapped = true;
-      renameSync(sub, `${sub}-old`);
-      symlinkSync(outside, sub, 'dir');
-    };
-    const patched = async function (this: unknown, ...args: Parameters<typeof fsp.readdir>): Promise<unknown> {
-      if (args[0] === sub && !swapped && when === 'before-list') await swap();
-      const result: unknown = await Reflect.apply(original, this, args);
-      if (args[0] === sub && !swapped && when === 'after-list') await swap();
-      return result;
-    };
-    Object.assign(fsp, { readdir: patched });
-    try {
-      return await fn();
-    } finally {
-      Object.assign(fsp, { readdir: original });
-    }
+    vi.spyOn(nodeFs, 'readdirSync').mockImplementation(((dir: string, options: { withFileTypes: true }) => {
+      const entries = readdirSync(dir, options);
+      if (!swapped && entries.some((e) => e.name === name)) {
+        swapped = true;
+        renameSync(sub, `${sub}-old`);
+        symlinkSync(outside, sub, 'dir');
+      }
+      return entries;
+    }) as typeof readdirSync);
   }
 
   beforeEach(() => {
@@ -83,15 +76,21 @@ describe.skipIf(IS_WINDOWS)('1. grep and glob re-check every directory and file 
     writeFileSync(path.join(ws, 'sub', 'secret'), 'inside\n');
   });
 
-  it('grep does not read a file through a parent swapped for a link mid-walk', async () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('grep does not read a file through a parent swapped for a link after the parent was listed', async () => {
     const prepared = await rt.prepare({ id: 'g', tool: 'grep', args: { pattern: 'SECRET' } }, ctx, policy);
-    const result = await withSwap('after-list', () => rt.commit(prepared, new AbortController().signal));
+    swapAfterListing('secret');
+    const result = await rt.commit(prepared, new AbortController().signal);
     expect('matches' in result ? result.matches : null).toEqual([]);
   });
 
-  it('glob does not list names from a directory swapped for a link before it is listed', async () => {
+  it('glob does not list names from a directory swapped for a link after it was queued', async () => {
     const prepared = await rt.prepare({ id: 'g', tool: 'glob', args: { pattern: '**/*' } }, ctx, policy);
-    const result = await withSwap('before-list', () => rt.commit(prepared, new AbortController().signal));
+    swapAfterListing('sub');
+    const result = await rt.commit(prepared, new AbortController().signal);
     expect('files' in result ? result.files : null).toEqual([]);
   });
 });

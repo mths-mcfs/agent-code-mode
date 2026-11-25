@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import fs from 'node:fs/promises';
+import nodeFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -140,7 +140,9 @@ describe.skipIf(windows)('transaction journal', () => {
   it('removes new directories after the filesystem refuses to install the new file', async () => {
     const tx = tools.beginTransaction();
     const noSpace = Object.assign(new Error('simulated filesystem out of space'), { code: 'ENOSPC' });
-    vi.spyOn(fs, 'link').mockRejectedValueOnce(noSpace);
+    vi.spyOn(nodeFs, 'linkSync').mockImplementationOnce(() => {
+      throw noSpace;
+    });
 
     await expect(write('fresh/deep/file.txt', 'new bytes', tx)).rejects.toThrow(/out of space/);
     await tx.rollback();

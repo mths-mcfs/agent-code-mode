@@ -10,6 +10,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { makeContext } from '../testing/index.js';
 import { FileTransaction, recoverStaleJournals } from './journal.js';
 import { NodeToolRuntime } from './runtime.js';
+import { cutBeforeRename, pinTempMtime } from '../testing/install-faults.js';
 
 let base: string;
 let workspace: string;
@@ -64,35 +65,11 @@ const partialId = (st: ReturnType<typeof stats>) => `${st.dev}:${st.ino}:${st.si
 const id = (st: ReturnType<typeof stats>) => `${partialId(st)}:${st.ctimeNs}`;
 const oldTime = 1_700_000_000;
 
-function pinTempMtime() {
-  const open = fs.open.bind(fs);
-  vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
-    const handle = await open(file, flags, mode);
-    if (typeof file === 'string' && path.dirname(file) === folder && file.endsWith('.tmp')) {
-      const sync = handle.sync.bind(handle);
-      vi.spyOn(handle, 'sync').mockImplementation(async () => {
-        await handle.utimes(oldTime, oldTime);
-        await sync();
-      });
-    }
-    return handle;
-  });
-}
-
 async function crashBeforeRename(tx: FileTransaction) {
-  let temp = '';
-  const rename = fs.rename.bind(fs);
-  vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-    if (to !== target) return rename(from, to);
-    temp = String(from);
-    throw new Error('simulated process stop before rename');
-  });
-  const rm = fs.rm.bind(fs);
-  vi.spyOn(fs, 'rm').mockImplementation(async (file, options) => {
-    if (file !== temp) await rm(file, options);
-  });
+  const cut = cutBeforeRename(vi, target, 'simulated process stop before rename');
   await expect(write(tx)).rejects.toThrow('simulated process stop before rename');
   vi.restoreAllMocks();
+  const temp = cut.temp();
   expect(existsSync(temp)).toBe(true);
   abandon(tx);
   return temp;
@@ -119,7 +96,7 @@ it('keeps a later separately installed file with identical bytes', async () => {
 });
 
 it('keeps a same-size rewrite with the same mtime and different ctime', async () => {
-  pinTempMtime();
+  pinTempMtime(vi, oldTime);
   const tx = new FileTransaction(state);
   await write(tx);
   vi.restoreAllMocks();
@@ -149,7 +126,7 @@ it('keeps the target when the user added a hard link', async () => {
 });
 
 it('keeps a replacement on an inode recorded as reused, with the same mtime', async () => {
-  pinTempMtime();
+  pinTempMtime(vi, oldTime);
   const tx = new FileTransaction(state);
   await write(tx);
   vi.restoreAllMocks();
@@ -208,7 +185,7 @@ it('keeps a replacement user file at a recorded temp path', async () => {
 });
 
 it('keeps later user content written in place at the recorded temp path', async () => {
-  pinTempMtime();
+  pinTempMtime(vi, oldTime);
   const tx = new FileTransaction(state);
   const temp = await crashBeforeRename(tx);
   const before = stats(temp);
