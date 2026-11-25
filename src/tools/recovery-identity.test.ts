@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, renameSync, linkSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync, renameSync, linkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,7 +18,7 @@ const time = 1_700_000_000;
 const policy = { host: 'generic', bashContainment: { mode: 'none' }, protectedPaths: [], payload: null } as const;
 
 beforeEach(() => {
-  base = mkdtempSync(path.join(os.tmpdir(), 'l1-verifier-'));
+  base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'l1-verifier-')));
   workspace = path.join(base, 'workspace');
   state = path.join(base, 'state');
   mkdirSync(workspace);
