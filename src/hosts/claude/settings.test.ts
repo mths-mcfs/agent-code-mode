@@ -39,7 +39,7 @@ function adapterFor(l: Layout, argv?: readonly string[], parent?: { readonly cwd
 }
 
 function bash(command: string, cwd: string): PreparedCall {
-  return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 1000 }, effect: { command, cwd, timeoutMs: 1000, containment: { mode: 'none' } } };
+  return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 1000 }, effect: { command, shell: { path: '/bin/bash', args: ['-c'] }, cwd, timeoutMs: 1000, containment: { mode: 'none' } } };
 }
 
 async function decide(l: Layout, command: string, argv?: readonly string[], mode = 'bypassPermissions', contained = true): Promise<string> {

@@ -6,6 +6,7 @@ import { formatRunResult, type McpToolResponse } from '../core/output.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
+import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
 import type { HostKind, RunResult } from '../core/types.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
@@ -21,13 +22,14 @@ The script is the body of an async JavaScript function; return a value to get it
   grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {matches: [{file, line, text}], truncated}
   glob({pattern, path?, maxResults?}) -> {files, truncated}
   console.log/info/warn/error
-A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError. Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).`;
+A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError. Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).
+${CODEX_SEARCH_NOTE}`;
 
 export const RUN_TOOL: Tool = {
   name: 'run',
   title: 'Run a code-mode script',
   description:
-    'Run a JavaScript script that calls bash, read, write, edit, grep and glob. Every call goes through the host permission rules and hooks. Returns the script result, logs, a call log, changed files and the diff.',
+    `Run a JavaScript script that calls bash, read, write, edit, grep and glob. Every call goes through the host permission rules and hooks. Returns the script result, logs, a call log, changed files and the diff. ${CODEX_SEARCH_NOTE}`,
   inputSchema: RUN_INPUT_JSON_SCHEMA,
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   _meta: { 'anthropic/alwaysLoad': true },

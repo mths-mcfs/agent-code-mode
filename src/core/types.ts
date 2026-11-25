@@ -74,7 +74,11 @@ export interface EditArgs {
 
 /** `grep(args)`: search file contents with a regular expression. */
 export interface GrepArgs {
-  /** Regular expression (the tool runtime documents the dialect). */
+  /**
+   * Regular expression. The tool runtime documents the dialect; under a host
+   * that lowers searches to shell commands (Codex: ripgrep), it is that
+   * command's dialect.
+   */
   readonly pattern: string;
   /** File or directory to search. Defaults to the session cwd. */
   readonly path?: string;
@@ -232,9 +236,24 @@ export type BashContainment =
       readonly network: boolean;
     };
 
+/**
+ * The interpreter that runs a `bash` command: the tool runtime executes
+ * `[path, ...args, command]` (inside its containment wrapper, if any). Host
+ * adapters evaluate the command in this shell's dialect and refuse a shell
+ * they cannot evaluate.
+ */
+export interface BashShell {
+  /** Absolute path of the shell executable, e.g. `/bin/bash`. */
+  readonly path: string;
+  /** Arguments before the command, e.g. `['-c']`. */
+  readonly args: readonly string[];
+}
+
 /** Effect of a `bash` call. */
 export interface BashEffect {
   readonly command: string;
+  /** The shell that interprets `command`. */
+  readonly shell: BashShell;
   /** Absolute real working directory. */
   readonly cwd: string;
   /** Effective timeout in milliseconds. */
@@ -323,6 +342,17 @@ export type PreparedCall = {
   };
 }[ToolName];
 
+/**
+ * A search run as a shell command (`HostAdapter.lowerSearch`). The hook and
+ * rule checks see `command`, the bash executor runs exactly it, and `parse`
+ * turns its result into the search result (throwing `ToolError` when the
+ * output is not a well-formed result of that command).
+ */
+export interface SearchLowering {
+  readonly command: string;
+  parse(result: BashResult): GrepResult | GlobResult;
+}
+
 /** A `PreparedCall` narrowed to one tool. */
 export type PreparedCallOf<K extends ToolName> = Extract<PreparedCall, { readonly tool: K }>;
 
@@ -382,11 +412,16 @@ export type DenySource =
  *   this project's camelCase args shape for the same tool (the adapter maps
  *   from the host's native shape). It is untrusted: the dispatcher re-validates,
  *   re-prepares and re-checks it statically.
+ * - `bindsPreparedFile: true` (only meaningful with `updatedArgs`): the hook
+ *   evaluated a write/edit against the file version the first preparation
+ *   read. The re-prepared call must then target the same `absPath` with the
+ *   same `beforeHash` (null included), or the dispatcher denies it (source
+ *   `hook`). Without it, a rewrite may point anywhere the static rules allow.
  * - `ask`: the host would prompt the user. Without an interactive channel the
  *   dispatcher turns it into `deny` with source `ask-unavailable`.
  */
 export type Decision =
-  | { readonly kind: 'allow'; readonly updatedArgs?: unknown; readonly reason?: string }
+  | { readonly kind: 'allow'; readonly updatedArgs?: unknown; readonly bindsPreparedFile?: true; readonly reason?: string }
   | { readonly kind: 'deny'; readonly reason: string; readonly source: DenySource }
   | { readonly kind: 'ask'; readonly reason: string };
 
@@ -456,6 +491,14 @@ export interface HookContextStore {
  */
 export interface HostAdapter<P = unknown> {
   readonly host: HostKind;
+  /**
+   * Optional: how this host runs a `grep` or `glob` call as one exact bash
+   * command, for a host whose rules and hooks only see shell commands. The
+   * dispatcher then prepares, checks, authorizes and commits that bash
+   * command in place of the search, and builds the result with `parse`.
+   * Throws `ToolError` (e.g. `invalid-args`) for a search it cannot run.
+   */
+  lowerSearch?(prepared: PreparedCallOf<'grep'> | PreparedCallOf<'glob'>, ctx: SessionContext, policy: PolicySnapshot<P>): SearchLowering;
   /** Loads the host's permission rules and hooks for this context. */
   loadPolicy(ctx: SessionContext): Promise<PolicySnapshot<P> | PolicyLoadError>;
   /**

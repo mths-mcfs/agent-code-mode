@@ -32,7 +32,12 @@ export function isToolName(tool: string): tool is ToolName {
 }
 
 export const DecisionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('allow'), reason: z.string().optional(), updatedArgs: z.unknown().optional() }),
+  z.object({
+    kind: z.literal('allow'),
+    reason: z.string().optional(),
+    updatedArgs: z.unknown().optional(),
+    bindsPreparedFile: z.literal(true).optional(),
+  }),
   z.object({ kind: z.literal('ask'), reason: z.string() }),
   z.object({
     kind: z.literal('deny'),

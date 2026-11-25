@@ -6,6 +6,9 @@ import { ToolError, errorMessage } from '../core/errors.js';
 import { findMatchingPattern, isUncPath, normalizeDrivePath, normalizeSeparators, pathPatternRegExp } from '../core/paths.js';
 import { MAX_ARG_CHARS } from '../core/schemas.js';
 import type {
+  BashEffect,
+  BashResult,
+  BashShell,
   PolicySnapshot,
   PreparedCall,
   RollbackReport,
@@ -107,7 +110,13 @@ export interface MemoryToolRuntimeOptions {
   readonly commitDelayMs?: number;
   /** When false, a mutating commit ignores abort during `commitDelayMs` and applies its effect anyway. Default true. */
   readonly honorAbortInCommit?: boolean;
+  /** Shell reported in bash effects. Defaults to `/bin/bash -c`. */
+  readonly shell?: BashShell;
+  /** Result of a committed bash call. Defaults to stdout `fake: <command>`. */
+  readonly bashResult?: (effect: BashEffect) => BashResult;
 }
+
+export const MEMORY_BASH_SHELL: BashShell = { path: '/bin/bash', args: ['-c'] };
 
 /** One committed call, for assertions. */
 export interface CommitRecord {
@@ -426,7 +435,7 @@ export class MemoryToolRuntime implements ToolRuntime {
       case 'bash': {
         const cwd = this.#resolve(call.args.cwd ?? '.', ctx);
         const args = { command: call.args.command, cwd, timeoutMs: call.args.timeoutMs ?? 120_000 };
-        return { id: call.id, tool: 'bash', args, effect: { ...args, containment: policy.bashContainment } };
+        return { id: call.id, tool: 'bash', args, effect: { ...args, shell: this.#opts.shell ?? MEMORY_BASH_SHELL, containment: policy.bashContainment } };
       }
       case 'read': {
         const absPath = this.#resolve(call.args.path, ctx);
@@ -623,6 +632,7 @@ export class MemoryToolRuntime implements ToolRuntime {
     switch (prepared.tool) {
       case 'bash': {
         this.#recordCommit(prepared, prepared.effect.command);
+        if (this.#opts.bashResult) return this.#opts.bashResult(prepared.effect);
         return { exitCode: 0, signal: null, stdout: `fake: ${prepared.effect.command}\n`, stderr: '', truncated: false, timedOut: false };
       }
       case 'write':
