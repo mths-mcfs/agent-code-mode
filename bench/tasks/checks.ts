@@ -69,6 +69,14 @@ export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<Nod
   });
 }
 
+/** Runs `node --test` and checks that it passes; a failure names the first failing tests and their errors. */
+export async function checkNodeTests(checks: Checks, workspace: string): Promise<void> {
+  const tests = await runNodeTests(workspace);
+  const passed = tests.ok && tests.fail === 0;
+  const failures = tests.output.split('\n').map((l) => l.trim()).filter((l) => /^✖|^not ok|Error|signal|exit code/.test(l)).slice(0, 4);
+  checks.check(passed, `node --test passes (pass ${tests.pass}, fail ${tests.fail})${passed || failures.length === 0 ? '' : `: ${failures.join(' | ')}`}`);
+}
+
 export async function checkUnchanged(checks: Checks, workspace: string, initial: ReadonlyMap<string, string>, files: readonly string[], label: string): Promise<void> {
   const changed: string[] = [];
   for (const file of files) if ((await readWorkspaceFile(workspace, file)) !== initial.get(file)) changed.push(file);

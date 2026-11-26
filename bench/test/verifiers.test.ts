@@ -23,3 +23,9 @@ describe.each(TASK_IDS)('verifier %s', (id) => {
     expect(result.pass).toBe(true);
   });
 });
+
+it('names the failing test when node --test fails', async () => {
+  const ws = await workspace('T2');
+  const result = await TASKS.T2.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+  expect(result.details.find((d) => d.includes('node --test'))).toMatch(/^FAIL node --test passes \(pass 12, fail 1\): .*truncate keeps the result within max/);
+});

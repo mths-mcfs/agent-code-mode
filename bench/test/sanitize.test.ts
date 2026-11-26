@@ -65,6 +65,15 @@ describe('sanitizer', () => {
     expect(sanitize(sanitize(transcript, run), { ...ctx, ids: new Map() })).toBe(sanitize(transcript, run));
   });
 
+  it('redacts assignments and header lines of every name ending in TOKEN or KEY', () => {
+    const text = sanitize(['token=tk-1', 'NPM_TOKEN=npm_FAKE0001', 'export HF_TOKEN="hf_FAKE0002"', 'GH_TOKEN: ghx-3', '> x-api-key: sk-FAKE-0004', 'api-key: k5', 'PRIVATE_KEY=pk6', 'OPENAI_API_KEY=abc7'].join('\n'), ctx);
+    for (const leak of ['tk-1', 'npm_FAKE0001', 'hf_FAKE0002', 'ghx-3', 'sk-FAKE-0004', 'k5', 'pk6', 'abc7']) expect(text).not.toContain(leak);
+    expect(text).toContain('NPM_TOKEN=<redacted>');
+    expect(text).toContain('> x-api-key: <redacted>');
+    const prose = 'monkey=3 keyboard: x tokens: 5 max_tokens=100 the key: value input_tokens: 12';
+    expect(sanitize(prose, ctx)).toBe(prose);
+  });
+
   it('keeps tool names, relative arguments and numbers', () => {
     const line = JSON.stringify({ name: 'Edit', input: { file_path: 'src/handlers/orders.js' }, usage: { input_tokens: 1234 } });
     expect(sanitize(line, ctx)).toBe(line);

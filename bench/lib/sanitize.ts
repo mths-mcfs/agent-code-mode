@@ -41,7 +41,7 @@ const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<token>'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g, '$1 <token>'],
   [/(\\*"(?:api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|authorization|password|passwd|secret|client[_-]?secret|cookie|private[_-]?key)\\*"\s*:\s*(\\*)")(?:(?!\2").)*(\2")/gi, '$1<redacted>$3'],
-  [/\b((?:[A-Z0-9]+_)*(?:API_?KEY|ACCESS_TOKEN|REFRESH_TOKEN|AUTH_TOKEN|SECRET|PASSWORD|AUTHORIZATION)|api_?key|access_token|refresh_token|auth_token|secret|password|authorization)(\s*[=:]\s*)(?!<redacted>)("?)[^\s"',;]+/gi, '$1$2$3<redacted>'],
+  [/\b((?:[A-Za-z0-9]+[_-])+(?:TOKEN|KEY)|(?:[A-Za-z0-9]+[_-])*(?:SECRET|PASSWORD|AUTHORIZATION)|token|apikey)(\s*[=:]\s*)(?!<redacted>)("?)[^\s"',;]+/gi, '$1$2$3<redacted>'],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
 ];
 

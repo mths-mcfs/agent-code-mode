@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { checkScope, Checks, readWorkspaceFile, runNodeTests } from '../checks.ts';
+import { checkScope, Checks, readWorkspaceFile, checkNodeTests } from '../checks.ts';
 import type { VerifyContext, VerifyResult } from '../types.ts';
 
 async function listJs(workspace: string, dir: string): Promise<string[]> {
@@ -32,8 +32,7 @@ export async function verify(ctx: VerifyContext): Promise<VerifyResult> {
   checks.check(missing.length === 0, missing.length === 0 ? `${renameTo} used in all ${renameFiles.length} files` : `${renameTo} missing in: ${missing.join(', ')}`);
   const money = (await readWorkspaceFile(ctx.workspace, 'src/lib/money.js')) ?? '';
   checks.check(new RegExp(`export function ${renameTo}\\(`).test(money), `src/lib/money.js exports ${renameTo}`);
-  const tests = await runNodeTests(ctx.workspace);
-  checks.check(tests.ok && tests.fail === 0, `node --test passes (pass ${tests.pass}, fail ${tests.fail})`);
+  await checkNodeTests(checks, ctx.workspace);
   const targets = new Set(renameFiles);
   await checkScope(checks, ctx.workspace, ctx.initial, (f) => targets.has(f));
   return checks.result();
