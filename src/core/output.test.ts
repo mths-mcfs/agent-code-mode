@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DIFF_INLINE_CHARS, ERROR_CAP_CHARS, RESULT_IN_NEXT_BLOCK, SUCCESS_CAP_CHARS, diffStat, formatRunResult, safeStringify, type McpToolResponse } from './output.js';
 import { OverflowStore } from './overflow.js';
@@ -176,6 +180,28 @@ describe('diffStat', () => {
   it('takes the new name of a git header whose old and new names differ in length', () => {
     expect(Object.keys(diffStat('diff --git a/x b/longer.txt\nnew file mode 100644\n').files)).toEqual(['longer.txt']);
     expect(Object.keys(diffStat('diff --git "a/a b " "b/c d e "\nnew file mode 100644\n').files)).toEqual(['c d e ']);
+  });
+
+  it('reads renames from real git diff -M output, a space in the new path included', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-gitdiff-'));
+    try {
+      const git = (...args: string[]): string => execFileSync('git', ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.noprefix=false', ...args], { cwd: dir, encoding: 'utf8' });
+      git('init', '-q');
+      writeFileSync(path.join(dir, 'x'), Array.from({ length: 20 }, (_, i) => `line ${i}\n`).join(''));
+      writeFileSync(path.join(dir, 'same'), 'keep\n');
+      git('add', '.');
+      git('commit', '-qm', 'base');
+      mkdirSync(path.join(dir, 'dir b'));
+      git('mv', 'x', 'dir b/file');
+      writeFileSync(path.join(dir, 'dir b', 'file'), Array.from({ length: 20 }, (_, i) => `line ${i === 3 ? 'three' : i}\n`).join(''));
+      git('mv', 'same', 'dir b/same copy');
+      git('add', '-A');
+      const diff = git('diff', '--cached', '-M', '--no-color');
+      expect(diff).toContain('rename to dir b/file');
+      expect(diffStat(diff).files).toEqual({ 'dir b/file': '+1 -1', 'dir b/same copy': '+0 -0' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('counts empty new files, binary files and quoted names', () => {

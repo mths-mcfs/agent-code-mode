@@ -82,45 +82,71 @@ export interface DiffStat {
 }
 
 /**
- * Line counts per file of a combined unified diff. Hunk lines are counted from
- * the hunk header, so a removed line that starts with `--` is not taken for a
- * file header.
+ * The `b/` name of `diff --git <a-name> <b-name>` when the header alone settles it: quoted, or both halves
+ * naming the same path. A rename with a space in either path is ambiguous there; `rename to` names it.
  */
-/** The `b/` name of `diff --git <a-name> <b-name>`, the header of an empty new file (it has no hunk). */
-function gitHeaderNewName(rest: string): string {
+function gitHeaderNewName(rest: string): string | undefined {
   if (rest.endsWith('"')) {
     const start = rest.lastIndexOf(' "b/');
     if (start !== -1) return rest.slice(start + 1);
   }
   const half = (rest.length - 1) / 2;
   if (Number.isInteger(half) && rest[half] === ' ' && rest.slice(2, half) === rest.slice(half + 3)) return rest.slice(half + 1);
-  const start = rest.lastIndexOf(' b/');
-  return start === -1 ? rest : rest.slice(start + 1);
+  return undefined;
 }
 
-function unquote(name: string): string {
-  if (!(name.startsWith('"') && name.endsWith('"') && name.length >= 2)) return name;
-  return name.slice(1, -1).replace(/\\(["\\])/g, '$1');
+/** A path from a diff line: git ends a name holding a space with a tab, and quotes names with special bytes. */
+function diffName(raw: string): string {
+  const name = raw.endsWith('\t') ? raw.slice(0, -1) : raw;
+  const unquoted = name.startsWith('"') && name.endsWith('"') && name.length >= 2 ? name.slice(1, -1).replace(/\\(["\\])/g, '$1') : name;
+  return unquoted.replace(/^[ab]\//, '');
 }
 
+/**
+ * Line counts per file of a combined unified diff. Hunk lines are counted from the hunk header, so a
+ * removed line that starts with `--` is not taken for a file header. A git block with no hunk (an empty
+ * new file, a pure rename) is named by its `rename to` line or its header.
+ */
 export function diffStat(diff: string): DiffStat {
   const counts = new Map<string, { added: number; removed: number }>();
   let current: { added: number; removed: number } | undefined;
   let oldLeft = 0;
   let newLeft = 0;
   let oldName = '';
+  /** A `diff --git` block not yet named by a `+++` line; git writes an `index` line before a block's own `---`. */
+  let block: { header: string; name?: string; indexed?: true } | undefined;
+  const file = (name: string): void => {
+    current = counts.get(name) ?? { added: 0, removed: 0 };
+    counts.set(name, current);
+  };
+  const closeBlock = (): void => {
+    if (block === undefined) return;
+    const start = block.header.lastIndexOf(' b/');
+    file(block.name ?? diffName(start === -1 ? block.header : block.header.slice(start + 1)));
+    block = undefined;
+  };
   for (const line of diff.split('\n')) {
     if (current && (oldLeft > 0 || newLeft > 0)) {
       if (line.startsWith('+')) (current.added++, newLeft--);
       else if (line.startsWith('-')) (current.removed++, oldLeft--);
       else if (!line.startsWith('\\')) (oldLeft--, newLeft--);
+    } else if (line.startsWith('diff --git ')) {
+      closeBlock();
+      const header = line.slice(11);
+      const name = gitHeaderNewName(header);
+      block = { header, ...(name === undefined ? {} : { name: diffName(name) }) };
+    } else if (block && line.startsWith('rename to ')) {
+      block.name = diffName(line.slice(10));
+    } else if (block && line.startsWith('index ')) {
+      block.indexed = true;
     } else if (line.startsWith('--- ')) {
+      // Without an index line, this `---` starts the next file: the block before it had no hunk.
+      if (!block?.indexed) closeBlock();
       oldName = line.slice(4);
-    } else if (line.startsWith('+++ ') || line.startsWith('diff --git ')) {
-      const newName = line.startsWith('+++ ') ? line.slice(4) : gitHeaderNewName(line.slice(11));
-      const name = unquote(newName === '/dev/null' ? oldName : newName).replace(/^[ab]\//, '');
-      current = counts.get(name) ?? { added: 0, removed: 0 };
-      counts.set(name, current);
+    } else if (line.startsWith('+++ ')) {
+      const newName = line.slice(4);
+      file(diffName(newName === '/dev/null' ? oldName : newName));
+      block = undefined;
     } else {
       const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
       if (hunk) {
@@ -129,6 +155,7 @@ export function diffStat(diff: string): DiffStat {
       }
     }
   }
+  closeBlock();
   const entries = [...counts];
   const added = entries.reduce((n, [, c]) => n + c.added, 0);
   const removed = entries.reduce((n, [, c]) => n + c.removed, 0);
