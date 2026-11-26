@@ -3,9 +3,9 @@ import type { BashResult, TestFailure, TestResult } from './types.js';
 /** Most failures one `test()` result lists. */
 export const MAX_TEST_FAILURES = 50;
 /** Only the end of the output is read: runners print their totals last. */
-const MAX_PARSE_CHARS = 256 * 1024;
-/** Longer lines are cut before any pattern runs on them. */
-const MAX_LINE_CHARS = 2_000;
+const MAX_PARSE_CHARS = 128 * 1024;
+/** Longer lines are cut before any pattern runs on them, so no pattern sees more than this. */
+const MAX_LINE_CHARS = 500;
 const MAX_NAME_CHARS = 300;
 const MAX_MESSAGE_CHARS = 500;
 const TAIL_LINES = 40;
@@ -41,17 +41,18 @@ function count(text: string, words: Readonly<Record<string, keyof Totals>>): Tot
   return found ? totals : undefined;
 }
 
-function lastMatch(lines: readonly string[], pattern: RegExp): RegExpExecArray | undefined {
+/** The summary text of the last line `read` accepts. */
+function lastSummary(lines: readonly string[], read: (trimmed: string) => string | undefined): string | undefined {
   for (let i = lines.length - 1; i >= 0; i--) {
-    const m = pattern.exec(lines[i] ?? '');
-    if (m) return m;
+    const found = read((lines[i] ?? '').trim());
+    if (found !== undefined) return found;
   }
   return undefined;
 }
 
-function messageAfter(lines: readonly string[], index: number, strip: RegExp = /^\s+/): string | undefined {
+function messageAfter(lines: readonly string[], index: number): string | undefined {
   for (let i = index + 1; i < Math.min(lines.length, index + 6); i++) {
-    const text = (lines[i] ?? '').replace(strip, '').trim();
+    const text = (lines[i] ?? '').trim();
     if (text !== '') return clip(text, MAX_MESSAGE_CHARS);
   }
   return undefined;
@@ -61,87 +62,122 @@ function failure(name: string, message: string | undefined): TestFailure {
   return message === undefined ? { name: clip(name.trim(), MAX_NAME_CHARS) } : { name: clip(name.trim(), MAX_NAME_CHARS), message };
 }
 
-function collect(lines: readonly string[], pattern: RegExp, message: (i: number, m: RegExpExecArray) => string | undefined): TestFailure[] {
+/** `name` reads a failure's name from a trimmed line, or undefined when the line names none. */
+function collect(lines: readonly string[], name: (trimmed: string) => string | undefined, message: (i: number) => string | undefined): TestFailure[] {
   const out: TestFailure[] = [];
   for (let i = 0; i < lines.length && out.length < MAX_TEST_FAILURES + 1; i++) {
-    const m = pattern.exec(lines[i] ?? '');
-    if (m?.[1] !== undefined) out.push(failure(m[1], message(i, m)));
+    const found = name((lines[i] ?? '').trim());
+    if (found !== undefined && found !== '') out.push(failure(found, message(i)));
   }
   return out;
 }
 
+const after = (trimmed: string, prefix: string): string | undefined => (trimmed.startsWith(prefix) ? trimmed.slice(prefix.length).trim() : undefined);
+const countLines = (lines: readonly string[], test: (trimmed: string) => boolean): number => lines.reduce((n, l) => n + (test(l.trim()) ? 1 : 0), 0);
+
 const VITEST: Runner = {
   name: 'vitest',
   totals: (lines) => {
-    const m = lastMatch(lines, /^\s*Tests\s{2,}(.+?)\s*\(\d+\)\s*$/);
-    return m?.[1] === undefined ? undefined : count(m[1], { passed: 'passed', failed: 'failed', skipped: 'skipped', todo: 'skipped' });
+    const body = lastSummary(lines, (t) => {
+      const m = /^Tests\s{2,}/.exec(t);
+      const open = t.lastIndexOf(' (');
+      if (m === null || open < m[0].length || !/^ \(\d+\)$/.test(t.slice(open))) return undefined;
+      return t.slice(m[0].length, open);
+    });
+    return body === undefined ? undefined : count(body, { passed: 'passed', failed: 'failed', skipped: 'skipped', todo: 'skipped' });
   },
-  failures: (lines) => collect(lines, /^\s*FAIL\s+(.+\S)\s*$/, (i) => messageAfter(lines, i)),
+  failures: (lines) => collect(lines, (t) => (/^FAIL\s/.test(t) ? t.slice(4).trim() : undefined), (i) => messageAfter(lines, i)),
 };
 
 const JEST: Runner = {
   name: 'jest',
   totals: (lines) => {
-    const m = lastMatch(lines, /^Tests:\s+(.+)$/);
-    return m?.[1] === undefined ? undefined : count(m[1], { passed: 'passed', failed: 'failed', skipped: 'skipped', todo: 'skipped' });
+    const body = lastSummary(lines, (t) => after(t, 'Tests:'));
+    return body === undefined ? undefined : count(body, { passed: 'passed', failed: 'failed', skipped: 'skipped', todo: 'skipped' });
   },
   // `● Console` heads the logs a passing test printed, not a failure.
-  failures: (lines) => collect(lines, /^\s*● (?!Console\s*$)(.+\S)\s*$/, (i) => messageAfter(lines, i)),
+  failures: (lines) => collect(lines, (t) => { const n = after(t, '● '); return n === 'Console' ? undefined : n; }, (i) => messageAfter(lines, i)),
 };
 
 const PYTEST: Runner = {
   name: 'pytest',
   totals: (lines) => {
-    const m = lastMatch(lines, /^=+ (.+) in [\d.]+s(?: \([^)]*\))? =+$/);
-    return m?.[1] === undefined
+    const body = lastSummary(lines, (t) => {
+      if (!t.startsWith('=') || !t.endsWith('=')) return undefined;
+      let a = 0;
+      let b = t.length;
+      while (t[a] === '=') a++;
+      while (b > a && t[b - 1] === '=') b--;
+      return /^(.*) in [\d.]+s(?: \([^)]*\))?$/.exec(t.slice(a, b).trim())?.[1];
+    });
+    return body === undefined
       ? undefined
-      : count(m[1], { passed: 'passed', failed: 'failed', error: 'failed', errors: 'failed', skipped: 'skipped', xfailed: 'skipped', xpassed: 'passed', deselected: 'skipped' });
+      : count(body, { passed: 'passed', failed: 'failed', error: 'failed', errors: 'failed', skipped: 'skipped', xfailed: 'skipped', xpassed: 'passed', deselected: 'skipped' });
   },
-  failures: (lines) => collect(lines, /^(?:FAILED|ERROR) (\S+)/, (i) => {
-    const rest = / - (.+)$/.exec(lines[i] ?? '')?.[1];
-    return rest === undefined ? undefined : clip(rest, MAX_MESSAGE_CHARS);
-  }),
+  failures: (lines) =>
+    collect(lines, (t) => (t.startsWith('FAILED ') || t.startsWith('ERROR ') ? (t.split(' ')[1] ?? '') : undefined), (i) => {
+      const line = lines[i] ?? '';
+      const dash = line.indexOf(' - ');
+      return dash === -1 ? undefined : clip(line.slice(dash + 3), MAX_MESSAGE_CHARS);
+    }),
 };
 
-/** `node --test` with the spec reporter (`ℹ pass 1`) or TAP (`# pass 1`). */
-function nodeTotals(lines: readonly string[], prefix: string): Totals | undefined {
-  const totals: Totals = { passed: 0, failed: 0, skipped: 0 };
+/**
+ * `node --test` totals from its own final summary (`ℹ pass 1` or `# pass 1`): the last value of each key, since a
+ * test can print lines that look like a summary before it. Never more passes than result lines the output shows.
+ */
+function nodeTotals(lines: readonly string[], prefix: string, isResult: (trimmed: string) => boolean): Totals | undefined {
   const key: Readonly<Record<string, keyof Totals>> = { pass: 'passed', fail: 'failed', cancelled: 'failed', skipped: 'skipped', todo: 'skipped' };
-  const pattern = new RegExp(`^${prefix} (pass|fail|cancelled|skipped|todo) (\\d+)$`);
-  let found = false;
+  const last = new Map<string, number>();
   for (const line of lines) {
-    const m = pattern.exec(line);
-    const k = key[m?.[1] ?? ''];
-    if (m === null || k === undefined) continue;
-    totals[k] += Number(m[2]);
-    found = true;
+    const m = /^(\S+) (pass|fail|cancelled|skipped|todo) (\d+)$/.exec(line);
+    if (m === null || m[1] !== prefix || m[2] === undefined) continue;
+    last.set(m[2], Number(m[3]));
   }
-  return found ? totals : undefined;
+  if (last.size === 0) return undefined;
+  const totals: Totals = { passed: 0, failed: 0, skipped: 0 };
+  for (const [k, n] of last) totals[key[k] ?? 'skipped'] += n;
+  const results = countLines(lines, isResult);
+  if (results > 0) totals.passed = Math.min(totals.passed, results);
+  return totals;
 }
 
 const NODE_SPEC: Runner = {
   name: 'node:test',
-  totals: (lines) => nodeTotals(lines, 'ℹ'),
+  totals: (lines) => nodeTotals(lines, 'ℹ', (t) => t.startsWith('✔ ')),
   failures: (lines) => {
-    const start = lines.findIndex((l) => /^✖ failing tests:/.test(l));
+    const start = lines.findIndex((l) => l.startsWith('✖ failing tests:'));
     if (start === -1) return [];
-    return collect(lines.slice(start + 1), /^✖ (.+?)(?: \([\d.]+m?s\))?$/, (i) => messageAfter(lines.slice(start + 1), i));
+    const rest = lines.slice(start + 1);
+    return collect(rest, (t) => { const n = after(t, '✖ '); return n?.replace(/ \([\d.]+m?s\)$/, ''); }, (i) => messageAfter(rest, i));
   },
 };
 
 const TAP: Runner = {
   name: 'tap',
-  totals: (lines) => nodeTotals(lines, '#'),
+  totals: (lines) => nodeTotals(lines, '#', (t) => /^ok \d+/.test(t)),
   failures: (lines) =>
-    // A `# TODO` result does not fail the run.
-    collect(lines, /^\s*not ok \d+ - (?!.*# TODO\b)(.+?)(?: # .*)?$/i, (i) => {
-      for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
-        const m = /^\s*error: (.+)$/.exec(lines[j] ?? '');
-        if (m?.[1] !== undefined && m[1] !== '|-') return clip(m[1].replace(/^'(.*)'$/, '$1'), MAX_MESSAGE_CHARS);
-        if (/^\s*(?:not )?ok \d+/.test(lines[j] ?? '')) break;
-      }
-      return undefined;
-    }),
+    collect(
+      lines,
+      (t) => {
+        const m = /^not ok \d+ - /.exec(t);
+        if (m === null) return undefined;
+        const rest = t.slice(m[0].length);
+        const hash = rest.indexOf(' # ');
+        // A `# TODO` result does not fail the run.
+        if (hash !== -1 && /^todo\b/i.test(rest.slice(hash + 3))) return undefined;
+        return hash === -1 ? rest : rest.slice(0, hash);
+      },
+      (i) => {
+        for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
+          const t = (lines[j] ?? '').trim();
+          const err = after(t, 'error:');
+          if (err !== undefined && err !== '|-') return clip(err.replace(/^'(.*)'$/, '$1'), MAX_MESSAGE_CHARS);
+          if (/^(?:not )?ok \d+/.test(t)) break;
+        }
+        return undefined;
+      },
+    ),
 };
 
 const CARGO: Runner = {
@@ -149,17 +185,19 @@ const CARGO: Runner = {
   totals: (lines) => {
     let totals: Totals | undefined;
     for (const line of lines) {
-      const m = /^test result: \w+\. (.+)$/.exec(line);
-      const t = m?.[1] === undefined ? undefined : count(m[1], { passed: 'passed', failed: 'failed', ignored: 'skipped' });
+      const body = after(line.trim(), 'test result: ');
+      const t = body === undefined ? undefined : count(body, { passed: 'passed', failed: 'failed', ignored: 'skipped' });
       if (t === undefined) continue;
       totals ??= { passed: 0, failed: 0, skipped: 0 };
       totals.passed += t.passed;
       totals.failed += t.failed;
       totals.skipped += t.skipped;
     }
+    const results = countLines(lines, (t) => t.startsWith('test ') && t.endsWith(' ... ok'));
+    if (totals !== undefined && results > 0) totals.passed = Math.min(totals.passed, results);
     return totals;
   },
-  failures: (lines) => collect(lines, /^test (\S+) \.\.\. FAILED$/, () => undefined),
+  failures: (lines) => collect(lines, (t) => (t.startsWith('test ') && t.endsWith(' ... FAILED') ? t.slice(5, -' ... FAILED'.length) : undefined), () => undefined),
 };
 
 /** Checked in this order; the first whose summary is in the output wins. */
@@ -175,7 +213,8 @@ function tail(lines: readonly string[]): string {
  * Reads the result of a test command. The exit code and timeout decide
  * whether the run passed; the totals and failures found in the output only
  * add detail, and a failure found there makes it not ok. Bounded: only the
- * last 256 KiB of the output, each line cut at 2000 characters.
+ * last 128 KiB of the output, each line cut at 500 characters, and every
+ * pattern runs in time linear in the line.
  */
 export function testResult(result: BashResult): TestResult {
   const combined = result.stderr === '' ? result.stdout : result.stdout === '' ? result.stderr : `${result.stdout}\n${result.stderr}`;

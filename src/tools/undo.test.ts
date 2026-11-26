@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +7,7 @@ import { ToolError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
 import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
-import { FileTransaction, type JournalIo, journalRoot } from './journal.js';
+import { FileTransaction, type JournalIo, journalRoot, recoverStaleJournals } from './journal.js';
 import { sha256, syncDirStrict } from './fs-ops.js';
 import { NodeToolRuntime } from './runtime.js';
 
@@ -180,6 +181,35 @@ describe.skipIf(ROOTED_OPS_REFUSED)('FileTransaction.undo', () => {
     await tx.rollback();
     expect(read('a.txt')).toBe('a0\n');
     expect(read('b.txt')).toBe('b0\n');
+  });
+
+  it('recovery settles a file an undo put back just before the process died, with no conflict', async () => {
+    // The flush after the restore fails, so the record on disk is left as a crash right after the restore leaves it:
+    // the entry is still there, marked as being undone, and the file holds its original again.
+    const io: JournalIo = {
+      syncDir: async (dir, expected) => {
+        if (dir === ws && stage === 'undo') throw new Error('killed here');
+        await syncDirStrict(dir, expected);
+      },
+      removeDir: (dir) => import('node:fs/promises').then((fs) => fs.rm(dir, { recursive: true, force: true })),
+    };
+    let stage = 'write';
+    const tx = new FileTransaction(stateDir, io);
+    await write('a.txt', 'a1\n', tx);
+    stage = 'undo';
+    await tx.undo();
+    const manifestPath = path.join(tx.dir, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { pid: number; entries: { undoing?: true }[] };
+    expect(manifest.entries.map((e) => e.undoing)).toEqual([true]);
+    const pid = spawnSync(process.execPath, ['-e', '']).pid ?? 999_999;
+    manifest.pid = pid;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const [stamp, , hex] = path.basename(tx.dir).split('-');
+    renameSync(tx.dir, path.join(path.dirname(tx.dir), `${stamp}-${pid}-${hex}`));
+    const recovered = await recoverStaleJournals(stateDir, [ws], []);
+    expect(recovered.flatMap((r) => r.report.skipped)).toEqual([]);
+    expect(read('a.txt')).toBe('a0\n');
+    expect(readdirSync(journalRoot(stateDir))).toEqual([]);
   });
 
   it('is refused once the transaction finished', async () => {

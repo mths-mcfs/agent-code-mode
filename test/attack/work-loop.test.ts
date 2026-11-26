@@ -81,6 +81,41 @@ describe.runIf(posix)('scratch directory, undo and test() through run', () => {
       expect(out.result).toEqual(['PermissionDenied', 'PermissionDenied']);
     });
 
+    it('run B cannot write into run A\'s scratch while A is still running', async () => {
+      lab = makeLab();
+      server = await claudeServer(lab, {});
+      const handoff = path.join(lab.ws, 'a-dir.txt');
+      const done = path.join(lab.ws, 'b-done.txt');
+      const a = server.run(
+        `await write({ path: 'a-dir.txt', content: scratchDir });
+         await write({ path: scratchDir + '/a.txt', content: 'from A' });
+         for (let i = 0; i < 200; i++) { try { await read({ path: 'b-done.txt' }); break; } catch { await bash({ command: 'sleep 0.05' }); } }
+         return (await read({ path: scratchDir + '/a.txt' })).content;`,
+      );
+      for (let i = 0; i < 200 && !existsSync(handoff); i++) await new Promise((r) => setTimeout(r, 25));
+      const aDir = readFileSync(handoff, 'utf8');
+      const b = await server.run(
+        `const r = [];
+         try { await write({ path: ${JSON.stringify(aDir)} + '/a.txt', content: 'from B' }); r.push('written'); } catch (e) { r.push(e.code); }
+         try { await write({ path: ${JSON.stringify(aDir)} + '/new.txt', content: 'from B' }); r.push('written'); } catch (e) { r.push(e.code); }
+         r.push(scratchDir !== ${JSON.stringify(aDir)});
+         await write({ path: 'b-done.txt', content: 'done' });
+         return r;`,
+      );
+      expect(b.result).toEqual(['outside-workspace', 'outside-workspace', true]);
+      expect((await a).result).toBe('from A');
+      expect(existsSync(done)).toBe(true);
+    });
+
+    it('is not granted when a root the run may write holds the scratch base', async () => {
+      lab = makeLab();
+      server = await claudeServer(lab, { permissions: { additionalDirectories: [lab.base] } });
+      const out = await server.run('return typeof scratchDir;');
+      expect(out.result).toBe('undefined');
+      expect(out.warnings).toEqual([expect.stringMatching(/no scratch directory: .* holds the scratch base/)]);
+      expect(leftovers(lab)).toEqual([]);
+    });
+
     it('is not granted under Claude settings that block writes outside the working directories', async () => {
       lab = makeLab();
       server = await claudeServer(lab, { permissions: { blockWritesOutsideWorkingDirectories: true } });
@@ -89,15 +124,24 @@ describe.runIf(posix)('scratch directory, undo and test() through run', () => {
       expect(leftovers(lab)).toEqual([]);
     });
 
+    // The lab sits in the system temp dir: a temp dir Codex makes writable stands elsewhere, so it does not hold the scratch base.
+    const elsewhere = { slashTmp: '/nonexistent-acm-tmp', tmpdir: null };
     it.each([
       ['read-only', 'undefined'],
       ['workspace-write', 'string'],
       ['danger-full-access', 'string'],
     ])('under Codex %s it is %s', async (sandboxMode, type) => {
       lab = makeLab();
-      server = await codexServer(lab, { sandboxMode });
+      server = await codexServer(lab, { sandboxMode, tmpDirs: elsewhere });
       const out = await server.run('return typeof scratchDir;');
       expect(out.result).toBe(type);
+    });
+
+    it('under Codex workspace-write it is not granted when the writable /tmp holds the scratch base', async () => {
+      lab = makeLab();
+      server = await codexServer(lab, { sandboxMode: 'workspace-write', tmpDirs: { slashTmp: path.dirname(lab.base), tmpdir: null } });
+      const out = await server.run('return typeof scratchDir;');
+      expect(out.result).toBe('undefined');
     });
 
     it('under Codex workspace-write with both temp dirs excluded it is not granted', async () => {

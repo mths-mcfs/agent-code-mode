@@ -187,7 +187,7 @@ export interface CodexHook {
  */
 export async function codexServer(
   lab: Lab,
-  opts: { rules?: string; hooks?: readonly CodexHook[]; sandboxMode?: string; extraToml?: string } = {},
+  opts: { rules?: string; hooks?: readonly CodexHook[]; sandboxMode?: string; extraToml?: string; tmpDirs?: { slashTmp: string | null; tmpdir: string | null } } = {},
 ): Promise<Server> {
   const codexHome = path.join(lab.base, 'codex-home');
   mkdirSync(path.join(codexHome, 'rules'), { recursive: true });
@@ -210,7 +210,7 @@ export async function codexServer(
   const runtime: Runtime = {
     host: 'codex',
     contextProvider: new CodexContextProvider(),
-    adapter: new CodexHostAdapter({ io: () => io, hookEnv: { PATH: process.env['PATH'], SHELL: '/bin/sh' }, stateDir: lab.stateDir }),
+    adapter: new CodexHostAdapter({ io: () => io, hookEnv: { PATH: process.env['PATH'], SHELL: '/bin/sh' }, stateDir: lab.stateDir, ...(opts.tmpDirs ? { tmpDirs: opts.tmpDirs } : {}) }),
     tools: new NodeToolRuntime({ stateDir: lab.stateDir }),
     sandbox: new QuickJsSandbox(),
     maxTimeoutMs: 50_000,

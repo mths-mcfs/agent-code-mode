@@ -37,7 +37,7 @@ describe('testResult: recorded runner output (one pass, two failures, one skip)'
   });
 
   it('adds up every cargo test binary', () => {
-    const out = 'test a ... ok\ntest b ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 2 ignored; 0 measured\n\ntest result: ok. 4 passed; 0 failed; 0 ignored\n';
+    const out = 'test a ... ok\ntest b ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 2 ignored; 0 measured\n\ntest c ... ok\ntest d ... ok\ntest e ... ok\ntest f ... ok\ntest result: ok. 4 passed; 0 failed; 0 ignored\n';
     expect(testResult(bash(out))).toMatchObject({ runner: 'cargo', passed: 5, failed: 1, skipped: 2, failures: [{ name: 'b' }] });
   });
 });
@@ -94,7 +94,36 @@ describe('testResult: what is not a failure, and what still is', () => {
   });
 });
 
+describe('testResult: counts come from the runner\'s final summary', () => {
+  it('ignores TAP summary lines a test printed before the real one', () => {
+    const out = 'TAP version 13\n# pass 8\n# fail 0\nok 1 - only test\n1..1\n# tests 1\n# pass 1\n# fail 0\n';
+    expect(testResult(bash(out, { exitCode: 0 }))).toMatchObject({ ok: true, runner: 'tap', passed: 1, failed: 0 });
+  });
+
+  it('ignores spec summary lines a test printed, and never reports more passes than results', () => {
+    expect(testResult(bash('ℹ pass 8\n✔ only test (1ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n', { exitCode: 0 }))).toMatchObject({ runner: 'node:test', passed: 1 });
+    expect(testResult(bash('✔ only test (1ms)\nℹ pass 9\nℹ fail 0\n', { exitCode: 0 }))).toMatchObject({ runner: 'node:test', passed: 1 });
+  });
+});
+
 describe('testResult: bounded', () => {
+  it('reads a megabyte of incomplete summary lines quickly', () => {
+    const line = `      Tests  1 passed${' '.repeat(1_900)}(1`;
+    const out = `${Array.from({ length: Math.ceil(1_048_576 / line.length) }, () => line).join('\n')}\n`;
+    const started = performance.now();
+    const r = testResult(bash(out, { exitCode: 0 }));
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(r.runner).toBeNull();
+  });
+
+  it('reads a megabyte of near-miss lines of every runner quickly', () => {
+    const near = ['=== 1 passed in 0.1s', 'not ok 1 - ' + ' '.repeat(400) + 'x', 'FAIL ' + ' '.repeat(450), '✖ ' + '('.repeat(450), 'test result: ' + '1 passed '.repeat(50)];
+    const out = Array.from({ length: 3_000 }, (_, i) => near[i % near.length]).join('\n');
+    const started = performance.now();
+    testResult(bash(out));
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it('lists at most MAX_TEST_FAILURES failures and says it cut them', () => {
     const out = `${Array.from({ length: 80 }, (_, i) => `FAILED t.py::test_${i} - boom`).join('\n')}\n==== 80 failed in 1.00s ====\n`;
     const r = testResult(bash(out));

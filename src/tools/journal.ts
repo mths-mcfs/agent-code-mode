@@ -66,6 +66,8 @@ const EntrySchema = z.object({
    * Recovery restores only a file whose identity is the last confirmed one.
    */
   installs: z.array(z.object({ id: z.string(), temp: z.string().optional(), confirmed: z.string().optional() })).optional(),
+  /** Set before an undo restores the file: recovery then counts the original bytes, whoever wrote them, as settled. */
+  undoing: z.literal(true).optional(),
 });
 
 const ManifestSchema = z.object({
@@ -358,8 +360,10 @@ export class FileTransaction implements Transaction {
       const restored: string[] = [];
       const done: LiveEntry[] = [];
       const skipped: Skipped[] = [];
-      for (const live of [...this.#entries.values()].reverse()) {
-        if (!accept(live.entry.path)) continue;
+      const chosen = [...this.#entries.values()].reverse().filter((live) => accept(live.entry.path));
+      for (const live of chosen) live.entry.undoing = true;
+      if (chosen.length > 0 && this.#created) await this.#persist();
+      for (const live of chosen) {
         const outcome = await restoreLive(live);
         if (outcome === 'restored' || outcome === 'unchanged') {
           // Unchanged: the file already holds its original again (another writer put it back), so nothing is written.
@@ -639,7 +643,8 @@ async function undoEntry(
     }
     const file = rooted(root, entry.path);
     const current = await readRegularFile(file);
-    const untouched = current === null ? !entry.existed : current.id === entry.originalId;
+    // An undo that was putting this file back and was cut off before its record update leaves the original bytes: settled.
+    const untouched = current === null ? !entry.existed : current.id === entry.originalId || (entry.undoing === true && entry.existed && sha256(current.bytes) === entry.original);
     if (untouched) return;
     const lastConfirmed = (entry.installs ?? []).findLast((install) => install.confirmed !== undefined)?.confirmed;
     if (current === null || current.id !== lastConfirmed) {

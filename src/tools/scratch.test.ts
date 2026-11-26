@@ -89,19 +89,64 @@ describe('scratch directory', () => {
     expect(existsSync(path.join(outside, 'keep.bin'))).toBe(true);
   });
 
-  it('the sweep removes directories of dead processes only', async () => {
+  const deadPid = (): string => spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
+  const recorded = (dir: string): void => writeFileSync(`${dir}.owner`, `agent-code-mode scratch ${path.basename(dir)}\n`, { mode: 0o600 });
+
+  it('the sweep removes recorded directories of dead processes only, with their records', async () => {
     mkdirSync(base, { recursive: true, mode: 0o700 });
-    const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']).stdout.toString();
-    const deadDir = path.join(base, `${dead}-${'a'.repeat(32)}`);
+    const deadDir = path.join(base, `${deadPid()}-${'a'.repeat(32)}`);
     const liveDir = path.join(base, `${process.ppid}-${'b'.repeat(32)}`);
     const unrelated = path.join(base, 'not-a-scratch-dir');
     for (const d of [deadDir, liveDir, unrelated]) mkdirSync(path.join(d, 'x'), { recursive: true });
+    recorded(deadDir);
+    recorded(liveDir);
     const mine = await createScratch(base);
     await sweepScratch(base);
     expect(existsSync(deadDir)).toBe(false);
+    expect(existsSync(`${deadDir}.owner`)).toBe(false);
     expect(existsSync(liveDir)).toBe(true);
     expect(existsSync(unrelated)).toBe(true);
     expect(existsSync(mine.path)).toBe(true);
+  });
+
+  it('the sweep keeps a directory named like a dead run\'s that this server never recorded', async () => {
+    mkdirSync(base, { recursive: true, mode: 0o700 });
+    const lookalike = path.join(base, `${deadPid()}-${'d'.repeat(32)}`);
+    mkdirSync(lookalike);
+    writeFileSync(path.join(lookalike, 'keep.txt'), 'mine');
+    const forged = path.join(base, `${deadPid()}-${'e'.repeat(32)}`);
+    mkdirSync(forged);
+    writeFileSync(`${forged}.owner`, 'something else\n');
+    await sweepScratch(base);
+    expect(existsSync(path.join(lookalike, 'keep.txt'))).toBe(true);
+    expect(existsSync(forged)).toBe(true);
+  });
+
+  it.skipIf(!posix)('the sweep touches nothing in a base other users can write, or one that is a link', async () => {
+    mkdirSync(base, { recursive: true, mode: 0o700 });
+    const deadDir = path.join(base, `${deadPid()}-${'f'.repeat(32)}`);
+    mkdirSync(deadDir);
+    recorded(deadDir);
+    chmodSync(base, 0o777);
+    await sweepScratch(base);
+    expect(existsSync(deadDir)).toBe(true);
+    chmodSync(base, 0o700);
+    const link = path.join(tmp, 'linked-base');
+    spawnSync('ln', ['-s', base, link]);
+    await sweepScratch(link);
+    expect(existsSync(deadDir)).toBe(true);
+  });
+
+  it.skipIf(!posix)('the sweep does not follow a recorded name that is a link out of the base', async () => {
+    mkdirSync(base, { recursive: true, mode: 0o700 });
+    const outside = path.join(tmp, 'outside');
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, 'keep.txt'), 'x');
+    const name = path.join(base, `${deadPid()}-${'9'.repeat(32)}`);
+    spawnSync('ln', ['-s', outside, name]);
+    recorded(name);
+    await sweepScratch(base);
+    expect(existsSync(path.join(outside, 'keep.txt'))).toBe(true);
   });
 
   it('the sweep of a missing base does nothing', async () => {

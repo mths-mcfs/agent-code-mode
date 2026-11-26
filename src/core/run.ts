@@ -1,3 +1,5 @@
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { Dispatcher, type StopReason } from './dispatcher.js';
 import { TransactionFinalizeError, errorMessage } from './errors.js';
 import { releasingClaims } from './file-claims.js';
@@ -220,13 +222,28 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       notes.push(`this run has no scratch directory: ${errorMessage(err)}`);
     }
   }
-  const result = await runWithin(req, scratch === undefined ? deps : { ...deps, ctx: { ...deps.ctx, scratchDir: scratch.path } }, scratch);
+  const result = await runWithin(req, scratch === undefined ? deps : { ...deps, ctx: { ...deps.ctx, scratchDir: scratch.path } }, scratch, notes);
   const left = await scratch?.remove().catch((err: unknown) => errorMessage(err));
   if (left !== undefined) notes.push(`the scratch directory ${scratch?.path ?? ''} could not be removed (${left}); the next server start removes it`);
   return notes.length === 0 ? result : { ...result, warnings: [...notes, ...result.warnings] };
 }
 
-async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: ScratchDir | undefined): Promise<RunResult> {
+/**
+ * A root this run may write that holds the scratch base: it would let the run
+ * write other runs' scratch directories too, so the run gets none.
+ */
+async function coveringRoot(base: string, policy: PolicySnapshot<unknown>, ctx: SessionContext): Promise<string | undefined> {
+  const c = policy.bashContainment;
+  const roots = [ctx.cwd, ...ctx.roots, ...(policy.additionalRoots ?? []), ...(c.mode === 'sandbox' && !c.readOnly ? c.writableRoots : [])].filter((r) => r !== policy.scratchRoot);
+  for (const root of roots) {
+    const real = await realpath(root).catch(() => path.resolve(root));
+    const rel = path.relative(real, base);
+    if (rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))) return root;
+  }
+  return undefined;
+}
+
+async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: ScratchDir | undefined, notes: string[]): Promise<RunResult> {
   const now = deps.now ?? (() => performance.now());
   const timeoutMs = resolveTimeoutMs(req.timeoutMs, deps.maxTimeoutMs);
   // One deadline for the whole run, policy loading included; the grace after it is for stopping and finishing.
@@ -266,9 +283,23 @@ async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: Scrat
     } catch (err) {
       policy = { error: errorMessage(err) };
     }
+    let ctx = deps.ctx;
+    let scratch = scratchDir !== undefined && !('error' in policy) && policy.scratchRoot === scratchDir.path ? scratchDir : undefined;
+    const cover = scratch === undefined || 'error' in policy ? undefined : await coveringRoot(path.dirname(scratch.path), policy, deps.ctx);
+    if (scratch !== undefined && cover !== undefined) {
+      notes.push(`this run has no scratch directory: ${cover}, which it may write, holds the scratch base ${path.dirname(scratch.path)}, so other runs' scratch directories would be writable too`);
+      const { scratchDir: _unused, ...rest } = deps.ctx;
+      ctx = rest;
+      scratch = undefined;
+      try {
+        const loaded = await bounded(() => deps.adapter.loadPolicy(ctx), { signal: controller.signal });
+        policy = loaded.done ? loaded.value : { error: 'the run stopped while the host policy was loading' };
+      } catch (err) {
+        policy = { error: errorMessage(err) };
+      }
+    }
     checkDeadline();
     if (req.transaction && stopReason === undefined) tx = releasingClaims(deps.tools.beginTransaction());
-    const scratch = scratchDir !== undefined && !('error' in policy) && policy.scratchRoot === scratchDir.path ? scratchDir : undefined;
 
     const overflow = deps.overflow;
     const leftMs = deadline - now();
@@ -276,7 +307,7 @@ async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: Scrat
     dispatcher = new Dispatcher<P>({
       adapter: deps.adapter,
       tools: deps.tools,
-      ctx: deps.ctx,
+      ctx,
       policy,
       checkDeadline,
       ...(overflow ? { readOverflow: (args: unknown) => overflow.read(args) } : {}),

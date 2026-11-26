@@ -10,7 +10,7 @@ export const MAX_SCRATCH_BYTES = 512 * 1024 * 1024;
 /** Most entries (files, directories, links) one run's scratch directory may hold. */
 export const MAX_SCRATCH_ENTRIES = 20_000;
 
-const NAME = /^(\d+)-[0-9a-f]{32}$/;
+const RECORD = /^((\d+)-[0-9a-f]{32})\.owner$/;
 
 /**
  * Where runs' scratch directories live: next to the server state directory
@@ -31,15 +31,30 @@ async function assertPrivate(dir: string): Promise<void> {
   }
 }
 
+function ownedByUs(st: { uid: number }): boolean {
+  return process.platform === 'win32' || st.uid === process.getuid?.();
+}
+
+const recordText = (name: string): string => `agent-code-mode scratch ${name}\n`;
+
 /** Creates an empty directory only this user can open, named after this process so a later start can remove it if this one dies. */
 export async function createScratch(base: string, limits: ScratchLimits = DEFAULT_LIMITS): Promise<ScratchDir> {
   await fs.mkdir(base, { recursive: true, mode: 0o700 });
   await assertPrivate(base);
-  const dir = path.join(base, `${process.pid}-${randomBytes(16).toString('hex')}`);
-  // Without `recursive`, an entry already at the random name is an error instead of being adopted.
-  await fs.mkdir(dir, { mode: 0o700 });
+  const name = `${process.pid}-${randomBytes(16).toString('hex')}`;
+  // The record says this server made the directory: the startup sweep removes only directories that have one.
+  const record = path.join(base, `${name}.owner`);
+  await fs.writeFile(record, recordText(name), { flag: 'wx', mode: 0o600 });
+  const dir = path.join(base, name);
+  try {
+    // Without `recursive`, an entry already at the random name is an error instead of being adopted.
+    await fs.mkdir(dir, { mode: 0o700 });
+  } catch (err) {
+    await fs.rm(record, { force: true });
+    throw err;
+  }
   const real = await fs.realpath(dir);
-  return new Scratch(real, limits);
+  return new Scratch(real, record, limits);
 }
 
 export interface ScratchLimits {
@@ -51,11 +66,13 @@ const DEFAULT_LIMITS: ScratchLimits = { bytes: MAX_SCRATCH_BYTES, entries: MAX_S
 
 class Scratch implements ScratchDir {
   readonly path: string;
+  readonly #record: string;
   readonly #limits: ScratchLimits;
   #removed = false;
 
-  constructor(dir: string, limits: ScratchLimits) {
+  constructor(dir: string, record: string, limits: ScratchLimits) {
     this.path = dir;
+    this.#record = record;
     this.#limits = limits;
   }
 
@@ -70,8 +87,10 @@ class Scratch implements ScratchDir {
   async remove(): Promise<string | undefined> {
     if (this.#removed) return undefined;
     const failed = await removeTree(this.path);
-    if (failed === undefined) this.#removed = true;
-    return failed;
+    if (failed !== undefined) return failed;
+    this.#removed = true;
+    await fs.rm(this.#record, { force: true }).catch(() => undefined);
+    return undefined;
   }
 }
 
@@ -139,15 +158,33 @@ function isAlive(pid: number): boolean {
 }
 
 /**
- * Removes the scratch directories of server processes that are gone. A
- * directory of a live process (this one included) is left alone; a reused
+ * Removes the scratch directories of server processes that are gone. It acts
+ * only in a base that is a real directory private to this user, and only on a
+ * directory this server recorded making (`<name>.owner`, outside what scripts
+ * can write), that is a real directory owned by this user, right in the base.
+ * A directory of a live process (this one included) is left alone; a reused
  * pid keeps a dead run's directory until that process ends too. Never throws.
  */
 export async function sweepScratch(base: string): Promise<void> {
+  try {
+    await assertPrivate(base);
+  } catch {
+    return;
+  }
   const names = await fs.readdir(base).catch(() => [] as string[]);
-  for (const name of names) {
-    const pid = Number(NAME.exec(name)?.[1]);
-    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || isAlive(pid)) continue;
-    await removeTree(path.join(base, name));
+  for (const entry of names) {
+    const m = RECORD.exec(entry);
+    const name = m?.[1];
+    const pid = Number(m?.[2]);
+    if (name === undefined || !Number.isInteger(pid) || pid <= 0 || pid === process.pid || isAlive(pid)) continue;
+    const record = path.join(base, entry);
+    const recorded = await fs.lstat(record).catch(() => null);
+    if (recorded === null || !recorded.isFile() || !ownedByUs(recorded)) continue;
+    if ((await fs.readFile(record, 'utf8').catch(() => '')) !== recordText(name)) continue;
+    const dir = path.join(base, name);
+    const st = await fs.lstat(dir).catch(() => null);
+    if (st !== null && (!st.isDirectory() || !ownedByUs(st))) continue;
+    if (st !== null && (await removeTree(dir)) !== undefined) continue;
+    await fs.rm(record, { force: true }).catch(() => undefined);
   }
 }
