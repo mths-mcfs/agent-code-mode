@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "id": "warmup-claude-T1-B-r1",
+  "configHash": "c46d34821979",
+  "config": {
+    "host": "claude",
+    "task": "T1",
+    "arm": "B",
+    "hostVersion": "2.1.332 (Claude Code)",
+    "model": "claude-opus-5-5",
+    "effort": "medium",
+    "maxTurns": 60,
+    "isolation": "--setting-sources project; --strict-mcp-config; CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1; temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)",
+    "codexCatalogSha256": null,
+    "timeoutMin": 15,
+    "seed": 580478811,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "taskTreeSha256": "fa6f240b52a58203d55fe71b340c993fb8fb5e69104cb7e95f915df6111d4ba4",
+    "promptSha256": "b6bd360e29c281194fa45242826794dc2e1c29aed6281b15c5db445f57ffb406",
+    "armDefinitionSha256": "dc19236b4988ee683b85f209b98991102479dd877f1d47d45075009e8fa8d942",
+    "agentCodeModeCommit": "17cfe809286786ef006eb2d494a7031371b42841",
+    "agentCodeModeDirty": false,
+    "acmBuild": "checkout",
+    "dryRun": false
+  },
+  "host": "claude",
+  "arm": "B",
+  "armLabel": "agent-code-mode (strict)",
+  "warmup": true,
+  "task": "T1",
+  "run": 1,
+  "round": 1,
+  "orderIndex": 0,
+  "dryRun": false,
+  "model": "claude-opus-5-5",
+  "effort": "medium",
+  "startedAt": "2026-11-26T11:19:19.211Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 7162,
+  "parsed": {
+    "turns": 2,
+    "requests": 2,
+    "hostDurationMs": 5232,
+    "usage": {
+      "input": 4,
+      "output": 122,
+      "cacheCreation": 4156,
+      "cacheRead": 3913,
+      "reasoning": 0,
+      "cacheCreation5m": 0,
+      "cacheCreation1h": 4156
+    },
+    "hostCostUsd": 0.036486599999999994,
+    "model": "claude-opus-5-5",
+    "finalAnswer": "In `config/app.json`, `service.retryLimit` is set to `7`. I only read the file and didn't change anything.\n\nANSWER: 7",
+    "toolCalls": {
+      "native": 0,
+      "run": 1,
+      "codeMode": 0,
+      "other": 0,
+      "byName": {
+        "mcp__agent-code-mode__run": 1
+      }
+    },
+    "innerCalls": {
+      "total": 1,
+      "byTool": {
+        "read": 1
+      }
+    },
+    "availableTools": [
+      "mcp__agent-code-mode__run"
+    ],
+    "denials": [],
+    "hostContext": {
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "plugins": [
+        "cc-plugin-agents-md@builtin",
+        "cc-plugin-telemetry@builtin",
+        "cc-plugin-privacy@builtin",
+        "cc-plugin-plugin-authoring@builtin"
+      ],
+      "memory": false
+    },
+    "hostError": null,
+    "evidence": {
+      "result": [
+        6
+      ],
+      "toolUse": [
+        2
+      ],
+      "innerCalls": [
+        4
+      ],
+      "requests": [
+        2,
+        5
+      ],
+      "init": [
+        1
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.036486599999999994,
+  "costSource": "host",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok reply ends with an `ANSWER: <value>` line",
+      "ok answer is 7 (got 7)",
+      "ok workspace unchanged (read-only task)"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "claude-settings.json": "claude-settings.json",
+    "mcp-config.json": "mcp-config.json",
+    "command.txt": "command.txt",
+    "auth.txt": "auth.txt",
+    "isolation.txt": "isolation.txt",
+    "diff.patch": "diff.patch"
+  },
+  "hostSessionCostUsd": null
+}

@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "id": "claude-T2-D-r1",
+  "configHash": "abfb5bd3cde9",
+  "config": {
+    "host": "claude",
+    "task": "T2",
+    "arm": "D",
+    "hostVersion": "2.1.332 (Claude Code)",
+    "model": "claude-opus-5-5",
+    "effort": "medium",
+    "maxTurns": 60,
+    "isolation": "--setting-sources project; --strict-mcp-config; CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1; temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)",
+    "codexCatalogSha256": null,
+    "timeoutMin": 15,
+    "seed": 580478811,
+    "fixtureSeed": 1115,
+    "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+    "taskTreeSha256": "19b1911e5ce8f7175f7e6e00c89fe519667907aec8efe8ac633f15d0d51550c0",
+    "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+    "armDefinitionSha256": "2cbf8147b051039cc295225e728f8fd9161577fcebb86874188ab48bb06d4acf",
+    "agentCodeModeCommit": "17cfe809286786ef006eb2d494a7031371b42841",
+    "agentCodeModeDirty": false,
+    "acmBuild": null,
+    "dryRun": false
+  },
+  "host": "claude",
+  "arm": "D",
+  "armLabel": "Claude Code Code Mode (REPL, interactive)",
+  "warmup": false,
+  "task": "T2",
+  "run": 1,
+  "round": 1,
+  "orderIndex": 1,
+  "dryRun": false,
+  "model": "claude-opus-5-5",
+  "effort": "medium",
+  "startedAt": "2026-11-26T11:19:59.077Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "wallMs": 24839,
+  "parsed": {
+    "turns": 4,
+    "requests": 4,
+    "hostDurationMs": 17145,
+    "usage": {
+      "input": 8,
+      "output": 518,
+      "cacheCreation": 8659,
+      "cacheRead": 56618,
+      "reasoning": 0,
+      "cacheCreation5m": 0,
+      "cacheCreation1h": 8659
+    },
+    "hostCostUsd": null,
+    "model": "claude-opus-5-5",
+    "finalAnswer": "I fixed the bug in `truncate` in `src/lib/strings.js`, and all 13 tests now pass.\n\n**The bug:** `truncate` kept the first `max` characters and then added the ellipsis, so the result came out longer than `max`. For example, `truncate('abcdefghij', 5)` returned `'abcde…'`, which is 6 characters.\n\n**The fix:** one line now leaves room for the ellipsis:\n\n```js\nreturn text.slice(0, max - ellipsis.length) + ellipsis;\n```\n\nThe same call now returns `'abcd…'`, which is what the test expects. I didn't touch the tests.",
+    "toolCalls": {
+      "native": 0,
+      "run": 0,
+      "codeMode": 3,
+      "other": 0,
+      "byName": {
+        "REPL": 3
+      }
+    },
+    "innerCalls": {
+      "total": 5,
+      "byTool": {
+        "Bash": 2,
+        "Read": 2,
+        "Edit": 1
+      }
+    },
+    "availableTools": [
+      "DeferredToolPlaceholder",
+      "REPL",
+      "advisor",
+      "REPL.Read",
+      "REPL.Glob",
+      "REPL.Grep",
+      "REPL.Bash",
+      "REPL.Edit",
+      "REPL.EndConversation",
+      "REPL.Write"
+    ],
+    "denials": [],
+    "hostContext": {
+      "agents": [],
+      "plugins": [
+        "cc-plugin-agents-md@builtin",
+        "cc-plugin-telemetry@builtin",
+        "cc-plugin-privacy@builtin",
+        "cc-plugin-plugin-authoring@builtin",
+        "cc-plugin-diff@builtin",
+        "cc-plugin-promos@builtin"
+      ],
+      "memory": false
+    },
+    "hostError": null,
+    "evidence": {
+      "tools": [
+        9
+      ],
+      "toolUse": [
+        21,
+        35,
+        45
+      ],
+      "requests": [
+        21,
+        35,
+        45,
+        56
+      ],
+      "innerCalls": [
+        23,
+        37,
+        39,
+        49,
+        51
+      ],
+      "turnEnd": [
+        57
+      ],
+      "costState": [
+        61
+      ]
+    }
+  },
+  "parseError": null,
+  "costUsd": 0.0909876,
+  "costSource": "pricing.json",
+  "verify": {
+    "pass": true,
+    "details": [
+      "ok node --test passes (pass 13, fail 0)",
+      "ok test files unchanged",
+      "ok no file outside the task changed"
+    ]
+  },
+  "fallback": false,
+  "valid": true,
+  "invalidReasons": [],
+  "files": {
+    "transcript.jsonl": "transcript.jsonl",
+    "stderr.txt": "stderr.txt",
+    "claude-settings.json": "claude-settings.json",
+    "mcp-config.json": "mcp-config.json",
+    "command.txt": "command.txt",
+    "claude-json-seed.json": "claude-json-seed.json",
+    "screen.txt": "screen.txt",
+    "auth.txt": "auth.txt",
+    "isolation.txt": "isolation.txt",
+    "diff.patch": "diff.patch"
+  },
+  "hostSessionCostUsd": 0.09834349999999999
+}

@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "mcp__agent-code-mode__run"
+    ]
+  },
+  "sandbox": {
+    "enabled": true
+  },
+  "autoMemoryEnabled": false,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__agent-code-mode__run",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node <repo>/dist/cli.js hook"
+          }
+        ]
+      }
+    ]
+  }
+}

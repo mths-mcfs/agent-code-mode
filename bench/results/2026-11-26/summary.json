@@ -1,0 +1,374 @@
+{
+  "generatedAt": "2026-11-26T11:21:58.747Z",
+  "dryRun": false,
+  "environment": {
+    "invocations": [
+      {
+        "startedAt": "2026-11-26T11:19:19.177Z",
+        "dryRun": false,
+        "seed": 580478811,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "runsPerArm": 3,
+        "tasks": [
+          "T2"
+        ],
+        "arms": [
+          "B",
+          "D"
+        ],
+        "schedule": "paired blocks (every arm of a host x task back to back), arm order rotated per round from a seeded base order",
+        "warmup": "one T1 run per host x arm before the matrix, kept under warmup/ and out of the statistics",
+        "baseline": null,
+        "timeoutMin": 15,
+        "hosts": {
+          "claude": {
+            "version": "2.1.332 (Claude Code)",
+            "model": "claude-opus-5-5",
+            "effort": "medium",
+            "maxTurns": 60,
+            "isolation": "--setting-sources project; --strict-mcp-config; CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1; temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)",
+            "interactiveDriver": "tmux-v1: env -i allowlist, seeded .claude.json, bracketed paste, deny = No+Tab+note, end = transcript turn_duration + idle screen",
+            "tmux": "tmux 3.8"
+          }
+        },
+        "os": "linux 7.2 x64",
+        "node": "v26.13.1",
+        "agentCodeModeCommit": "17cfe809286786ef006eb2d494a7031371b42841",
+        "agentCodeModeDirty": false,
+        "surfaces": {
+          "observed": {
+            "claude/B": [
+              "mcp__agent-code-mode__run"
+            ],
+            "claude/D": [
+              "DeferredToolPlaceholder",
+              "REPL",
+              "REPL.Bash",
+              "REPL.Edit",
+              "REPL.EndConversation",
+              "REPL.Glob",
+              "REPL.Grep",
+              "REPL.Read",
+              "REPL.Write",
+              "advisor"
+            ]
+          },
+          "required": {
+            "claude": {
+              "A": [
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep"
+              ],
+              "B": [
+                "mcp__agent-code-mode__run"
+              ],
+              "C": [
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "mcp__agent-code-mode__run"
+              ],
+              "D": [
+                "REPL",
+                "REPL.Bash",
+                "REPL.Read",
+                "REPL.Write",
+                "REPL.Edit",
+                "REPL.Glob",
+                "REPL.Grep"
+              ]
+            },
+            "codexNonFileTools": [
+              "list_mcp_resource_templates",
+              "list_mcp_resources",
+              "read_mcp_resource",
+              "request_user_input"
+            ],
+            "codexFeaturesOff": [
+              "apps",
+              "view_image",
+              "image_generation",
+              "goals",
+              "multi_agent",
+              "sleep_tool"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "groups": [
+    {
+      "host": "claude",
+      "task": "T2",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "configHash": "5decbd736b3c",
+      "config": {
+        "host": "claude",
+        "task": "T2",
+        "arm": "B",
+        "hostVersion": "2.1.332 (Claude Code)",
+        "model": "claude-opus-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "isolation": "--setting-sources project; --strict-mcp-config; CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1; temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)",
+        "codexCatalogSha256": null,
+        "timeoutMin": 15,
+        "seed": 580478811,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "taskTreeSha256": "19b1911e5ce8f7175f7e6e00c89fe519667907aec8efe8ac633f15d0d51550c0",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "dc19236b4988ee683b85f209b98991102479dd877f1d47d45075009e8fa8d942",
+        "agentCodeModeCommit": "17cfe809286786ef006eb2d494a7031371b42841",
+        "agentCodeModeDirty": false,
+        "acmBuild": "checkout",
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "passAll": 1,
+      "costPerSolvedUsd": 0.04437166666666667,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "requests": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 8,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 571,
+        "min": 542,
+        "max": 626,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 3487,
+        "min": 3477,
+        "max": 3874,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 19354,
+        "min": 18957,
+        "max": 19364,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.04423880000000001,
+        "min": 0.0432208,
+        "max": 0.045655400000000006,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 20296,
+        "min": 19261,
+        "max": 22143,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T2-B-r1",
+        "claude-T2-B-r2",
+        "claude-T2-B-r3"
+      ]
+    },
+    {
+      "host": "claude",
+      "task": "T2",
+      "arm": "D",
+      "armLabel": "Claude Code Code Mode (REPL, interactive)",
+      "configHash": "abfb5bd3cde9",
+      "config": {
+        "host": "claude",
+        "task": "T2",
+        "arm": "D",
+        "hostVersion": "2.1.332 (Claude Code)",
+        "model": "claude-opus-5-5",
+        "effort": "medium",
+        "maxTurns": 60,
+        "isolation": "--setting-sources project; --strict-mcp-config; CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1; temporary CLAUDE_CONFIG_DIR with a copy of .credentials.json (written back if refreshed)",
+        "codexCatalogSha256": null,
+        "timeoutMin": 15,
+        "seed": 580478811,
+        "fixtureSeed": 1115,
+        "fixtureSha256": "e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521",
+        "taskTreeSha256": "19b1911e5ce8f7175f7e6e00c89fe519667907aec8efe8ac633f15d0d51550c0",
+        "promptSha256": "d499edbcb44792d4c3ca2c5ebc25296336cae0e550ec1c7ce0209ed0c8caf535",
+        "armDefinitionSha256": "2cbf8147b051039cc295225e728f8fd9161577fcebb86874188ab48bb06d4acf",
+        "agentCodeModeCommit": "17cfe809286786ef006eb2d494a7031371b42841",
+        "agentCodeModeDirty": false,
+        "acmBuild": null,
+        "dryRun": false
+      },
+      "runs": 3,
+      "validRuns": 3,
+      "invalidRuns": 0,
+      "invalidReasons": [],
+      "passRate": 1,
+      "passAll": 1,
+      "costPerSolvedUsd": 0.08898626666666666,
+      "fallbackRate": 0,
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      },
+      "requests": {
+        "median": 4,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      },
+      "inputTokens": {
+        "median": 8,
+        "min": 8,
+        "max": 10,
+        "n": 3
+      },
+      "outputTokens": {
+        "median": 518,
+        "min": 511,
+        "max": 600,
+        "n": 3
+      },
+      "cacheCreationTokens": {
+        "median": 8165,
+        "min": 7780,
+        "max": 8659,
+        "n": 3
+      },
+      "cacheReadTokens": {
+        "median": 57447,
+        "min": 56618,
+        "max": 73149,
+        "n": 3
+      },
+      "costUsd": {
+        "median": 0.0889098,
+        "min": 0.0870614,
+        "max": 0.0909876,
+        "n": 3
+      },
+      "wallMs": {
+        "median": 24839,
+        "min": 20804,
+        "max": 25049,
+        "n": 3
+      },
+      "runIds": [
+        "claude-T2-D-r1",
+        "claude-T2-D-r2",
+        "claude-T2-D-r3"
+      ]
+    }
+  ],
+  "arms": [
+    {
+      "host": "claude",
+      "cohort": "6cba2497",
+      "arm": "B",
+      "armLabel": "agent-code-mode (strict)",
+      "tasks": 1,
+      "validRuns": 3,
+      "runs": 3,
+      "pass1": 1,
+      "passHatK": {
+        "k": 3,
+        "value": 1
+      },
+      "costPerRunUsd": 0.04437166666666667,
+      "costPerSolvedUsd": 0.04437166666666667,
+      "requests": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      },
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "n": 3
+      }
+    },
+    {
+      "host": "claude",
+      "cohort": "6cba2497",
+      "arm": "D",
+      "armLabel": "Claude Code Code Mode (REPL, interactive)",
+      "tasks": 1,
+      "validRuns": 3,
+      "runs": 3,
+      "pass1": 1,
+      "passHatK": {
+        "k": 3,
+        "value": 1
+      },
+      "costPerRunUsd": 0.08898626666666666,
+      "costPerSolvedUsd": 0.08898626666666666,
+      "requests": {
+        "median": 4,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      },
+      "turns": {
+        "median": 4,
+        "min": 4,
+        "max": 5,
+        "n": 3
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "host": "claude",
+      "cohort": "6cba2497",
+      "arm": "D",
+      "reference": "B",
+      "tasks": [
+        "T2"
+      ],
+      "pass": null,
+      "costUsd": null
+    }
+  ],
+  "bootstrap": {
+    "seed": 20261116,
+    "iterations": 10000,
+    "method": "paired cluster bootstrap over tasks, percentile 95% interval of the mean per-task difference"
+  },
+  "warmup": {
+    "runs": 2,
+    "costUsd": 0.16139599999999998,
+    "runIds": [
+      "warmup-claude-T1-B-r1",
+      "warmup-claude-T1-D-r1"
+    ]
+  }
+}
