@@ -12,6 +12,7 @@ import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
 import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
 import type { HostKind, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
+import { McpUpstreams } from '../mcp/upstream.js';
 import { recoverStaleJournals, type RecoveredJournal } from '../tools/journal.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
@@ -33,6 +34,7 @@ edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStr
 grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {columns: [file, line, text], rows, count, truncated, filtered}
 glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
 readOverflow(id, offset?, limit?) -> {text, offset, totalChars, truncated}: a page of the result JSON a response cut (its overflow.id)
+mcpCall(server, tool, args?, {timeoutMs?}?) -> {isError, structuredContent?, text?, truncated?, overflow?}: a tool of an MCP server the host configures, authorized as mcp__<server>__<tool>; never rolled back
 The response counts calls per tool and lists the denied and failed ones (verbose: true lists all). A large diff comes as diffStat. transaction: true rolls back file changes if the script fails.
 ${CODEX_SEARCH_NOTE}`;
 
@@ -59,6 +61,10 @@ export interface McpServerOptions {
   readonly createRuntime?: RuntimeFactory;
   /** How long to wait for `roots/list`. */
   readonly rootsTimeoutMs?: number;
+  /** What responses cut, for `readOverflow`; created here when absent. */
+  readonly overflow?: OverflowStore;
+  /** The upstream MCP server processes (keeping cut results in `overflow`); created here when absent, and closed with the session. */
+  readonly upstreams?: McpUpstreams;
   readonly recoverJournals?: boolean;
 }
 
@@ -216,12 +222,16 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return [...new Set(await Promise.all(reported))].filter((l): l is RecoveryLog => l !== undefined);
   };
 
-  const overflow = new OverflowStore();
+  const overflow = opts.overflow ?? new OverflowStore();
   const server = new Server({ name: SERVER_NAME, version: opts.version }, {
     capabilities: { tools: {} },
     instructions: SERVER_INSTRUCTIONS,
   });
-  server.onclose = () => overflow.clear();
+  const upstreams = opts.upstreams ?? new McpUpstreams({ overflow, clientVersion: opts.version });
+  server.onclose = () => {
+    overflow.clear();
+    void upstreams.close();
+  };
 
   const listRoots = async (signal: AbortSignal): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
@@ -259,6 +269,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
         overflow,
+        mcp: upstreams,
       });
       const warnings = recovered.flatMap(recoveryWarnings);
       const result = warnings.length === 0 ? ran : { ...ran, warnings: [...warnings, ...ran.warnings] };

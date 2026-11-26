@@ -244,6 +244,12 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     readOverflow: function readOverflow(id, offset, limit) {
       return invoke('readOverflow', id !== null && typeof id === 'object' ? id : { id: id, offset: offset, limit: limit });
     },
+    mcpCall: function mcpCall(server, tool, args, options) {
+      var call = { server: server, tool: tool };
+      if (args !== undefined) call.args = args;
+      if (options !== undefined) call.options = options;
+      return invoke('mcp', call);
+    },
   };
   var names = objectKeys(bindings);
   for (var b = 0; b < names.length; b++) define(names[b], bindings[names[b]]);

@@ -24,7 +24,8 @@
 
 import path from 'node:path';
 import { stateDirPath } from '../../core/state-dir.js';
-import type { BashContainment, BashShell, Decision, HostAdapter, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, SessionContext } from '../../core/types.js';
+import type { BashContainment, BashShell, Decision, HostAdapter, HostCall, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, PreparedMcpCall, SearchLowering, SessionContext } from '../../core/types.js';
+import { codexMcpDecision, discoverCodexMcp, type CodexMcpRules } from './mcp.js';
 import { codexSessionIo, ConfigError, getPath, isTable, loadCodexConfig, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
 import { executableLookupKey, isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
 import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
@@ -44,6 +45,8 @@ export interface CodexPolicy {
   readonly permissionMode: string;
   readonly codexHome: string;
   readonly notes: readonly string[];
+  /** How Codex gates each configured MCP server's tools. */
+  readonly mcpRules: Readonly<Record<string, CodexMcpRules>>;
 }
 
 export interface CodexHostAdapterOptions {
@@ -189,11 +192,14 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       path.join(config.projectRoot, '.mcp.json'),
     ]);
 
+    const { mcp, rules: mcpRules } = discoverCodexMcp(config.merged, config.cwd, io.env, 'Codex config.toml');
+
     return {
       host: 'codex',
       bashContainment,
       protectedPaths,
       watchedPaths,
+      mcp,
       // Configured writable roots and --add-dir widen the tools' workspace in workspace-write only; /tmp and $TMPDIR do not.
       ...(sandboxMode === 'workspace-write' ? { additionalRoots: unique(config.writableRoots.map((p) => path.resolve(p))) } : {}),
       payload: {
@@ -206,6 +212,7 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
         permissionMode: config.approvalPolicy === 'never' ? 'bypassPermissions' : 'default',
         codexHome: config.codexHome,
         notes: [...config.notes, ...hookNotes],
+        mcpRules,
       },
     };
   }
@@ -214,8 +221,9 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     return lowerSearch(prepared);
   }
 
-  checkStatic(prepared: PreparedCall, _ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>): Decision {
+  checkStatic(prepared: HostCall, _ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>): Decision {
     const p = policy.payload;
+    if (prepared.tool === 'mcp') return codexMcpDecision(prepared, p.mcpRules, p.approvalPolicy);
     if (prepared.tool === 'write' || prepared.tool === 'edit') return checkFileWrite(prepared.effect.absPath, p);
     if (prepared.tool === 'bash') {
       const shell = prepared.effect.shell;
@@ -233,9 +241,10 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     return checkShellCommand(command, p);
   }
 
-  async authorize(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>, signal: AbortSignal): Promise<Decision> {
+  async authorize(prepared: HostCall, ctx: SessionContext, policy: PolicySnapshot<CodexPolicy>, signal: AbortSignal): Promise<Decision> {
     const p = policy.payload;
     if (!p.hooksEnabled || p.hooks.length === 0) return { kind: 'allow' };
+    if (prepared.tool === 'mcp') return this.#authorizeMcp(prepared, ctx, p, signal);
     const names = prepared.tool === 'write' || prepared.tool === 'edit' ? APPLY_PATCH_NAMES : BASH_NAMES;
     if (!p.hooks.some((h) => matcherMatches(h.matcher, names))) return { kind: 'allow' };
     let native: NativeCall;
@@ -280,6 +289,28 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       case 'unsupported':
         return { kind: 'deny', source: 'unsupported-config', reason: mapped.reason };
     }
+  }
+
+  /** PreToolUse hooks whose matcher names `mcp__<server>__<tool>`; a rewrite of an MCP call's input is refused. */
+  async #authorizeMcp(prepared: PreparedMcpCall, ctx: SessionContext, p: CodexPolicy, signal: AbortSignal): Promise<Decision> {
+    const names = [prepared.effect.qualifiedName];
+    if (!p.hooks.some((h) => matcherMatches(h.matcher, names))) return { kind: 'allow' };
+    const input = {
+      session_id: ctx.sessionId ?? '',
+      turn_id: ctx.turnId ?? '',
+      transcript_path: ctx.transcriptPath ?? null,
+      cwd: ctx.cwd,
+      hook_event_name: 'PreToolUse',
+      model: ctx.model ?? '',
+      permission_mode: p.permissionMode,
+      tool_name: prepared.effect.qualifiedName,
+      tool_input: prepared.effect.input,
+      tool_use_id: ctx.toolUseId === undefined ? prepared.id : `${ctx.toolUseId}/${prepared.id}`,
+    };
+    const result = await runHooks({ hooks: p.hooks, names, stdin: JSON.stringify(input), cwd: ctx.cwd, env: this.#opts.hookEnv ?? process.env, platform: process.platform, signal });
+    if (result.kind === 'deny') return { kind: 'deny', source: result.source, reason: result.reason };
+    if (result.updatedInput !== undefined) return { kind: 'deny', source: 'unsupported-config', reason: 'a Codex PreToolUse hook rewrote the input of an MCP call, which this server does not apply' };
+    return { kind: 'allow' };
   }
 }
 

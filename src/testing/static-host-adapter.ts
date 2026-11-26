@@ -2,19 +2,20 @@ import type {
   BashContainment,
   Decision,
   HostAdapter,
+  HostCall,
   HostKind,
+  HostResult,
+  McpPolicy,
   PolicyLoadError,
   PolicySnapshot,
-  PreparedCall,
   SessionContext,
-  ToolResult,
 } from '../core/types.js';
 
 /** Verdict of one static rule; undefined means the rule does not apply. */
 export type RuleVerdict = { readonly kind: 'deny' | 'ask' | 'allow'; readonly reason: string } | undefined;
 
 /** A static rule as a predicate over the prepared call. Rules are checked deny → ask → allow, like the hosts. */
-export type StaticRule = (prepared: PreparedCall, ctx: SessionContext) => RuleVerdict;
+export type StaticRule = (prepared: HostCall, ctx: SessionContext) => RuleVerdict;
 
 /** What the fake PreToolUse hook does. */
 export type HookBehavior =
@@ -31,11 +32,13 @@ export interface StaticHostAdapterOptions {
   readonly recordCalls?: boolean;
   readonly rules?: readonly StaticRule[];
   /** Fixed behavior, or one chosen per call. Default allow. */
-  readonly hook?: HookBehavior | ((prepared: PreparedCall) => HookBehavior);
+  readonly hook?: HookBehavior | ((prepared: HostCall) => HookBehavior);
   /** When set, `loadPolicy` returns this error. */
   readonly policyError?: string;
   readonly bashContainment?: BashContainment;
   readonly protectedPaths?: readonly string[];
+  /** The upstream MCP servers the policy names. */
+  readonly mcp?: McpPolicy;
 }
 
 /**
@@ -44,9 +47,9 @@ export interface StaticHostAdapterOptions {
  */
 export class StaticHostAdapter implements HostAdapter<null> {
   readonly host: HostKind;
-  readonly authorized: PreparedCall[] = [];
-  readonly staticChecked: PreparedCall[] = [];
-  readonly postToolUses: { prepared: PreparedCall; result: ToolResult }[] = [];
+  readonly authorized: HostCall[] = [];
+  readonly staticChecked: HostCall[] = [];
+  readonly postToolUses: { prepared: HostCall; result: HostResult }[] = [];
   readonly #opts: StaticHostAdapterOptions;
 
   constructor(opts: StaticHostAdapterOptions = {}) {
@@ -60,11 +63,12 @@ export class StaticHostAdapter implements HostAdapter<null> {
       host: this.host,
       bashContainment: this.#opts.bashContainment ?? { mode: 'none' },
       protectedPaths: this.#opts.protectedPaths ?? [],
+      ...(this.#opts.mcp === undefined ? {} : { mcp: this.#opts.mcp }),
       payload: null,
     };
   }
 
-  checkStatic(prepared: PreparedCall, ctx: SessionContext): Decision {
+  checkStatic(prepared: HostCall, ctx: SessionContext): Decision {
     if (this.#opts.recordCalls !== false) this.staticChecked.push(prepared);
     const verdicts = (this.#opts.rules ?? []).map((rule) => rule(prepared, ctx));
     const deny = verdicts.find((v) => v?.kind === 'deny');
@@ -74,7 +78,7 @@ export class StaticHostAdapter implements HostAdapter<null> {
     return { kind: 'allow' };
   }
 
-  authorize(prepared: PreparedCall, _ctx: SessionContext, _policy: PolicySnapshot<null>, signal: AbortSignal): Promise<Decision> {
+  authorize(prepared: HostCall, _ctx: SessionContext, _policy: PolicySnapshot<null>, signal: AbortSignal): Promise<Decision> {
     if (this.#opts.recordCalls !== false) this.authorized.push(prepared);
     const hook = this.#opts.hook;
     const behavior: HookBehavior = typeof hook === 'function' ? hook(prepared) : (hook ?? { kind: 'allow' });
@@ -101,7 +105,7 @@ export class StaticHostAdapter implements HostAdapter<null> {
     }
   }
 
-  async postToolUse(prepared: PreparedCall, result: ToolResult): Promise<void> {
+  async postToolUse(prepared: HostCall, result: HostResult): Promise<void> {
     if (this.#opts.recordCalls !== false) this.postToolUses.push({ prepared, result });
   }
 }

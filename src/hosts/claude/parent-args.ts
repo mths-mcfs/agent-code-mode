@@ -239,9 +239,13 @@ export interface ClaudeCliFlags {
   readonly addDirs: readonly string[];
   /** Values of every `--agents` flag (JSON subagent definitions). */
   readonly agents: readonly string[];
+  /** Values of every `--mcp-config` flag (file path or JSON text). */
+  readonly mcpConfigs: readonly string[];
+  /** `--strict-mcp-config`: only the `--mcp-config` servers load. */
+  readonly strictMcpConfig: boolean;
 }
 
-const VARIADIC = new Set(['--allowedTools', '--allowed-tools', '--disallowedTools', '--disallowed-tools', '--add-dir']);
+const VARIADIC = new Set(['--allowedTools', '--allowed-tools', '--disallowedTools', '--disallowed-tools', '--add-dir', '--mcp-config']);
 const SINGLE = new Set(['--settings', '--permission-mode', '--setting-sources', '--agents']);
 
 /** Parses the flags this adapter cares about; everything else is skipped. */
@@ -251,6 +255,8 @@ export function parseClaudeFlags(argv: readonly string[]): ClaudeCliFlags {
   const disallowed: string[] = [];
   const addDirs: string[] = [];
   const agents: string[] = [];
+  const mcpConfigs: string[] = [];
+  let strictMcpConfig = false;
   let permissionMode: string | undefined;
   let settingSources: string[] | undefined;
   const take = (flag: string, value: string): void => {
@@ -281,11 +287,18 @@ export function parseClaudeFlags(argv: readonly string[]): ClaudeCliFlags {
       case '--agents':
         agents.push(value);
         break;
+      case '--mcp-config':
+        mcpConfigs.push(value);
+        break;
     }
   };
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i] ?? '';
     if (arg === '--') break;
+    if (arg === '--strict-mcp-config') {
+      strictMcpConfig = true;
+      continue;
+    }
     if (arg === '--dangerously-skip-permissions') {
       permissionMode ??= 'bypassPermissions';
       continue;
@@ -317,5 +330,7 @@ export function parseClaudeFlags(argv: readonly string[]): ClaudeCliFlags {
     ...(settingSources === undefined ? {} : { settingSources }),
     addDirs,
     agents,
+    mcpConfigs,
+    strictMcpConfig,
   };
 }
