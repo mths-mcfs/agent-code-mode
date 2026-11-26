@@ -63,6 +63,8 @@ export function makeLab(files: Record<string, string> = {}): Lab {
   const hooksDir = path.join(base, 'hooks');
   for (const d of [ws, outside, home, hooksDir]) mkdirSync(d, { recursive: true });
   mkdirSync(stateDir, { mode: 0o700 });
+  // Where the server puts each run's scratch directory: server state, like stateDir, so disk snapshots start with it.
+  mkdirSync(`${stateDir}-scratch`, { mode: 0o700 });
   mkdirSync(path.join(stateDir, 'ctx'), { mode: 0o700 });
   writeFileSync(path.join(outside, 'secret.txt'), 'outside secret\n');
   for (const [rel, content] of Object.entries(files)) {
@@ -185,7 +187,7 @@ export interface CodexHook {
  */
 export async function codexServer(
   lab: Lab,
-  opts: { rules?: string; hooks?: readonly CodexHook[]; sandboxMode?: string; extraToml?: string } = {},
+  opts: { rules?: string; hooks?: readonly CodexHook[]; sandboxMode?: string; extraToml?: string; tmpDirs?: { slashTmp: string | null; tmpdir: string | null } } = {},
 ): Promise<Server> {
   const codexHome = path.join(lab.base, 'codex-home');
   mkdirSync(path.join(codexHome, 'rules'), { recursive: true });
@@ -208,7 +210,7 @@ export async function codexServer(
   const runtime: Runtime = {
     host: 'codex',
     contextProvider: new CodexContextProvider(),
-    adapter: new CodexHostAdapter({ io: () => io, hookEnv: { PATH: process.env['PATH'], SHELL: '/bin/sh' }, stateDir: lab.stateDir }),
+    adapter: new CodexHostAdapter({ io: () => io, hookEnv: { PATH: process.env['PATH'], SHELL: '/bin/sh' }, stateDir: lab.stateDir, ...(opts.tmpDirs ? { tmpDirs: opts.tmpDirs } : {}) }),
     tools: new NodeToolRuntime({ stateDir: lab.stateDir }),
     sandbox: new QuickJsSandbox(),
     maxTimeoutMs: 50_000,

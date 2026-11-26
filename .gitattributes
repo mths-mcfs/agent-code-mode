@@ -4,3 +4,5 @@ bench/tasks/** text eol=lf
 bench/parser-fixtures/** text eol=lf
 # Shell scripts (test hook fixtures, e2e scripts) run under bash, which rejects CRLF.
 *.sh text eol=lf
+# Recorded test-runner output that test() parses: keep it LF on every OS.
+src/core/fixtures/** text eol=lf

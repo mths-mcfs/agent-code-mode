@@ -66,6 +66,8 @@ const EntrySchema = z.object({
    * Recovery restores only a file whose identity is the last confirmed one.
    */
   installs: z.array(z.object({ id: z.string(), temp: z.string().optional(), confirmed: z.string().optional() })).optional(),
+  /** Set before an undo restores the file: recovery then counts the original bytes, whoever wrote them, as settled. */
+  undoing: z.literal(true).optional(),
 });
 
 const ManifestSchema = z.object({
@@ -156,6 +158,10 @@ export class FileTransaction implements Transaction {
   readonly #changedDirs = new Map<string, DirId>();
   readonly #flushable = new Set<string>();
   #bytes = 0;
+  /** Blob names are never reused: undo removes entries, so the entry count can repeat a live blob's name. */
+  #nextBlob = 0;
+  /** Directories an undo changed whose flush failed: the rollback flushes them before it drops the record. */
+  readonly #unflushed = new Set<string>();
   #created = false;
   /** Whether the journal root was flushed after this journal's directory was created in it. */
   #dirFlushed = false;
@@ -255,7 +261,7 @@ export class FileTransaction implements Transaction {
       let blob: string | null = null;
       if (before) {
         if (!this.#created) await this.#persist();
-        blob = `${this.#entries.size}.bin`;
+        blob = `${this.#nextBlob++}.bin`;
         await writeDurable(path.join(this.dir, blob), before.bytes);
       }
       this.#bytes += size;
@@ -325,31 +331,70 @@ export class FileTransaction implements Transaction {
       this.#closed = true;
       openTransactions.delete(this.id);
       const restored: string[] = [];
-      const skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[] = [];
+      const skipped: Skipped[] = [];
       for (const live of [...this.#entries.values()].reverse()) {
-        const { entry } = live;
-        try {
-          const file = rooted(live.root, entry.path);
-          const current = await readRegularFile(file);
-          const currentHash = current ? sha256(current.bytes) : null;
-          const originalHash = entry.existed ? entry.original : null;
-          if (currentHash === originalHash) continue;
-          if (live.last === null || currentHash !== live.last.hash || current?.id !== live.last.id) {
-            skipped.push({ path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what this run wrote' });
-            continue;
-          }
-          await restoreEntry(file, entry, live.bytes, currentHash);
-          restored.push(entry.path);
-        } catch (err) {
-          skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
-        }
+        const outcome = await restoreLive(live);
+        if (outcome === 'restored') restored.push(live.entry.path);
+        else if (outcome !== 'unchanged') skipped.push(outcome);
       }
       const ownDirs = [...this.#ownDirs.keys()];
       await removeCreatedDirs(this.#ownDirs, this.#roots);
-      const restoresOnDisk = await flushes(touchedDirs(restored, ownDirs), this.#io.syncDir);
+      const restoresOnDisk = await flushes([...new Set([...touchedDirs(restored, ownDirs), ...this.#unflushed])], this.#io.syncDir);
       const needsRecovery = !restoresOnDisk || skipped.some((s) => s.reason === 'error');
       if (needsRecovery) await this.#flushRecord();
       else await this.#removeRecord();
+      return { restored, skipped };
+    });
+  }
+
+  /**
+   * Restores the files `accept` keeps, newest first, under the rollback's
+   * rule: only a file that still holds what this run last wrote. A restored
+   * file leaves the journal, so the run can write it again from its original;
+   * a skipped one stays, and a later write to it is refused as stale. Empty
+   * directories the run created are removed. The transaction stays open.
+   */
+  undo(accept: (absPath: string) => boolean = () => true): Promise<RollbackReport> {
+    return this.#serial(async () => {
+      if (this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
+      const restored: string[] = [];
+      const done: LiveEntry[] = [];
+      const skipped: Skipped[] = [];
+      const chosen = [...this.#entries.values()].reverse().filter((live) => accept(live.entry.path));
+      for (const live of chosen) live.entry.undoing = true;
+      if (chosen.length > 0 && this.#created) await this.#persist();
+      for (const live of chosen) {
+        const outcome = await restoreLive(live);
+        if (outcome === 'restored' || outcome === 'unchanged') {
+          // Unchanged: the file already holds its original again (another writer put it back), so nothing is written.
+          restored.push(live.entry.path);
+          done.push(live);
+        } else {
+          skipped.push(outcome);
+        }
+      }
+      const removedDirs: string[] = [];
+      for (const [dir, id] of [...this.#ownDirs].sort(([a], [b]) => b.length - a.length)) {
+        if (!(await removeEmptyDirInside(dir, this.#roots, id))) continue;
+        removedDirs.push(dir);
+        this.#ownDirs.delete(dir);
+        this.#changedDirs.delete(dir);
+      }
+      // An entry leaves the record only once its restore is on disk; otherwise a crash could keep the run's
+      // write with the original gone from the journal.
+      const touched = touchedDirs(restored, removedDirs);
+      if (!(await flushes(touched, this.#io.syncDir))) {
+        for (const dir of touched) this.#unflushed.add(dir);
+        if (this.#created) await this.#persist();
+        return { restored, skipped };
+      }
+      for (const live of done) {
+        this.#entries.delete(live.entry.path);
+        this.#bytes -= live.bytes?.length ?? 0;
+      }
+      if (this.#created) await this.#persist();
+      // Only once the record no longer names them: a write-and-undo loop must not pile up originals on disk.
+      for (const live of done) if (live.entry.blob !== null) await fs.rm(path.join(this.dir, live.entry.blob), { force: true });
       return { restored, skipped };
     });
   }
@@ -417,6 +462,26 @@ export class FileTransaction implements Transaction {
     if (!this.#created) return;
     await fs.rm(this.dir, { recursive: true, force: true });
     this.#created = false;
+  }
+}
+
+type Skipped = { path: string; reason: 'changed-externally' | 'error'; detail?: string };
+
+async function restoreLive(live: LiveEntry): Promise<'restored' | 'unchanged' | Skipped> {
+  const { entry } = live;
+  try {
+    const file = rooted(live.root, entry.path);
+    const current = await readRegularFile(file);
+    const currentHash = current ? sha256(current.bytes) : null;
+    const originalHash = entry.existed ? entry.original : null;
+    if (currentHash === originalHash) return 'unchanged';
+    if (live.last === null || currentHash !== live.last.hash || current?.id !== live.last.id) {
+      return { path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what this run wrote' };
+    }
+    await restoreEntry(file, entry, live.bytes, currentHash);
+    return 'restored';
+  } catch (err) {
+    return { path: entry.path, reason: 'error', detail: errorMessage(err) };
   }
 }
 
@@ -580,6 +645,12 @@ async function undoEntry(
     const current = await readRegularFile(file);
     const untouched = current === null ? !entry.existed : current.id === entry.originalId;
     if (untouched) return;
+    // An undo that was putting this file back and was cut off before its record update leaves the original bytes: settled,
+    // and counted as restored so its directory is flushed before the record goes.
+    if (entry.undoing === true && entry.existed && current !== null && sha256(current.bytes) === entry.original) {
+      restored.push(entry.path);
+      return;
+    }
     const lastConfirmed = (entry.installs ?? []).findLast((install) => install.confirmed !== undefined)?.confirmed;
     if (current === null || current.id !== lastConfirmed) {
       skipped.push({

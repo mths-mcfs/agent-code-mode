@@ -10,6 +10,7 @@ import { OverflowStore } from '../core/overflow.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
+import { scratchBase, sweepScratch } from '../tools/scratch.js';
 import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
 import type { HostKind, McpServerSpec, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
 import { UPSTREAM_ENV } from '../mcp/self.js';
@@ -36,6 +37,9 @@ grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {columns: [file, line
 glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
 readOverflow(id, offset?, limit?) -> {text, offset, totalChars, truncated}: a page of the result JSON a response cut (its overflow.id)
 mcpCall(server, tool, args?, {timeoutMs?}?) -> {isError, structuredContent?, text?, truncated?, overflow?}: a tool of an MCP server the host configures, authorized as mcp__<server>__<tool>; never rolled back
+test({command, cwd?, timeoutMs?}) -> {ok, exitCode, timedOut, runner, passed, failed, skipped, failures: [{name, message?}], truncated, output?}: runs the project's test command as a bash call and reads its totals; ok only on exit 0 with no failure found
+undo({paths?}?) -> {restored, skipped: [{path, reason}], notUndone?}: with transaction: true, puts back what this run's writes and edits changed (all, or those paths); a file changed since by someone else is left as it is; bash effects stay
+scratchDir: a private directory for throwaway files, deleted when the run ends, not in changedFiles or diff (undefined when the host grants none)
 The response counts calls per tool and lists the denied and failed ones (verbose: true lists all). A large diff comes as diffStat. transaction: true rolls back file changes if the script fails.
 ${CODEX_SEARCH_NOTE}`;
 
@@ -202,6 +206,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return pass;
   };
   if (recoverJournals) {
+    void sweepScratch(scratchBase(stateDir));
     void recover('startup', [serverCwd], async () => {
       if (opts.host === undefined) return undefined;
       const runtime = runtimeFor(opts.host);

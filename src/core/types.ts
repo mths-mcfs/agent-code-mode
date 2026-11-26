@@ -232,7 +232,43 @@ export interface OverflowSlice {
   readonly truncated: boolean;
 }
 
-export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice | McpResult;
+/** A failed test that `test()` found in the output. */
+export interface TestFailure {
+  readonly name: string;
+  /** First lines of the failure message, when the output shows one. */
+  readonly message?: string;
+}
+
+/** What `test({command})` resolves to: the bash result of the command, read for test totals. */
+export interface TestResult {
+  /** True only when the command exited 0, did not time out, and no failure was found in its output. */
+  readonly ok: boolean;
+  readonly exitCode: number | null;
+  readonly timedOut: boolean;
+  /** Which runner's totals were found; null when none was (the counts are then 0: read `output`). */
+  readonly runner: string | null;
+  readonly passed: number;
+  readonly failed: number;
+  readonly skipped: number;
+  /** The failures found, at most `MAX_TEST_FAILURES`. */
+  readonly failures: readonly TestFailure[];
+  /** The output was cut (by the bash cap or by the parser's own limit). */
+  readonly truncated: boolean;
+  /** The last lines of the output, for a run that is not ok or not parsed. */
+  readonly output?: string;
+}
+
+/** What `undo()` resolves to. Paths are relative to the session cwd when inside it. */
+export interface UndoResult {
+  /** Files that hold their content from before the run again (or are gone again when the run created them). */
+  readonly restored: readonly string[];
+  /** Files left as they are, with the reason (another writer changed them since, or a protected path). */
+  readonly skipped: readonly { readonly path: string; readonly reason: string }[];
+  /** Effects `undo` cannot take back (bash calls, mcpCalls), when the run made any. */
+  readonly notUndone?: string;
+}
+
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice | McpResult | TestResult | UndoResult;
 
 // ---------------------------------------------------------------------------
 // Upstream MCP tools: `mcpCall(server, tool, args?, options?)`.
@@ -549,6 +585,12 @@ export interface SessionContext {
   readonly model?: string;
   /** Host sandbox mode (Codex `sandbox_mode`, e.g. `read-only`). */
   readonly sandboxMode?: string;
+  /**
+   * Real path of this run's scratch directory, created by the run before the
+   * policy loads. Never comes from the model or the client. The adapter
+   * decides whether its policy grants it (`PolicySnapshot.scratchRoot`).
+   */
+  readonly scratchDir?: string;
   /** Source of each field that was set, keyed by field name. */
   readonly sources: Readonly<Record<string, ContextSource>>;
 }
@@ -626,6 +668,13 @@ export interface PolicySnapshot<P = unknown> {
   readonly isRoutineWatchedChange?: (change: WatchedChange) => Promise<boolean>;
   /** The host's upstream MCP servers. Absent: `mcpCall` reaches none. */
   readonly mcp?: McpPolicy;
+  /**
+   * `ctx.scratchDir` when this policy grants it: one more root for the tools,
+   * with the permissions the host gives the project directory. Writes there
+   * are not journaled or reported as changed. Absent: the run has no scratch
+   * directory.
+   */
+  readonly scratchRoot?: string;
   readonly payload: P;
 }
 
@@ -743,6 +792,12 @@ export interface Transaction {
   /** Restores every journaled file whose content is still what this run wrote. */
   rollback(): Promise<RollbackReport>;
   /**
+   * The rollback of the files `accept` keeps (all when absent), while the
+   * transaction stays open: restored files leave the journal, files another
+   * writer changed stay in it and are reported.
+   */
+  undo?(accept?: (absPath: string) => boolean): Promise<RollbackReport>;
+  /**
    * Finalizes the journal (keeps the changes): once it resolves, no recovery
    * can undo them. Idempotent; a no-op after a rollback. Rejects with a
    * `TransactionFinalizeError` when finalization failed.
@@ -768,12 +823,25 @@ export interface ToolRuntime<P = unknown> {
   commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult>;
   /** Starts a journal for one transactional run. */
   beginTransaction(): Transaction;
+  /** Creates a private, empty scratch directory for one run. Absent: runs get none. */
+  createScratch?(): Promise<ScratchDir>;
+  /** Where `createScratch` puts every run's directory, known even when creating one fails. */
+  scratchBase?(): string;
   /**
    * Fingerprints every entry matching `patterns` (see
    * `PolicySnapshot.watchedPaths`). Rejects when it cannot finish, for
    * example past its entry or time limit.
    */
   snapshotWatched?(patterns: readonly string[]): Promise<WatchedSnapshot>;
+}
+
+export interface ScratchDir {
+  /** Real absolute path. */
+  readonly path: string;
+  /** Empties the directory when it holds more than its limit; returns why, or undefined when within it. */
+  enforceLimit(): Promise<string | undefined>;
+  /** Deletes the directory; resolves with why when it could not. Idempotent. */
+  remove(): Promise<string | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +891,8 @@ export interface SandboxRunOptions {
   onCall(tool: string, args: unknown): Promise<CallReply>;
   /** Called for every console line of the script. */
   onLog(level: LogLevel, text: string): void;
+  /** Value of the script's `scratchDir` global; absent leaves it undefined. */
+  readonly scratchDir?: string;
 }
 
 /** Serialized script error. */
