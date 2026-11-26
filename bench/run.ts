@@ -466,8 +466,13 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     invalidReasons,
     files,
   });
-  await writeFile(path.join(outDir, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
+  await markRunDone(outDir, record);
   return record;
+}
+
+/** Writes the run's record after every other artifact: a run with a record is done, and resume skips it. */
+async function markRunDone(outDir: string, record: RunRecord): Promise<void> {
+  await writeFile(path.join(outDir, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 function gitInfo(): { commit: string | null; dirty: boolean | null } {
