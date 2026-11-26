@@ -4,7 +4,8 @@ import { ToolError, errorMessage } from './errors.js';
 import { claimFile } from './file-claims.js';
 import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
-import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
+import { DecisionSchema, UndoArgsSchema, formatIssues, isMutating, parseToolCall } from './schemas.js';
+import { testResult } from './test-report.js';
 import { parseMcpCall, prepareMcpCall } from '../mcp/call.js';
 import { redactDeep } from '../mcp/secrets.js';
 import type {
@@ -28,6 +29,8 @@ import type {
   PreparedCallOf,
   PreparedMcpCall,
   ProtectedChange,
+  RollbackReport,
+  ScratchDir,
   ScriptValue,
   SearchLowering,
   SessionContext,
@@ -66,7 +69,16 @@ export interface DispatcherOptions<P> {
   readonly readOverflow?: (args: unknown) => CallReply;
   /** Sends authorized `mcpCall`s upstream. Absent: every `mcpCall` fails. */
   readonly mcp?: McpRuntime;
+  /** The run's scratch directory, when its policy grants one (`policy.scratchRoot`). */
+  readonly scratch?: ScratchDir;
 }
+
+interface Shaped {
+  readonly tool: 'test';
+  parse(result: BashResult): ScriptValue;
+}
+
+const TEST: Shaped = { tool: 'test', parse: testResult };
 
 const NO_OVERFLOW: CallReply = { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
 
@@ -218,7 +230,7 @@ export class Dispatcher<P = unknown> {
   readonly #abandoned = new WeakSet<Promise<CallReply>>();
   readonly #calls: (CallLogEntry | undefined)[] = [];
   readonly #changed: string[] = [];
-  readonly #diffs: string[] = [];
+  readonly #diffs: { readonly absPath: string; readonly diff: string }[] = [];
   readonly #warnings: string[] = [];
   #deniedCount = 0;
   #bashCommits = 0;
@@ -247,12 +259,12 @@ export class Dispatcher<P = unknown> {
 
   /** Files written or edited by committed calls, in first-commit order. */
   get changedFiles(): readonly string[] {
-    return [...this.#changed];
+    return this.#changed.map((p) => displayPath(p, this.#realCwd));
   }
 
   /** Combined diff of committed writes and edits, in commit order. */
   get diff(): string {
-    return this.#diffs.join('');
+    return this.#diffs.map((d) => d.diff).join('');
   }
 
   get warnings(): readonly string[] {
@@ -376,26 +388,33 @@ export class Dispatcher<P = unknown> {
     }
     if (tool === 'readOverflow') return Promise.resolve(this.#readOverflow(id, slot, args, started));
     if (tool === 'mcp') return this.#handleMcp(id, slot, toolLabel, args, started);
-    const parsed = parseToolCall(tool, args, id);
+    if (tool === 'undo') return this.#queue(() => this.#undo(id, slot, args, started));
+    const shape = tool === 'test' ? TEST : undefined;
+    const parsed = parseToolCall(shape === undefined ? tool : 'bash', args, id);
     if (parsed instanceof ToolError) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: parsed }));
     }
     const call = parsed;
-    const summary = summarize(call, this.#opts.ctx.cwd);
-    this.#labels[slot] = { id, tool: call.tool, summary };
+    const label = shape?.tool ?? call.tool;
+    const summary = shape === undefined ? summarize(call, this.#opts.ctx.cwd) : `test ${summarize(call, this.#opts.ctx.cwd).slice('bash '.length)}`;
+    this.#labels[slot] = { id, tool: label, summary };
     const policy = this.#opts.policy;
     if (isPolicyError(policy)) {
       return Promise.resolve(
-        this.#fail(slot, id, call.tool, summary, started, {
+        this.#fail(slot, id, label, summary, started, {
           kind: 'deny',
           source: 'unsupported-config',
           reason: `host configuration could not be loaded: ${policy.error}`,
         }),
       );
     }
-    const run = (): Promise<CallReply> => this.#pipeline(slot, call, summary, policy, started);
+    const run = (): Promise<CallReply> => this.#pipeline(slot, call, summary, policy, started, shape);
     if (!isMutating(call.tool)) return run();
-    const queued = this.#mutationTail.then(run);
+    return this.#queue(run);
+  }
+
+  #queue(work: () => Promise<CallReply>): Promise<CallReply> {
+    const queued = this.#mutationTail.then(work);
     this.#mutationTail = queued.catch(() => undefined);
     return queued;
   }
@@ -411,9 +430,7 @@ export class Dispatcher<P = unknown> {
     if (isPolicyError(policy)) {
       return Promise.resolve(this.#fail(slot, id, label, summary, started, { kind: 'deny', source: 'unsupported-config', reason: `host configuration could not be loaded: ${policy.error}` }));
     }
-    const queued = this.#mutationTail.then(() => this.#mcpPipeline(slot, call, label, summary, policy, started));
-    this.#mutationTail = queued.catch(() => undefined);
-    return queued;
+    return this.#queue(() => this.#mcpPipeline(slot, call, label, summary, policy, started));
   }
 
   async #mcpPipeline(slot: number, call: McpCall, label: string, summary: string, policy: PolicySnapshot<P>, started: number): Promise<CallReply> {
@@ -491,8 +508,9 @@ export class Dispatcher<P = unknown> {
     summary: string,
     policy: PolicySnapshot<P>,
     started: number,
+    shape?: Shaped,
   ): Promise<CallReply> {
-    const fail = (failure: Failure): CallReply => this.#fail(slot, call.id, call.tool, summary, started, failure);
+    const fail = (failure: Failure): CallReply => this.#fail(slot, call.id, shape?.tool ?? call.tool, summary, started, failure);
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
 
     const first = await this.#prepareChecked(call, policy);
@@ -541,11 +559,11 @@ export class Dispatcher<P = unknown> {
       if (recheck) return fail(recheck);
       prepared = second.prepared;
       summary = summarize(reparsed, this.#opts.ctx.cwd);
-      this.#labels[slot] = { id: call.id, tool: call.tool, summary };
+      this.#labels[slot] = { id: call.id, tool: shape?.tool ?? call.tool, summary };
     }
 
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
-    return this.#commit(slot, prepared, summary, policy, started, lowered);
+    return this.#commit(slot, prepared, summary, policy, started, lowered, shape);
   }
 
   async #lower(
@@ -638,11 +656,13 @@ export class Dispatcher<P = unknown> {
     policy: PolicySnapshot<P>,
     started: number,
     lowered?: { readonly tool: 'grep' | 'glob'; readonly lowering: SearchLowering },
+    shape?: Shaped,
   ): Promise<CallReply> {
     const signal = this.#abort.signal;
-    const tool = lowered?.tool ?? prepared.tool;
+    const tool = lowered?.tool ?? shape?.tool ?? prepared.tool;
     const transaction = this.#opts.transaction;
-    const journaled = transaction !== undefined && (prepared.tool === 'write' || prepared.tool === 'edit');
+    const scratchWrite = (prepared.tool === 'write' || prepared.tool === 'edit') && this.#inScratch(prepared.effect.absPath, policy);
+    const journaled = transaction !== undefined && (prepared.tool === 'write' || prepared.tool === 'edit') && !scratchWrite;
     if (journaled && !claimFile(transaction, prepared.effect.absPath)) {
       const error = new ToolError('tool-error', `${prepared.effect.absPath} is being changed by another transactional run that has not finished; retry once it ends`);
       return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error });
@@ -651,7 +671,7 @@ export class Dispatcher<P = unknown> {
     if (watched) await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'during' });
     let result: ToolResult;
     try {
-      const pending = this.#opts.tools.commit(prepared, signal, transaction);
+      const pending = this.#opts.tools.commit(prepared, signal, journaled ? transaction : undefined);
       if (journaled) this.#journalWrite = pending.then(() => undefined, () => undefined);
       result = await pending;
     } catch (err) {
@@ -659,7 +679,7 @@ export class Dispatcher<P = unknown> {
         this.#warnings.push(
           `${prepared.id} (${summary}) was committing when the run stopped (${this.#stopReason ?? 'stopped'}) and then failed: ${errorMessage(err)}. Its effect may be partial.`,
         );
-        if (prepared.tool === 'write' || prepared.tool === 'edit') this.#addChanged(prepared.effect.absPath);
+        if ((prepared.tool === 'write' || prepared.tool === 'edit') && !scratchWrite) this.#addChanged(prepared.effect.absPath);
       }
       return this.#fail(slot, prepared.id, tool, summary, started, this.#toolFailure(err));
     } finally {
@@ -672,12 +692,16 @@ export class Dispatcher<P = unknown> {
         `${prepared.id} (${summary}) was committing when the run stopped (${this.#stopReason ?? 'stopped'}); its effect was applied.`,
       );
     }
-    if (prepared.tool === 'write' || prepared.tool === 'edit') {
+    if ((prepared.tool === 'write' || prepared.tool === 'edit') && !scratchWrite) {
       this.#addChanged(prepared.effect.absPath);
       const diff = 'diff' in result && typeof result.diff === 'string' ? result.diff : prepared.effect.diff;
-      this.#diffs.push(diff.endsWith('\n') || diff === '' ? diff : `${diff}\n`);
+      this.#diffs.push({ absPath: prepared.effect.absPath, diff: diff.endsWith('\n') || diff === '' ? diff : `${diff}\n` });
     } else if (prepared.tool === 'bash' && lowered === undefined) {
       this.#bashCommits++;
+    }
+    if (scratchWrite || (prepared.tool === 'bash' && lowered === undefined)) {
+      const full = await this.#enforceScratchLimit();
+      if (full !== undefined) return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error: new ToolError('tool-error', full) });
     }
     let value: ToolResult = result;
     if (lowered !== undefined) {
@@ -692,7 +716,85 @@ export class Dispatcher<P = unknown> {
     await this.#postToolUse(prepared, result, summary, policy);
 
     this.#calls[slot] = { id: prepared.id, tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+    if (shape !== undefined) {
+      if (!isBashResult(result)) return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error: new ToolError('tool-error', 'the tool runtime returned no bash result') });
+      return { ok: true, value: shape.parse(result) };
+    }
     return { ok: true, value: scriptValue(value, [this.#realCwd, path.resolve(this.#opts.ctx.cwd)]) };
+  }
+
+  #inScratch(absPath: string, policy: PolicySnapshot<P>): boolean {
+    const root = policy.scratchRoot;
+    if (root === undefined) return false;
+    const rel = path.relative(root, absPath);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+  }
+
+  async #enforceScratchLimit(): Promise<string | undefined> {
+    const over = await this.#opts.scratch?.enforceLimit();
+    if (over !== undefined) this.#warnings.push(over);
+    return over;
+  }
+
+  /** Queued like a mutation, so no write of this run is in flight. Protected paths are never touched. */
+  async #undo(id: string, slot: number, args: unknown, started: number): Promise<CallReply> {
+    const parsed = UndoArgsSchema.safeParse(args);
+    const wanted = parsed.success ? parsed.data.paths : undefined;
+    const summary = wanted === undefined ? 'undo' : `undo ${clip(wanted.join(', '), 160)}`;
+    this.#labels[slot] = { id, tool: 'undo', summary };
+    const fail = (error: ToolError): CallReply => this.#fail(slot, id, 'undo', summary, started, { kind: 'error', error });
+    if (this.#hasStopped()) return this.#fail(slot, id, 'undo', summary, started, this.#stoppedFailure());
+    if (!parsed.success) return fail(new ToolError('invalid-args', `undo: ${formatIssues(parsed.error)}`));
+    const tx = this.#opts.transaction;
+    if (tx?.undo === undefined) return fail(new ToolError('invalid-args', 'undo needs a run started with transaction: true, whose journal holds the originals'));
+    const policy = this.#opts.policy;
+    const protectedPaths = isPolicyError(policy) ? [] : policy.protectedPaths;
+    const targets = wanted === undefined ? undefined : new Map(wanted.map((p) => [p, this.#candidates(p)] as const));
+    const matched = new Set<string>();
+    const refused: string[] = [];
+    const accept = (absPath: string): boolean => {
+      if (targets !== undefined) {
+        const hits = [...targets].filter(([, c]) => c.has(absPath)).map(([p]) => p);
+        if (hits.length === 0) return false;
+        for (const p of hits) matched.add(p);
+      }
+      if (findMatchingPattern(absPath, protectedPaths) !== undefined) {
+        refused.push(absPath);
+        return false;
+      }
+      return true;
+    };
+    let report: RollbackReport;
+    try {
+      report = await tx.undo(accept);
+    } catch (err) {
+      return fail(err instanceof ToolError ? err : new ToolError('tool-error', errorMessage(err)));
+    }
+    const restored = new Set(report.restored);
+    for (let i = this.#changed.length - 1; i >= 0; i--) if (restored.has(this.#changed[i] ?? '')) this.#changed.splice(i, 1);
+    for (let i = this.#diffs.length - 1; i >= 0; i--) if (restored.has(this.#diffs[i]?.absPath ?? '')) this.#diffs.splice(i, 1);
+    const shown = (p: string): string => displayPath(p, this.#realCwd);
+    const skipped = [
+      ...report.skipped.map((s) => ({ path: shown(s.path), reason: s.reason === 'changed-externally' ? 'changed by another writer since this run wrote it; left as it is' : `could not be restored: ${s.detail ?? s.reason}` })),
+      ...refused.map((p) => ({ path: shown(p), reason: 'a protected host policy path; never undone' })),
+      ...(targets === undefined ? [] : [...targets.keys()].filter((p) => !matched.has(p)).map((p) => ({ path: p, reason: 'not written or edited by this run (or already undone)' }))),
+    ];
+    const bash = this.#bashCommits;
+    const mcp = this.#mcpSent;
+    const notUndone = bash + mcp === 0 ? undefined : `${[bash > 0 ? `${bash} bash call(s)` : '', mcp > 0 ? `${mcp} mcpCall(s)` : ''].filter(Boolean).join(' and ')} of this run are not undone`;
+    this.#calls[slot] = { id, tool: 'undo', summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+    return { ok: true, value: { restored: report.restored.map(shown), skipped, ...(notUndone === undefined ? {} : { notUndone }) } };
+  }
+
+  /** The real absolute paths a path the script gave can name: against the cwd as given and as real, and through its symlinks. */
+  #candidates(p: string): Set<string> {
+    const out = new Set<string>();
+    for (const base of [this.#realCwd, this.#opts.ctx.cwd]) {
+      const abs = path.resolve(base, p);
+      out.add(abs);
+      out.add(realPathOrResolved(abs));
+    }
+    return out;
   }
 
   #toolFailure(err: unknown): Failure {
@@ -810,8 +912,7 @@ export class Dispatcher<P = unknown> {
   }
 
   #addChanged(absPath: string): void {
-    const shown = displayPath(absPath, this.#realCwd);
-    if (!this.#changed.includes(shown)) this.#changed.push(shown);
+    if (!this.#changed.includes(absPath)) this.#changed.push(absPath);
   }
 
   #elapsed(started: number): number {

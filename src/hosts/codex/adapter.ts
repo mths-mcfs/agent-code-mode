@@ -154,7 +154,10 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       ...(config.excludeSlashTmp || tmp.slashTmp === null ? [] : [tmp.slashTmp]),
       ...(config.excludeTmpdirEnvVar || tmp.tmpdir === null || !path.isAbsolute(tmp.tmpdir) ? [] : [tmp.tmpdir]),
     ];
-    const writableRoots = unique([config.cwd, ...config.writableRoots, ...tmpRoots].map((p) => path.resolve(p)));
+    // The run's scratch directory is writable where Codex already lets commands write temp files, and in
+    // danger-full-access, where everything is; read-only and a config that excludes both temp dirs get none.
+    const scratchRoot = ctx.scratchDir !== undefined && (sandboxMode === 'danger-full-access' || (sandboxMode === 'workspace-write' && tmpRoots.length > 0)) ? ctx.scratchDir : undefined;
+    const writableRoots = unique([config.cwd, ...config.writableRoots, ...tmpRoots, ...(scratchRoot === undefined ? [] : [scratchRoot])].map((p) => path.resolve(p)));
     const bashContainment = containmentFor(sandboxMode, writableRoots, config.networkAccess);
 
     const stateDir = this.#opts.stateDir ?? stateDirPath(io.env, io.home);
@@ -200,6 +203,7 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       protectedPaths,
       watchedPaths,
       mcp,
+      ...(scratchRoot === undefined ? {} : { scratchRoot }),
       // Configured writable roots and --add-dir widen the tools' workspace in workspace-write only; /tmp and $TMPDIR do not.
       ...(sandboxMode === 'workspace-write' ? { additionalRoots: unique(config.writableRoots.map((p) => path.resolve(p))) } : {}),
       payload: {

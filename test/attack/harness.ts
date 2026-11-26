@@ -63,6 +63,8 @@ export function makeLab(files: Record<string, string> = {}): Lab {
   const hooksDir = path.join(base, 'hooks');
   for (const d of [ws, outside, home, hooksDir]) mkdirSync(d, { recursive: true });
   mkdirSync(stateDir, { mode: 0o700 });
+  // Where the server puts each run's scratch directory: server state, like stateDir, so disk snapshots start with it.
+  mkdirSync(`${stateDir}-scratch`, { mode: 0o700 });
   mkdirSync(path.join(stateDir, 'ctx'), { mode: 0o700 });
   writeFileSync(path.join(outside, 'secret.txt'), 'outside secret\n');
   for (const [rel, content] of Object.entries(files)) {

@@ -15,6 +15,7 @@ import type {
   RunRequest,
   RunResult,
   Sandbox,
+  ScratchDir,
   SandboxOutcome,
   SessionContext,
   ToolRuntime,
@@ -206,9 +207,26 @@ function runError(stopReason: StopReason | undefined, outcome: SandboxOutcome, d
  * Runs one script end to end: loads the policy, starts the transaction,
  * runs the sandbox with the dispatcher behind its bindings, enforces the
  * timeout and cancellation, rolls back on failure and builds the `RunResult`.
- * Never rejects.
+ * The run's scratch directory is created first and deleted before the
+ * result returns. Never rejects.
  */
 export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<RunResult> {
+  const notes: string[] = [];
+  let scratch: ScratchDir | undefined;
+  if (deps.tools.createScratch !== undefined) {
+    try {
+      scratch = await deps.tools.createScratch();
+    } catch (err) {
+      notes.push(`this run has no scratch directory: ${errorMessage(err)}`);
+    }
+  }
+  const result = await runWithin(req, scratch === undefined ? deps : { ...deps, ctx: { ...deps.ctx, scratchDir: scratch.path } }, scratch);
+  const left = await scratch?.remove().catch((err: unknown) => errorMessage(err));
+  if (left !== undefined) notes.push(`the scratch directory ${scratch?.path ?? ''} could not be removed (${left}); the next server start removes it`);
+  return notes.length === 0 ? result : { ...result, warnings: [...notes, ...result.warnings] };
+}
+
+async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: ScratchDir | undefined): Promise<RunResult> {
   const now = deps.now ?? (() => performance.now());
   const timeoutMs = resolveTimeoutMs(req.timeoutMs, deps.maxTimeoutMs);
   // One deadline for the whole run, policy loading included; the grace after it is for stopping and finishing.
@@ -250,6 +268,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     }
     checkDeadline();
     if (req.transaction && stopReason === undefined) tx = releasingClaims(deps.tools.beginTransaction());
+    const scratch = scratchDir !== undefined && !('error' in policy) && policy.scratchRoot === scratchDir.path ? scratchDir : undefined;
 
     const overflow = deps.overflow;
     const leftMs = deadline - now();
@@ -262,6 +281,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       checkDeadline,
       ...(overflow ? { readOverflow: (args: unknown) => overflow.read(args) } : {}),
       ...(deps.mcp ? { mcp: deps.mcp } : {}),
+      ...(scratch ? { scratch } : {}),
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
     const active = dispatcher;
@@ -277,6 +297,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
           timeoutMs: Math.ceil(leftMs),
           memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
           signal: controller.signal,
+          ...(scratch ? { scratchDir: scratch.path } : {}),
           onCall: (tool, args) => active.dispatch(tool, args),
           onLog: (level, text) => logs.add(level, text),
         });

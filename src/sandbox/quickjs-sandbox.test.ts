@@ -29,7 +29,7 @@ function ok(value: unknown): CallReply {
 
 async function run(
   code: string,
-  options: { onCall?: OnCall; timeoutMs?: number; memoryBytes?: number; signal?: AbortSignal; sandbox?: QuickJsSandboxOptions } = {},
+  options: { onCall?: OnCall; timeoutMs?: number; memoryBytes?: number; signal?: AbortSignal; sandbox?: QuickJsSandboxOptions; scratchDir?: string } = {},
 ): Promise<Recorded> {
   const sandbox = new QuickJsSandbox(options.sandbox);
   const calls: Recorded['calls'] = [];
@@ -40,6 +40,7 @@ async function run(
     timeoutMs: options.timeoutMs ?? 10_000,
     memoryBytes: options.memoryBytes ?? 64 * 1024 * 1024,
     signal: options.signal ?? new AbortController().signal,
+    ...(options.scratchDir === undefined ? {} : { scratchDir: options.scratchDir }),
     onCall: (tool, args) => {
       calls.push({ tool, args });
       return onCall(tool, args, calls.length - 1);
@@ -238,6 +239,23 @@ const PLATFORM_ENV = new Set(
       : [],
 );
 
+describe('QuickJsSandbox: scratchDir, test and undo', () => {
+  it('sets scratchDir from the run options, and leaves it undefined without one', async () => {
+    expect(value((await run('return scratchDir;', { scratchDir: '/scratch/run-1' })).outcome)).toBe('/scratch/run-1');
+    expect(value((await run('return typeof scratchDir;')).outcome)).toBe('undefined');
+  });
+
+  it('sends test and undo as their own calls', async () => {
+    const { calls } = await run("await test('npm test'); await test({ command: 'pytest', timeoutMs: 5 }); await undo(); await undo({ paths: ['a.txt'] });");
+    expect(calls).toEqual([
+      { tool: 'test', args: { command: 'npm test' } },
+      { tool: 'test', args: { command: 'pytest', timeoutMs: 5 } },
+      { tool: 'undo', args: {} },
+      { tool: 'undo', args: { paths: ['a.txt'] } },
+    ]);
+  });
+});
+
 describe('QuickJsSandbox: no ambient authority', () => {
   it('exposes no host objects, module loading or timers', async () => {
     const { outcome, calls } = await run(`
@@ -263,7 +281,7 @@ describe('QuickJsSandbox: no ambient authority', () => {
         'eval', 'globalThis', 'Date', 'RegExp', 'JSON', 'Proxy', 'Map', 'Set', 'WeakMap', 'WeakSet', 'ArrayBuffer', 'SharedArrayBuffer',
         'Uint8ClampedArray', 'Int8Array', 'Uint8Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'BigInt64Array',
         'BigUint64Array', 'Float16Array', 'Float32Array', 'Float64Array', 'DataView', 'Promise', 'BigInt', 'WeakRef', 'FinalizationRegistry',
-        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow', 'mcpCall',
+        'console', 'bash', 'read', 'write', 'edit', 'grep', 'glob', 'readOverflow', 'mcpCall', 'test', 'undo', 'scratchDir',
       ]),
     ));
     const result = value(outcome);

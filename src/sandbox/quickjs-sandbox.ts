@@ -304,7 +304,7 @@ export class QuickJsSandbox implements Sandbox {
     const timer = setTimeout(() => active.timeOut(), Math.max(0, deadline - performance.now()));
     if (!active.finished && !active.expired()) {
       // `start` has its own size limit; the reply quotas count only binding results. The writer checks the deadline.
-      const start = Buffer.from(`${JSON.stringify({ type: 'start', code, timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), limits } satisfies ParentMessage)}\n`, 'utf8');
+      const start = Buffer.from(`${JSON.stringify({ type: 'start', code, timeoutMs: Math.max(1, Math.floor(deadline - performance.now())), limits, ...(opts.scratchDir === undefined ? {} : { scratchDir: opts.scratchDir }) } satisfies ParentMessage)}\n`, 'utf8');
       if (start.length > MAX_START_BYTES) active.kill(`the script is larger than ${MAX_START_BYTES} bytes`);
       else writer.writeStart(start);
     }

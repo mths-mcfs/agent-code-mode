@@ -152,6 +152,9 @@ export function parseToolCall(tool: unknown, args: unknown, id: string): ToolCal
   }
 }
 
+/** Arguments of the `undo` binding: no `paths` undoes every file the run wrote or edited. */
+export const UndoArgsSchema = z.strictObject({ paths: z.array(z.string().min(1).max(4096)).min(1).max(1000).optional() });
+
 /**
  * Raw `run` tool arguments. Unknown keys (including any model-supplied
  * `_ctx`) are stripped and never trusted.
@@ -176,7 +179,7 @@ export const RUN_INPUT_JSON_SCHEMA: {
     code: {
       type: 'string',
       description:
-        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, readOverflow, mcpCall; the return value is the result.',
+        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, test, undo, readOverflow, mcpCall; the return value is the result.',
     },
     verbose: {
       type: 'boolean',

@@ -318,18 +318,25 @@ class MemoryTransaction implements Transaction {
   }
 
   async rollback(): Promise<RollbackReport> {
+    const report = await this.undo();
+    this.journal.clear();
+    return report;
+  }
+
+  async undo(accept: (absPath: string) => boolean = () => true): Promise<RollbackReport> {
     const restored: string[] = [];
     const skipped: { path: string; reason: 'changed-externally' }[] = [];
     for (const [absPath, entry] of [...this.journal.entries()].reverse()) {
+      if (!accept(absPath)) continue;
       // A later write by anyone else, even of the same text, has another revision.
       if (this.runtime.revision(absPath) !== entry.revision) {
         skipped.push({ path: absPath, reason: 'changed-externally' });
         continue;
       }
       this.runtime.setFile(absPath, entry.original, entry.originalRevision);
+      this.journal.delete(absPath);
       restored.push(absPath);
     }
-    this.journal.clear();
     return { restored, skipped };
   }
 

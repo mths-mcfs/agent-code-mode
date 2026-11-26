@@ -638,10 +638,14 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     let bashUnsupported: string | undefined;
     let sandboxLimitsWrites = false;
     const blockReadsOutside = docs.some((d) => d.data.permissions?.blockReadsOutsideWorkingDirectories === true);
+    // The run's scratch directory gets what a working directory gets, never more; settings that confine the tools to
+    // the working directories get none.
+    const scratchRoot = ctx.scratchDir !== undefined && !blockReadsOutside && !blockWritesOutside ? ctx.scratchDir : undefined;
+    if (scratchRoot !== undefined) workingDirs.add(scratchRoot);
     if (firstSetting(docs, (s) => s.sandbox?.enabled) === true) {
       // Writes stay inside the directories Claude approved: its launch and session directories, the additional
       // directories of eligible sources (not the MCP roots), and the sandbox's own write grants.
-      const roots = new Set<string>([primaryDir, sessionCwd, ...additionalDirs]);
+      const roots = new Set<string>([primaryDir, sessionCwd, ...additionalDirs, ...(scratchRoot === undefined ? [] : [scratchRoot])]);
       // Managed filesystem settings lock the key: lower sources cannot turn the filesystem sandbox off.
       const managedFs = docs.some((d) => d.source === 'managed' && d.data.sandbox?.filesystem !== undefined);
       const fsDisabled = firstSetting(
@@ -778,6 +782,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       additionalRoots: [...new Set(additionalDirs)],
       readFilter: (realAbsPath: string): boolean => !isReadRestricted(realAbsPath),
       mcp,
+      ...(scratchRoot === undefined ? {} : { scratchRoot }),
       payload,
     };
   }

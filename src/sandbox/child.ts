@@ -66,7 +66,7 @@ const BindingErrorSchema = z.strictObject({
   source: z.string().optional(),
 });
 const ParentMessageSchema = z.discriminatedUnion('type', [
-  z.strictObject({ type: z.literal('start'), code: z.string(), timeoutMs: z.number().positive(), limits: LimitsSchema }),
+  z.strictObject({ type: z.literal('start'), code: z.string(), timeoutMs: z.number().positive(), limits: LimitsSchema, scratchDir: z.string().min(1).optional() }),
   z.strictObject({
     type: z.literal('reply'),
     id: int,
@@ -116,7 +116,7 @@ function fatal(message: string): never {
 // `Promise.prototype.then` only breaks its own values.
 // ---------------------------------------------------------------------------
 
-const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, maxLogLineChars) {
+const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, maxLogLineChars, scratchDir) {
   'use strict';
   var G = globalThis;
   var stringify = JSON.stringify, parse = JSON.parse;
@@ -244,6 +244,8 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     readOverflow: function readOverflow(id, offset, limit) {
       return invoke('readOverflow', id !== null && typeof id === 'object' ? id : { id: id, offset: offset, limit: limit });
     },
+    test: function test(arg) { return invoke('test', typeof arg === 'string' ? { command: arg } : arg); },
+    undo: function undo(arg) { return invoke('undo', arg === undefined ? {} : arg); },
     mcpCall: function mcpCall(server, tool, args, options) {
       var call = { server: server, tool: tool };
       if (args !== undefined) call.args = args;
@@ -253,6 +255,7 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
   };
   var names = objectKeys(bindings);
   for (var b = 0; b < names.length; b++) define(names[b], bindings[names[b]]);
+  define('scratchDir', scratchDir);
 
   // ---- return value: JSON, with non-JSON values described -----------------
   var tooLarge = {};
@@ -433,6 +436,7 @@ class VmRun {
   readonly #rt: QuickJSRuntime;
   readonly #ctx: QuickJSContext;
   readonly #limits: SandboxLimits;
+  readonly #scratchDir: string | undefined;
   readonly #deadline: number;
   readonly #pending = new Map<number, QuickJSDeferredPromise>();
   readonly #timer: NodeJS.Timeout;
@@ -443,6 +447,7 @@ class VmRun {
 
   constructor(qjs: QuickJSWASMModule, start: StartMessage) {
     this.#limits = start.limits;
+    this.#scratchDir = start.scratchDir;
     this.#deadline = Date.now() + start.timeoutMs;
     this.#rt = qjs.newRuntime();
     this.#rt.setMemoryLimit(start.limits.memoryBytes);
@@ -465,7 +470,7 @@ class VmRun {
     const ctx = this.#ctx;
     const shim = ctx.evalCode(SHIM, SHIM_FILE, { type: 'global' });
     if (shim.error) return this.#fail(shim.error);
-    const natives = [this.#callNative(), this.#logNative(), this.#doneNative(), ctx.newNumber(this.#limits.maxResultChars), ctx.newNumber(this.#limits.maxLogLineChars)];
+    const natives = [this.#callNative(), this.#logNative(), this.#doneNative(), ctx.newNumber(this.#limits.maxResultChars), ctx.newNumber(this.#limits.maxLogLineChars), this.#scratchDir === undefined ? ctx.undefined : ctx.newString(this.#scratchDir)];
     const runner = ctx.callFunction(shim.value, ctx.undefined, natives);
     shim.value.dispose();
     for (const handle of natives) handle.dispose();

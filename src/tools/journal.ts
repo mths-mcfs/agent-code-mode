@@ -325,24 +325,11 @@ export class FileTransaction implements Transaction {
       this.#closed = true;
       openTransactions.delete(this.id);
       const restored: string[] = [];
-      const skipped: { path: string; reason: 'changed-externally' | 'error'; detail?: string }[] = [];
+      const skipped: Skipped[] = [];
       for (const live of [...this.#entries.values()].reverse()) {
-        const { entry } = live;
-        try {
-          const file = rooted(live.root, entry.path);
-          const current = await readRegularFile(file);
-          const currentHash = current ? sha256(current.bytes) : null;
-          const originalHash = entry.existed ? entry.original : null;
-          if (currentHash === originalHash) continue;
-          if (live.last === null || currentHash !== live.last.hash || current?.id !== live.last.id) {
-            skipped.push({ path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what this run wrote' });
-            continue;
-          }
-          await restoreEntry(file, entry, live.bytes, currentHash);
-          restored.push(entry.path);
-        } catch (err) {
-          skipped.push({ path: entry.path, reason: 'error', detail: errorMessage(err) });
-        }
+        const outcome = await restoreLive(live);
+        if (outcome === 'restored') restored.push(live.entry.path);
+        else if (outcome !== 'unchanged') skipped.push(outcome);
       }
       const ownDirs = [...this.#ownDirs.keys()];
       await removeCreatedDirs(this.#ownDirs, this.#roots);
@@ -350,6 +337,39 @@ export class FileTransaction implements Transaction {
       const needsRecovery = !restoresOnDisk || skipped.some((s) => s.reason === 'error');
       if (needsRecovery) await this.#flushRecord();
       else await this.#removeRecord();
+      return { restored, skipped };
+    });
+  }
+
+  /**
+   * Restores the files `accept` keeps, newest first, under the rollback's
+   * rule: only a file that still holds what this run last wrote. A restored
+   * file leaves the journal, so the run can write it again from its original;
+   * a skipped one stays, and a later write to it is refused as stale. Empty
+   * directories the run created are removed. The transaction stays open.
+   */
+  undo(accept: (absPath: string) => boolean = () => true): Promise<RollbackReport> {
+    return this.#serial(async () => {
+      if (this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
+      const restored: string[] = [];
+      const skipped: Skipped[] = [];
+      for (const live of [...this.#entries.values()].reverse()) {
+        if (!accept(live.entry.path)) continue;
+        const outcome = await restoreLive(live);
+        if (outcome === 'restored' || outcome === 'unchanged') {
+          if (outcome === 'restored') restored.push(live.entry.path);
+          this.#entries.delete(live.entry.path);
+          this.#bytes -= live.bytes?.length ?? 0;
+        } else {
+          skipped.push(outcome);
+        }
+      }
+      for (const [dir, id] of [...this.#ownDirs].sort(([a], [b]) => b.length - a.length)) {
+        if (!(await removeEmptyDirInside(dir, this.#roots, id))) continue;
+        this.#ownDirs.delete(dir);
+        this.#changedDirs.delete(dir);
+      }
+      if (this.#created) await this.#persist();
       return { restored, skipped };
     });
   }
@@ -417,6 +437,26 @@ export class FileTransaction implements Transaction {
     if (!this.#created) return;
     await fs.rm(this.dir, { recursive: true, force: true });
     this.#created = false;
+  }
+}
+
+type Skipped = { path: string; reason: 'changed-externally' | 'error'; detail?: string };
+
+async function restoreLive(live: LiveEntry): Promise<'restored' | 'unchanged' | Skipped> {
+  const { entry } = live;
+  try {
+    const file = rooted(live.root, entry.path);
+    const current = await readRegularFile(file);
+    const currentHash = current ? sha256(current.bytes) : null;
+    const originalHash = entry.existed ? entry.original : null;
+    if (currentHash === originalHash) return 'unchanged';
+    if (live.last === null || currentHash !== live.last.hash || current?.id !== live.last.id) {
+      return { path: entry.path, reason: 'changed-externally', detail: 'the file no longer holds what this run wrote' };
+    }
+    await restoreEntry(file, entry, live.bytes, currentHash);
+    return 'restored';
+  } catch (err) {
+    return { path: entry.path, reason: 'error', detail: errorMessage(err) };
   }
 }
 
