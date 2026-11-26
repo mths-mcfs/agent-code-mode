@@ -27,18 +27,20 @@ const CWD_OFFSET = 152;
 const MAXPATHLEN = 1024;
 
 // Syscalls 202 (__sysctl) and 336 (proc_info). Flavors: 3 PROC_PIDTBSDINFO, 9 PROC_PIDVNODEPATHINFO.
+// PROC_PIDTBSDINFO is read before and after the other two: a pid reused in between changes its start time.
 const PERL_SCRIPT = String.raw`
 my $pid = $ARGV[0] + 0;
+my $bsd1 = "\0" x ${BSDINFO_SIZE}; my $b1 = syscall(336, 2, $pid, 3, 0, $bsd1, ${BSDINFO_SIZE});
 my $amib = pack("i2", 1, 8); my $amax = pack("i", 0); my $alen = pack("Q", 4);
 syscall(202, $amib, 2, $amax, $alen, 0, 0) == 0 or die "KERN_ARGMAX: $!\n";
 my $max = unpack("i", $amax);
 my $mib = pack("i3", 1, 49, $pid); my $buf = "\0" x $max; my $len = pack("Q", $max);
 syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or die "KERN_PROCARGS2: $!\n";
 $len = unpack("Q", $len);
-my $bsd = "\0" x ${BSDINFO_SIZE}; my $bn = syscall(336, 2, $pid, 3, 0, $bsd, ${BSDINFO_SIZE});
 my $vp = "\0" x ${VNODEPATHINFO_SIZE}; my $vn = syscall(336, 2, $pid, 9, 0, $vp, ${VNODEPATHINFO_SIZE});
+my $bsd2 = "\0" x ${BSDINFO_SIZE}; my $b2 = syscall(336, 2, $pid, 3, 0, $bsd2, ${BSDINFO_SIZE});
 binmode STDOUT;
-print pack("q", $len), substr($buf, 0, $len), pack("q", $bn), $bsd, pack("q", $vn), $vp;
+print pack("q", $b1), $bsd1, pack("q", $len), substr($buf, 0, $len), pack("q", $vn), $vp, pack("q", $b2), $bsd2;
 `;
 
 export function checkSystemPerl(st: Pick<Stats, 'uid' | 'mode' | 'isFile'>): void {
@@ -54,7 +56,7 @@ export function macPerlInvocation(pid: number): { file: string; args: string[]; 
   return { file: SYSTEM_PERL, args: ['-e', PERL_SCRIPT, String(pid)], cwd: '/', env: {} };
 }
 
-const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 function utf8(bytes: Uint8Array): string | undefined {
   try {
@@ -87,6 +89,7 @@ function splitProcargs(args: Buffer): { argv: string[]; environ: Buffer } {
     argv.push(arg);
     at = end + 1;
   }
+  if (at < args.length && args[args.length - 1] !== 0) throw new Error('the environment area does not end with a NUL');
   return { argv, environ: args.subarray(at) };
 }
 
@@ -101,16 +104,21 @@ export function parseMacProcess(pid: number, out: Buffer): MacProcess {
     at += 8 + size;
     return { result, bytes };
   };
+  const before = section(BSDINFO_SIZE);
   const args = section();
-  const bsd = section(BSDINFO_SIZE);
   const vnode = section(VNODEPATHINFO_SIZE);
+  const after = section(BSDINFO_SIZE);
   if (at !== out.length) throw new Error('the output has trailing bytes');
-  if (bsd.result !== BSDINFO_SIZE || bsd.bytes.readUInt32LE(12) !== pid) throw new Error('its parent process id cannot be read');
+  const identity = (bsd: { result: number; bytes: Buffer }): string | undefined =>
+    bsd.result === BSDINFO_SIZE && bsd.bytes.readUInt32LE(12) === pid ? [bsd.bytes.readUInt32LE(16), bsd.bytes.readBigUInt64LE(120), bsd.bytes.readBigUInt64LE(128)].join(':') : undefined;
+  const first = identity(before);
+  if (first === undefined) throw new Error('its parent process id cannot be read');
+  if (identity(after) !== first) throw new Error('it exited or changed while it was read');
   const { argv, environ } = splitProcargs(args.bytes);
   const path = vnode.bytes.subarray(CWD_OFFSET, CWD_OFFSET + MAXPATHLEN);
   const end = path.indexOf(0);
   const cwd = vnode.result === VNODEPATHINFO_SIZE && end !== -1 ? utf8(path.subarray(0, end)) : undefined;
-  return { argv, environ, ppid: bsd.bytes.readUInt32LE(16), ...(cwd?.startsWith('/') ? { cwd } : {}) };
+  return { argv, environ, ppid: before.bytes.readUInt32LE(16), ...(cwd?.startsWith('/') ? { cwd } : {}) };
 }
 
 function failure(pid: number, err: unknown, stderr?: Buffer): Error {

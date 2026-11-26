@@ -7,14 +7,28 @@ import { checkSystemPerl, macPerlInvocation, parseMacProcess, readMacProcess, re
 
 interface Dump {
   readonly argv: readonly string[];
+  readonly argc?: number;
   readonly execPath?: string;
   readonly env?: readonly string[];
+  /** Bytes after the environment, in place of the kernel's NUL fill. */
+  readonly tail?: Buffer;
   readonly pid?: number;
   readonly ppid?: number;
   readonly cwd?: string;
   readonly bsdResult?: number;
   readonly vnodeResult?: number;
   readonly padOverride?: Buffer;
+  /** The second PROC_PIDTBSDINFO read: another pid, ppid or start time. */
+  readonly after?: { readonly pid?: number; readonly ppid?: number; readonly startSec?: number; readonly startUsec?: number; readonly result?: number };
+}
+
+function bsdinfo(pid: number, ppid: number, startSec: number, startUsec: number): Buffer {
+  const bsd = Buffer.alloc(136);
+  bsd.writeUInt32LE(pid, 12);
+  bsd.writeUInt32LE(ppid, 16);
+  bsd.writeBigUInt64LE(BigInt(startSec), 120);
+  bsd.writeBigUInt64LE(BigInt(startUsec), 128);
+  return bsd;
 }
 
 function perlOutput(d: Dump): Buffer {
@@ -22,11 +36,11 @@ function perlOutput(d: Dump): Buffer {
   const pad = d.padOverride ?? Buffer.alloc((8 - (execPath.length % 8)) % 8);
   const strings = [...d.argv, ...(d.env ?? ['HOME=/h'])].map((s) => Buffer.from(`${s}\0`));
   const argc = Buffer.alloc(4);
-  argc.writeInt32LE(d.argv.length);
-  const args = Buffer.concat([argc, execPath, pad, ...strings, Buffer.alloc(3)]);
-  const bsd = Buffer.alloc(136);
-  bsd.writeUInt32LE(d.pid ?? 42, 12);
-  bsd.writeUInt32LE(d.ppid ?? 7, 16);
+  argc.writeInt32LE(d.argc ?? d.argv.length);
+  const args = Buffer.concat([argc, execPath, pad, ...strings, d.tail ?? Buffer.alloc(3)]);
+  const [pid, ppid] = [d.pid ?? 42, d.ppid ?? 7];
+  const before = bsdinfo(pid, ppid, 1700000000, 1234);
+  const after = bsdinfo(d.after?.pid ?? pid, d.after?.ppid ?? ppid, d.after?.startSec ?? 1700000000, d.after?.startUsec ?? 1234);
   const vnode = Buffer.alloc(2352);
   vnode.write(d.cwd ?? '/work dir', 152);
   const int64 = (n: number) => {
@@ -34,7 +48,8 @@ function perlOutput(d: Dump): Buffer {
     b.writeBigInt64LE(BigInt(n));
     return b;
   };
-  return Buffer.concat([int64(args.length), args, int64(d.bsdResult ?? 136), bsd, int64(d.vnodeResult ?? 2352), vnode]);
+  const bsd = d.bsdResult ?? 136;
+  return Buffer.concat([int64(bsd), before, int64(args.length), args, int64(d.vnodeResult ?? 2352), vnode, int64(d.after?.result ?? bsd), after]);
 }
 
 describe('macOS process reader', () => {
@@ -67,6 +82,19 @@ describe('macOS process reader', () => {
     expect(parseMacProcess(42, perlOutput({ argv: ['', 'y'], execPath: '/bin/abcdef' })).argv).toEqual(['', 'y']);
   });
 
+  it('reads the arguments at every exec path length, with and without an empty argv[0]', () => {
+    for (let n = 1; n <= 17; n++) {
+      for (const argv of [['/opt/claude', '', 'a b'], ['', 'x'], ['']]) {
+        expect(parseMacProcess(42, perlOutput({ argv, execPath: `/${'p'.repeat(n - 1)}` })).argv, `exec length ${n}`).toEqual(argv);
+      }
+    }
+  });
+
+  it('refuses the output cut at any offset', () => {
+    const out = perlOutput({ argv: ['/opt/claude', '--settings', '{"a": 1}', ''] });
+    for (let k = 0; k < out.length; k++) expect(() => parseMacProcess(42, out.subarray(0, k)), `cut at ${k}`).toThrow(Error);
+  });
+
   it('refuses output that does not fit the layout', () => {
     const good = perlOutput({ argv: ['node', 'a'] });
     expect(() => parseMacProcess(42, good.subarray(0, good.length - 1))).toThrow(/truncated/);
@@ -74,9 +102,22 @@ describe('macOS process reader', () => {
     expect(() => parseMacProcess(43, good)).toThrow(/parent process id/);
     expect(() => parseMacProcess(42, perlOutput({ argv: ['node'], bsdResult: -1 }))).toThrow(/parent process id/);
     expect(() => parseMacProcess(42, perlOutput({ argv: ['node'], padOverride: Buffer.from([0x41, 0, 0, 0, 0, 0, 0]), execPath: '/a' }))).toThrow(/layout/);
-    const short = perlOutput({ argv: ['node', 'a'], env: [] });
-    short.writeInt32LE(9, 8);
-    expect(() => parseMacProcess(42, short)).toThrow(/ends inside argument/);
+    expect(() => parseMacProcess(42, perlOutput({ argv: ['node', 'a'], argc: 9, env: [] }))).toThrow(/ends inside argument/);
+  });
+
+  it('refuses a process whose pid was reused or that exited between the reads', () => {
+    for (const after of [{ startSec: 1700000001 }, { startUsec: 1235 }, { ppid: 8 }, { pid: 43 }, { result: -1 }]) {
+      expect(() => parseMacProcess(42, perlOutput({ argv: ['node'], after })), JSON.stringify(after)).toThrow(/exited or changed while it was read/);
+    }
+  });
+
+  it('refuses an environment whose last string has no NUL', () => {
+    expect(() => parseMacProcess(42, perlOutput({ argv: ['sample'], env: [], tail: Buffer.from('TEST=demo') }))).toThrow(/does not end with a NUL/);
+    expect(parseMacProcess(42, perlOutput({ argv: ['sample'], env: [], tail: Buffer.alloc(0) })).argv).toEqual(['sample']);
+  });
+
+  it('keeps a leading byte order mark in an argument', () => {
+    expect(parseMacProcess(42, perlOutput({ argv: ['\uFEFFexample', '\uFEFF'] })).argv).toEqual(['\uFEFFexample', '\uFEFF']);
   });
 
   it('rejects an argument that is not valid UTF-8', () => {

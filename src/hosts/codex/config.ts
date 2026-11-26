@@ -17,12 +17,12 @@
  * Constraints come from `/etc/codex/requirements.toml`.
  *
  * Settings passed only on the parent Codex command line are read from its
- * exact argv: `/proc/<ppid>/cmdline` on Linux, the kernel through
- * `readMacProcessSync` on macOS. On Windows, or when the parent is not a Codex
- * process, the real IO refuses to load a policy rather than guess those
- * settings. Anything else that is
- * ephemeral (app-server thread overrides, cloud and MDM config, settings
- * changed inside a running TUI) is invisible to this server.
+ * exact argv (`readParentRecord`): `/proc/<ppid>/cmdline` on Linux, the
+ * kernel through `readMacProcessSync` on macOS. On Windows, or when the parent
+ * is not a Codex process, the real IO refuses to load a policy rather than
+ * guess those settings. Anything else that is ephemeral (app-server thread
+ * overrides, cloud and MDM config, settings changed inside a running TUI) is
+ * invisible to this server.
  */
 
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
@@ -135,7 +135,7 @@ export class ConfigError extends Error {
   override readonly name = 'ConfigError';
 }
 
-const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Splits a NUL-separated process record (`/proc/<pid>/cmdline` or `environ`)
@@ -158,16 +158,71 @@ export function decodeNulList(raw: Uint8Array, what: string): string[] {
   return out;
 }
 
-function readParentArgv(platform: NodeJS.Platform): readonly string[] {
-  if (platform === 'darwin') return readMacProcessSync(process.ppid).argv;
+/** The parent process read once: its exact argv and, when asked for, its environment region (`KEY=value` entries separated by NUL). */
+export interface ParentRecord {
+  readonly argv: readonly string[];
+  readonly environ?: Buffer;
+}
+
+/** Reads the parent process; throws with the reason when it cannot. macOS gives argv and environment in one kernel read. */
+export function readParentRecord(platform: NodeJS.Platform, withEnv: boolean): ParentRecord {
+  if (platform === 'darwin') return readMacProcessSync(process.ppid);
   if (platform !== 'linux') throw new Error('only Linux and macOS expose the exact command line of the parent process');
-  let raw: Buffer;
+  const read = (file: string, what: string): Buffer => {
+    try {
+      return readFileSync(`/proc/${process.ppid}/${file}`);
+    } catch {
+      throw new Error(`the ${what} of the parent process ${String(process.ppid)} cannot be read`);
+    }
+  };
+  const argv = decodeNulList(read('cmdline', 'command line'), 'the parent Codex command line');
+  return withEnv ? { argv, environ: read('environ', 'environment') } : { argv };
+}
+
+function attempt(read: () => ParentRecord): ParentRecord | Error {
   try {
-    raw = readFileSync(`/proc/${process.ppid}/cmdline`);
-  } catch {
-    throw new Error(`the command line of the parent process ${String(process.ppid)} cannot be read`);
+    return read();
+  } catch (err) {
+    return err instanceof Error ? err : new Error(String(err));
   }
-  return decodeNulList(raw, 'the parent Codex command line');
+}
+
+function codexParentArgv(parent: ParentRecord | Error): readonly string[] {
+  const why = (cause: string): ConfigError => new ConfigError(`${cause}, so the -c, --profile, -s and -a options of the Codex session cannot be checked`);
+  if (parent instanceof ConfigError) throw parent;
+  if (parent instanceof Error) throw why(parent.message);
+  if (!looksLikeCodex(parent.argv)) throw why(`the parent process (${JSON.stringify((parent.argv[0] ?? '').slice(0, 80))}) is not the Codex CLI`);
+  return parent.argv;
+}
+
+/** The value of `key` in a NUL-separated environ record; only that entry is decoded, as strict UTF-8. */
+function strictEnvValue(raw: Buffer, key: string): string | undefined {
+  const prefix = `${key}=`;
+  const entry = raw.toString('latin1').split('\0').find((kv) => kv.startsWith(prefix));
+  if (entry === undefined) return undefined;
+  return (decodeNulList(Buffer.from(entry, 'latin1'), `${key} in the parent Codex environment`)[0] ?? '').slice(prefix.length);
+}
+
+/**
+ * The IO of a real Codex session, with the parent process read once. Codex starts MCP servers with a minimal
+ * environment that drops `CODEX_HOME`, so on Linux and macOS the parent's value is used. When this server has
+ * no `CODEX_HOME` and the parent cannot be read, it throws: loading the default Codex home could apply another
+ * configuration than the session's.
+ */
+export function codexSessionIo(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  platform: NodeJS.Platform = process.platform,
+  read: (withEnv: boolean) => ParentRecord = (withEnv) => readParentRecord(platform, withEnv),
+): ConfigIo {
+  const sessionEnv = { ...env };
+  const withEnv = sessionEnv['CODEX_HOME'] === undefined && (platform === 'linux' || platform === 'darwin');
+  const parent = attempt(() => read(withEnv));
+  if (withEnv) {
+    if (parent instanceof Error) throw new ConfigError(`${parent.message}, so the CODEX_HOME of the Codex session cannot be checked`);
+    const value = strictEnvValue(parent.environ ?? Buffer.alloc(0), 'CODEX_HOME');
+    if (value !== undefined) sessionEnv['CODEX_HOME'] = value;
+  }
+  return { ...nodeConfigIo(sessionEnv), parentArgv: () => codexParentArgv(parent) };
 }
 
 function isMissing(err: unknown): boolean {
@@ -229,18 +284,7 @@ export function nodeConfigIo(env: Readonly<Record<string, string | undefined>> =
         return undefined;
       }
     },
-    parentArgv() {
-      const why = (cause: string): ConfigError => new ConfigError(`${cause}, so the -c, --profile, -s and -a options of the Codex session cannot be checked`);
-      let argv: readonly string[];
-      try {
-        argv = readParentArgv(process.platform);
-      } catch (err) {
-        if (err instanceof ConfigError) throw err;
-        throw why(err instanceof Error ? err.message : String(err));
-      }
-      if (!looksLikeCodex(argv)) throw why(`the parent process (${JSON.stringify((argv[0] ?? '').slice(0, 80))}) is not the Codex CLI`);
-      return argv;
-    },
+    parentArgv: () => codexParentArgv(attempt(() => readParentRecord(process.platform, false))),
   };
 }
 

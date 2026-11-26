@@ -22,12 +22,10 @@
  * containment; the containment is always the sandbox mode's.
  */
 
-import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { readMacProcessSync } from '../../core/macos-process.js';
 import { stateDirPath } from '../../core/state-dir.js';
 import type { BashContainment, BashShell, Decision, HostAdapter, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, SessionContext } from '../../core/types.js';
-import { ConfigError, decodeNulList, getPath, isTable, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
+import { codexSessionIo, ConfigError, getPath, isTable, loadCodexConfig, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
 import { executableLookupKey, isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
 import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
 import { APPLY_PATCH_NAMES, BASH_NAMES, mapUpdatedInput, nativeCall, NativeShapeError, shellCommandFor, type NativeCall } from './native.js';
@@ -125,7 +123,7 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
   }
 
   #load(ctx: SessionContext): PolicySnapshot<CodexPolicy> {
-    const io = this.#opts.io ? this.#opts.io(ctx) : nodeConfigIo(parentAwareEnv());
+    const io = this.#opts.io ? this.#opts.io(ctx) : codexSessionIo();
     const config = loadCodexConfig(ctx.cwd, io);
 
     const rules: PrefixRule[] = [];
@@ -424,49 +422,10 @@ export function checkFileWrite(absPath: string, p: CodexPolicy): Decision {
   }
 }
 
-/** The value of `key` in a NUL-separated environ record; only that entry is decoded, as strict UTF-8. */
-function strictEnvValue(raw: Buffer, key: string): string | undefined {
-  const prefix = `${key}=`;
-  const entry = raw.toString('latin1').split('\0').find((kv) => kv.startsWith(prefix));
-  if (entry === undefined) return undefined;
-  return (decodeNulList(Buffer.from(entry, 'latin1'), `${key} in the parent Codex environment`)[0] ?? '').slice(prefix.length);
-}
-
-/**
- * Codex starts MCP servers with a minimal environment that drops
- * `CODEX_HOME`. On Linux the parent's value is read from `/proc`, on macOS
- * from the kernel; elsewhere only the server's own environment is used. On
- * macOS a failed read throws: the parent argv is read separately, so it could
- * still succeed and load the default Codex home instead of the session's.
- */
-function parentAwareEnv(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env };
-  if (env['CODEX_HOME'] !== undefined) return env;
-  let raw: Buffer;
-  if (process.platform === 'darwin') {
-    try {
-      raw = readMacProcessSync(process.ppid).environ;
-    } catch (err) {
-      throw new ConfigError(`${err instanceof Error ? err.message : String(err)}, so the CODEX_HOME of the Codex session cannot be checked`);
-    }
-  } else if (process.platform === 'linux') {
-    try {
-      raw = readFileSync(`/proc/${process.ppid}/environ`);
-    } catch {
-      return env;
-    }
-  } else {
-    return env;
-  }
-  const value = strictEnvValue(raw, 'CODEX_HOME');
-  if (value !== undefined) env['CODEX_HOME'] = value;
-  return env;
-}
-
 export function codexToolTimeoutSec(cwd: string, serverName: string, io?: ConfigIo): number | undefined {
   let merged;
   try {
-    merged = loadCodexConfig(cwd, io ?? nodeConfigIo(parentAwareEnv())).merged;
+    merged = loadCodexConfig(cwd, io ?? codexSessionIo()).merged;
   } catch {
     return undefined;
   }
