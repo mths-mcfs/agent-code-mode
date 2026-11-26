@@ -58,8 +58,11 @@ describe('hidden-test tasks', () => {
   it('T10 reads past a regex literal that holds a quote, and splits arguments outside comments only', () => {
     expect(formatPriceCalls(`export const re = /"/; export const b = formatPrice(5, 'USD');`)).toEqual([['5', "'USD'"]]);
     expect(formatPriceCalls("export const re = /['`]/g, c = formatPrice(7, 'USD');")).toEqual([['7', "'USD'"]]);
-    expect(formatPriceCalls("export const c = formatPrice(6 /* a, b */, 'USD');")).toEqual([['6 /* a, b */', "'USD'"]]);
+    expect(formatPriceCalls("export const c = formatPrice(6 /* a, b */, 'USD');")).toEqual([['6', "'USD'"]]);
     expect(formatPriceCalls('export const d = 10 / 2 / formatPrice(8);')).toEqual([['8']]);
+    expect(formatPriceCalls("let n = 1; export const e = n++ / formatPrice(9, 'USD');")).toEqual([['9', "'USD'"]]);
+    expect(formatPriceCalls('export const f = formatPrice(...args);')).toEqual([['...args']]);
+    expect(() => formatPriceCalls('export const = ;')).toThrow();
   });
 
   it('T11 fails an implementation that leaves the zero-weight shares empty', async () => {

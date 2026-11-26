@@ -1,107 +1,54 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { checkScope, Checks, failedTests, readWorkspaceFile, runHiddenTests, runNodeTests } from '../checks.ts';
+import { parseAst } from 'rolldown/parseAst';
 import { filesFrom } from '../setup.ts';
 import type { VerifyContext, VerifyResult } from '../types.ts';
 
 export const T10_FILES = path.join(import.meta.dirname, 'files');
 const HIDDEN = Object.fromEntries(filesFrom(path.join(import.meta.dirname, 'hidden')));
 
-/** Where a `/` starts a regex literal rather than a division: after an operator, a bracket or a keyword. */
-function regexMayStart(source: string, at: number): boolean {
-  const before = source.slice(0, at).trimEnd();
-  if (before === '' || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before)) return true;
-  return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|new|delete|void|throw|instanceof|yield|await)$/.test(before);
+interface AstNode {
+  readonly type: string;
+  readonly start: number;
+  readonly end: number;
+  readonly [key: string]: unknown;
+}
+
+function isNode(value: unknown): value is AstNode {
+  return value !== null && typeof value === 'object' && 'type' in value && typeof value.type === 'string' && 'start' in value && typeof value.start === 'number' && 'end' in value && typeof value.end === 'number';
+}
+
+function* nodes(value: unknown): Generator<AstNode> {
+  if (Array.isArray(value)) {
+    for (const item of value) yield* nodes(item);
+  } else if (isNode(value)) {
+    yield value;
+    for (const child of Object.values(value)) if (child !== null && typeof child === 'object') yield* nodes(child);
+  }
 }
 
 /**
- * `source` with the text of comments, strings, regex literals and template literals blanked to spaces,
- * the code inside `${...}` kept. Same length, so an index into it is an index into `source`.
+ * The arguments, as written, of each `formatPrice(...)` call in `source`, and of calls through an
+ * `import { formatPrice as x }` alias. A real JavaScript parser finds them, so strings, comments,
+ * regexes and template literals need no special case. Throws when `source` does not parse.
  */
-function codeOnly(source: string): string {
-  const out = source.split('');
-  const blank = (from: number, to: number): void => {
-    for (let j = from; j < Math.min(to, out.length); j++) if (out[j] !== '\n') out[j] = ' ';
-  };
-  const templates: number[] = []; // brace depth outside each open `${`
-  let depth = 0;
-  for (let i = 0; i < source.length; ) {
-    const ch = source[i];
-    if (ch === '/' && (source[i + 1] === '/' || source[i + 1] === '*')) {
-      const end = source[i + 1] === '/' ? source.indexOf('\n', i) : source.indexOf('*/', i + 2) + 2;
-      const stop = end < i + 2 ? source.length : end;
-      blank(i, stop);
-      i = stop;
-    } else if (ch === '/' && regexMayStart(source, i)) {
-      let j = i + 1;
-      let inClass = false;
-      while (j < source.length && source[j] !== '\n' && (inClass || source[j] !== '/')) {
-        if (source[j] === '\\') j++;
-        else if (source[j] === '[') inClass = true;
-        else if (source[j] === ']') inClass = false;
-        j++;
-      }
-      blank(i + 1, j);
-      i = j + 1;
-    } else if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      while (j < source.length && source[j] !== ch && source[j] !== '\n') j += source[j] === '\\' ? 2 : 1;
-      blank(i + 1, j);
-      i = j + 1;
-    } else if (ch === '`' || (ch === '}' && depth === 0 && templates.length > 0)) {
-      if (ch === '}') depth = templates.pop() ?? 0;
-      let j = i + 1;
-      while (j < source.length && source[j] !== '`' && !(source[j] === '$' && source[j + 1] === '{')) j += source[j] === '\\' ? 2 : 1;
-      blank(i + 1, j);
-      if (source[j] === '$') {
-        templates.push(depth);
-        depth = 0;
-        i = j + 2;
-      } else i = j + 1;
-    } else {
-      if (ch === '{') depth++;
-      if (ch === '}') depth--;
-      i++;
-    }
-  }
-  return out.join('');
-}
-
-/** The top-level arguments of each `formatPrice(...)` call in the code of `source` (strings and nesting respected). */
 export function formatPriceCalls(source: string): string[][] {
-  const calls: string[][] = [];
-  const code = codeOnly(source);
-  // `import { formatPrice as money }` makes `money(` a call of it too.
-  const aliases = [...code.matchAll(/\bformatPrice\s+as\s+([A-Za-z_$][\w$]*)/g)].map((m) => (m[1] as string).replace(/\$/g, '\\$'));
-  // An identifier may start with `$`, which `\b` does not see as part of a word.
-  const re = new RegExp(`(?<![\\w$])(?:${['formatPrice', ...aliases].join('|')})\\s*\\(`, 'g');
-  for (let m = re.exec(code); m !== null; m = re.exec(code)) {
-    // A declaration (`function formatPrice(`) is not a call.
-    if (/(?:function|as)\s+$/.test(code.slice(0, m.index))) continue;
-    // Commas and brackets are read in `code`, where strings, comments and regexes are blank; the text comes from `source`.
-    const args: string[] = [];
-    let depth = 0;
-    let cur = '';
-    for (let i = m.index + m[0].length; i < source.length; i++) {
-      const ch = code[i] as string;
-      if (ch === '(' || ch === '{' || ch === '[') depth++;
-      if (ch === ')' || ch === '}' || ch === ']') {
-        if (depth === 0) {
-          if (cur.trim() !== '') args.push(cur.trim());
-          break;
-        }
-        depth--;
-      }
-      if (ch === ',' && depth === 0) {
-        args.push(cur.trim());
-        cur = '';
-        continue;
-      }
-      cur += source[i] as string;
-    }
-    calls.push(args);
+  const program = parseAst(source);
+  const names = new Set(['formatPrice']);
+  for (const node of nodes(program)) {
+    const imported = node['imported'];
+    const local = node['local'];
+    if (node.type === 'ImportSpecifier' && isNode(imported) && imported['name'] === 'formatPrice' && isNode(local) && typeof local['name'] === 'string') names.add(local['name']);
   }
-  return calls;
+  const calls: { readonly at: number; readonly args: string[] }[] = [];
+  for (const node of nodes(program)) {
+    const callee = node['callee'];
+    const args = node['arguments'];
+    if (node.type !== 'CallExpression' || !isNode(callee) || callee.type !== 'Identifier' || !names.has(String(callee['name'])) || !Array.isArray(args)) continue;
+    calls.push({ at: node.start, args: args.filter(isNode).map((arg) => source.slice(arg.start, arg.end)) });
+  }
+  return calls.sort((x, y) => x.at - y.at).map((c) => c.args);
 }
 
 async function listJs(workspace: string, dir: string): Promise<string[]> {
@@ -125,7 +72,14 @@ export async function verify(ctx: VerifyContext): Promise<VerifyResult> {
   const positional: string[] = [];
   for (const file of await listJs(ctx.workspace, 'src')) {
     if (file === 'src/index.js') continue;
-    for (const args of formatPriceCalls((await readWorkspaceFile(ctx.workspace, file)) ?? '')) {
+    let calls: string[][];
+    try {
+      calls = formatPriceCalls((await readWorkspaceFile(ctx.workspace, file)) ?? '');
+    } catch (err) {
+      positional.push(`${file}: does not parse (${String(err instanceof Error ? err.message : err).split('\n')[0]})`);
+      continue;
+    }
+    for (const args of calls) {
       const second = args[1];
       if (args.some((a) => a.startsWith('...')) || args.length > 2 || (second !== undefined && /^(['"`]|undefined$|null$|true$|false$|-?\d)/.test(second))) positional.push(`${file}: formatPrice(${args.join(', ')})`);
     }
