@@ -6,8 +6,8 @@ export interface SimpleCommand {
   readonly denyForms: readonly string[];
   readonly staticPrefixes: readonly string[];
   readonly dynamic: boolean;
-  /** The words after the command name, as written. */
-  readonly operands: readonly Operand[];
+  /** The command name and its arguments, as written. */
+  readonly words: readonly Operand[];
 }
 
 export interface BashAnalysis {
@@ -240,7 +240,7 @@ export class BashAnalyzer {
   #declClause(decl: DeclClause, ctx: Ctx): void {
     const name = decl.variant?.value ?? 'declare';
     const raw = this.#text(decl, ctx);
-    this.#commands.push({ raw, denyForms: [raw, name], staticPrefixes: [name], dynamic: true, operands: [] });
+    this.#commands.push({ raw, denyForms: [raw, name], staticPrefixes: [name], dynamic: true, words: [] });
   }
 
   #redirect(redir: Redirect, ctx: Ctx): void {
@@ -321,7 +321,7 @@ export class BashAnalyzer {
         addForm(current);
       }
     }
-    this.#commands.push({ raw, denyForms: [...denyForms], staticPrefixes: [...staticPrefixes], dynamic, operands: words.slice(1) });
+    this.#commands.push({ raw, denyForms: [...denyForms], staticPrefixes: [...staticPrefixes], dynamic, words });
   }
 
   #envSplitString(words: readonly WordValue[], ctx: Ctx): boolean {

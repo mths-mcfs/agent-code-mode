@@ -249,15 +249,18 @@ function isSensitivePath(p: string): boolean {
  * there is none to trust. Claude Code still asks under an exact rule for a
  * compound command and for one that names a file outside the working
  * directories or a sensitive file, so the rule approves only one plain
- * command, all of whose words are known before it runs. Each word counts as
- * a path, and so does the text after an `=` and between `:` there.
+ * command, all of whose words are known before it runs. Each argument, and
+ * a program named by a path, counts as a path, and so does the text after
+ * an `=` and between `:` there.
  */
 function exactRuleWords(analysis: BashAnalysis): { words: string[] } | { why: string } {
   if (analysis.uncertain.length > 0 || analysis.changesDirectory || analysis.commands.length !== 1) return { why: 'an exact allow rule approves one plain command, and this is several or changes directory' };
   const [command] = analysis.commands;
   if (command === undefined || command.dynamic) return { why: 'an exact allow rule approves a command whose words are all known before it runs' };
   const words: string[] = [];
-  for (const operand of [...command.operands, ...analysis.redirects]) {
+  const [name, ...args] = command.words;
+  const program = name?.value?.includes('/') === true ? [name] : [];
+  for (const operand of [...program, ...args, ...analysis.redirects]) {
     if (operand.value === undefined || operand.glob || operand.tilde === 'unknown' || operand.assignment === true) return { why: `\`${operand.raw}\` is only known at run time` };
     const value = operand.tilde === 'literal' ? `./${operand.value}` : operand.value;
     if (value.startsWith('-') && value.includes('/') && !value.includes('=')) return { why: `\`${operand.raw}\` may join an option to a path` };
