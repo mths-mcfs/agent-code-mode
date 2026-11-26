@@ -285,18 +285,23 @@ async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: Scrat
     }
     let ctx = deps.ctx;
     let scratch = scratchDir !== undefined && !('error' in policy) && policy.scratchRoot === scratchDir.path ? scratchDir : undefined;
-    const cover = scratch === undefined || 'error' in policy ? undefined : await coveringRoot(path.dirname(scratch.path), policy, deps.ctx);
-    if (scratch !== undefined && cover !== undefined) {
-      notes.push(`this run has no scratch directory: ${cover}, which it may write, holds the scratch base ${path.dirname(scratch.path)}, so other runs' scratch directories would be writable too`);
-      const { scratchDir: _unused, ...rest } = deps.ctx;
-      ctx = rest;
-      scratch = undefined;
-      try {
-        const loaded = await bounded(() => deps.adapter.loadPolicy(ctx), { signal: controller.signal });
-        policy = loaded.done ? loaded.value : { error: 'the run stopped while the host policy was loading' };
-      } catch (err) {
-        policy = { error: errorMessage(err) };
+    const scratchBase = scratchDir === undefined ? undefined : path.dirname(scratchDir.path);
+    const cover = scratchBase === undefined || 'error' in policy ? undefined : await coveringRoot(scratchBase, policy, deps.ctx);
+    if (scratchBase !== undefined && cover !== undefined) {
+      if (scratch !== undefined) {
+        notes.push(`this run has no scratch directory: ${cover}, which it may write, holds the scratch base ${scratchBase}, so other runs' scratch directories would be writable too`);
+        const { scratchDir: _unused, ...rest } = deps.ctx;
+        ctx = rest;
+        scratch = undefined;
+        try {
+          const loaded = await bounded(() => deps.adapter.loadPolicy(ctx), { signal: controller.signal });
+          policy = loaded.done ? loaded.value : { error: 'the run stopped while the host policy was loading' };
+        } catch (err) {
+          policy = { error: errorMessage(err) };
+        }
       }
+      // The root stays writable, so the base itself is protected: neither bash nor write and edit reach other runs' directories.
+      if (!('error' in policy)) policy = { ...policy, protectedPaths: [...policy.protectedPaths, path.join(scratchBase, '**')] };
     }
     checkDeadline();
     if (req.transaction && stopReason === undefined) tx = releasingClaims(deps.tools.beginTransaction());

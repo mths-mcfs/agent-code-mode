@@ -100,7 +100,9 @@ async function overLimit(dir: string, limits: ScratchLimits): Promise<string | u
   const pending = [dir];
   while (pending.length > 0) {
     const current = pending.pop() ?? dir;
-    const names = await fs.readdir(current).catch(() => [] as string[]);
+    // A directory the walk cannot read could hide anything: it counts as over the limit, never as empty.
+    const names = await fs.readdir(current).catch(() => undefined);
+    if (names === undefined) return 'what it can measure (a directory in it cannot be read)';
     for (const name of names) {
       entries++;
       if (entries > limits.entries) return `${limits.entries} entries`;
@@ -117,6 +119,7 @@ async function overLimit(dir: string, limits: ScratchLimits): Promise<string | u
 }
 
 async function emptyDir(dir: string): Promise<string | undefined> {
+  await restoreDirModes(dir);
   const names = await fs.readdir(dir).catch(() => [] as string[]);
   let failed: string | undefined;
   for (const name of names) failed = (await removeTree(path.join(dir, name))) ?? failed;

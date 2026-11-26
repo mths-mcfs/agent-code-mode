@@ -208,6 +208,8 @@ describe.skipIf(ROOTED_OPS_REFUSED)('FileTransaction.undo', () => {
     renameSync(tx.dir, path.join(path.dirname(tx.dir), `${stamp}-${pid}-${hex}`));
     const recovered = await recoverStaleJournals(stateDir, [ws], []);
     expect(recovered.flatMap((r) => r.report.skipped)).toEqual([]);
+    // Counted as restored, so recovery flushes its directory before it drops the record.
+    expect(recovered.flatMap((r) => r.report.restored)).toEqual([at('a.txt')]);
     expect(read('a.txt')).toBe('a0\n');
     expect(readdirSync(journalRoot(stateDir))).toEqual([]);
   });

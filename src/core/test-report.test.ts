@@ -94,6 +94,33 @@ describe('testResult: what is not a failure, and what still is', () => {
   });
 });
 
+describe('testResult: what a cut window must not hide', () => {
+  it('finds a failure printed before the last 128 KiB, even when the command exits 0', () => {
+    const noise = 'log line\n'.repeat(40_000);
+    const out = `not ok 1 - early failure\n${noise}ok 2 - later\n`;
+    expect(testResult(bash(out, { exitCode: 0 }))).toMatchObject({ ok: false, failed: 1, failures: [{ name: 'early failure' }], truncated: true });
+  });
+
+  it('keeps the final summary\'s counts when the window cut the result lines', () => {
+    const out = `ok 1 - first\n${'log line\n'.repeat(40_000)}ok 2 - second\n# pass 2\n# fail 0\n`;
+    expect(testResult(bash(out, { exitCode: 0 }))).toMatchObject({ ok: true, runner: 'tap', passed: 2 });
+  });
+
+  it('reads TAP failures without a number, a separator or a description', () => {
+    for (const line of ['not ok 1 broken', 'not ok broken', 'not ok', 'not ok 3']) {
+      expect(testResult(bash(`1..1\n${line}\n`, { exitCode: 0 })).ok, line).toBe(false);
+    }
+    expect(testResult(bash('not ok\n', { exitCode: 0 })).failures).toEqual([{ name: '(unnamed test)' }]);
+  });
+
+  it('keeps a TODO or SKIP directive at the end of a line too long to keep whole', () => {
+    for (const directive of ['# TODO later', '# SKIP not here']) {
+      const out = `not ok 1 - ${'n'.repeat(600)} ${directive}\n# pass 0\n# fail 0\n# todo 1\n`;
+      expect(testResult(bash(out, { exitCode: 0 })), directive).toMatchObject({ ok: true, failed: 0 });
+    }
+  });
+});
+
 describe('testResult: counts come from the runner\'s final summary', () => {
   it('ignores TAP summary lines a test printed before the real one', () => {
     const out = 'TAP version 13\n# pass 8\n# fail 0\nok 1 - only test\n1..1\n# tests 1\n# pass 1\n# fail 0\n';

@@ -144,6 +144,24 @@ describe.runIf(posix)('scratch directory, undo and test() through run', () => {
       expect(out.result).toBe('undefined');
     });
 
+    it.runIf(BASH_SANDBOX_AVAILABLE)('when a writable root holds the scratch base, neither bash nor write reaches other runs\' directories', async () => {
+      lab = makeLab();
+      const other = path.join(scratchBaseOf(lab), `${process.ppid}-${'a'.repeat(32)}`);
+      mkdirSync(other, { recursive: true, mode: 0o700 });
+      writeFileSync(path.join(other, 'theirs.txt'), 'theirs');
+      server = await codexServer(lab, { sandboxMode: 'workspace-write', tmpDirs: { slashTmp: path.dirname(lab.base), tmpdir: null } });
+      const out = await server.run(
+        `const viaBash = await bash({ command: 'echo mine > ${other}/theirs.txt; echo x > ${other}/new.txt; echo y > ${scratchBaseOf(lab)}/forged.owner' });
+         let viaWrite; try { await write({ path: ${JSON.stringify(path.join(other, 'theirs.txt'))}, content: 'mine' }); viaWrite = 'written'; } catch (e) { viaWrite = e.code; }
+         return { bash: viaBash.exitCode, viaWrite, scratch: typeof scratchDir };`,
+      );
+      expect(out.result).toMatchObject({ viaWrite: expect.stringMatching(/^(protected-path|outside-workspace)$/), scratch: 'undefined' });
+      expect((out.result as { bash: number }).bash).not.toBe(0);
+      expect(readFileSync(path.join(other, 'theirs.txt'), 'utf8')).toBe('theirs');
+      expect(existsSync(path.join(other, 'new.txt'))).toBe(false);
+      expect(existsSync(path.join(scratchBaseOf(lab), 'forged.owner'))).toBe(false);
+    });
+
     it('under Codex workspace-write with both temp dirs excluded it is not granted', async () => {
       lab = makeLab();
       server = await codexServer(lab, { sandboxMode: 'workspace-write', extraToml: '[sandbox_workspace_write]\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true' });

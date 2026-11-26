@@ -19,7 +19,8 @@ interface Totals {
 
 interface Runner {
   readonly name: string;
-  totals(lines: readonly string[]): Totals | undefined;
+  /** `complete`: the lines are the whole output, so result lines can bound the totals. */
+  totals(lines: readonly string[], complete: boolean): Totals | undefined;
   failures(lines: readonly string[]): TestFailure[];
 }
 
@@ -124,9 +125,9 @@ const PYTEST: Runner = {
 
 /**
  * `node --test` totals from its own final summary (`ℹ pass 1` or `# pass 1`): the last value of each key, since a
- * test can print lines that look like a summary before it. Never more passes than result lines the output shows.
+ * test can print lines that look like a summary before it. On the whole output, never more passes than result lines.
  */
-function nodeTotals(lines: readonly string[], prefix: string, isResult: (trimmed: string) => boolean): Totals | undefined {
+function nodeTotals(lines: readonly string[], complete: boolean, prefix: string, isResult: (trimmed: string) => boolean): Totals | undefined {
   const key: Readonly<Record<string, keyof Totals>> = { pass: 'passed', fail: 'failed', cancelled: 'failed', skipped: 'skipped', todo: 'skipped' };
   const last = new Map<string, number>();
   for (const line of lines) {
@@ -137,14 +138,14 @@ function nodeTotals(lines: readonly string[], prefix: string, isResult: (trimmed
   if (last.size === 0) return undefined;
   const totals: Totals = { passed: 0, failed: 0, skipped: 0 };
   for (const [k, n] of last) totals[key[k] ?? 'skipped'] += n;
-  const results = countLines(lines, isResult);
+  const results = complete ? countLines(lines, isResult) : 0;
   if (results > 0) totals.passed = Math.min(totals.passed, results);
   return totals;
 }
 
 const NODE_SPEC: Runner = {
   name: 'node:test',
-  totals: (lines) => nodeTotals(lines, 'ℹ', (t) => t.startsWith('✔ ')),
+  totals: (lines, complete) => nodeTotals(lines, complete, 'ℹ', (t) => t.startsWith('✔ ')),
   failures: (lines) => {
     const start = lines.findIndex((l) => l.startsWith('✖ failing tests:'));
     if (start === -1) return [];
@@ -155,18 +156,20 @@ const NODE_SPEC: Runner = {
 
 const TAP: Runner = {
   name: 'tap',
-  totals: (lines) => nodeTotals(lines, '#', (t) => /^ok \d+/.test(t)),
+  totals: (lines, complete) => nodeTotals(lines, complete, '#', (t) => /^ok\b/.test(t)),
   failures: (lines) =>
     collect(
       lines,
       (t) => {
-        const m = /^not ok \d+ - /.exec(t);
+        // TAP lets a result go without its number, its ` - ` or its description.
+        const m = /^not ok\b(?: +\d+)?(?: +-)? */.exec(t);
         if (m === null) return undefined;
         const rest = t.slice(m[0].length);
-        const hash = rest.indexOf(' # ');
-        // A `# TODO` result does not fail the run.
-        if (hash !== -1 && /^todo\b/i.test(rest.slice(hash + 3))) return undefined;
-        return hash === -1 ? rest : rest.slice(0, hash);
+        const hash = rest.startsWith('# ') ? 0 : rest.indexOf(' # ');
+        // A `# TODO` or `# SKIP` result does not fail the run.
+        if (hash !== -1 && /^ ?# (?:todo|skip)/i.test(rest.slice(hash))) return undefined;
+        const name = (hash === -1 ? rest : rest.slice(0, hash)).trim();
+        return name === '' ? '(unnamed test)' : name;
       },
       (i) => {
         for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
@@ -182,7 +185,7 @@ const TAP: Runner = {
 
 const CARGO: Runner = {
   name: 'cargo',
-  totals: (lines) => {
+  totals: (lines, complete) => {
     let totals: Totals | undefined;
     for (const line of lines) {
       const body = after(line.trim(), 'test result: ');
@@ -193,7 +196,7 @@ const CARGO: Runner = {
       totals.failed += t.failed;
       totals.skipped += t.skipped;
     }
-    const results = countLines(lines, (t) => t.startsWith('test ') && t.endsWith(' ... ok'));
+    const results = complete ? countLines(lines, (t) => t.startsWith('test ') && t.endsWith(' ... ok')) : 0;
     if (totals !== undefined && results > 0) totals.passed = Math.min(totals.passed, results);
     return totals;
   },
@@ -209,24 +212,35 @@ function tail(lines: readonly string[]): string {
   return out;
 }
 
+/** A long line keeps its start, where the patterns look, and its end, where a TAP directive sits. */
+function cutLine(line: string): string {
+  return line.length <= MAX_LINE_CHARS ? line : `${line.slice(0, MAX_LINE_CHARS - 100)} … ${line.slice(-97)}`;
+}
+
 /**
  * Reads the result of a test command. The exit code and timeout decide
  * whether the run passed; the totals and failures found in the output only
- * add detail, and a failure found there makes it not ok. Bounded: only the
- * last 128 KiB of the output, each line cut at 500 characters, and every
- * pattern runs in time linear in the line.
+ * add detail, and a failure found anywhere in it makes it not ok. Bounded:
+ * failures come from one pass over the whole output, totals from the
+ * runner's final summary in its last 128 KiB, every line is cut to 500
+ * characters, and every pattern runs in time linear in the line.
  */
 export function testResult(result: BashResult): TestResult {
   const combined = result.stderr === '' ? result.stdout : result.stdout === '' ? result.stderr : `${result.stdout}\n${result.stderr}`;
-  const clipped = combined.length > MAX_PARSE_CHARS;
-  const text = (clipped ? combined.slice(-MAX_PARSE_CHARS) : combined).replace(ANSI, '');
-  const lines = text.split(/\r?\n/).map((l) => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) : l));
+  const raw = combined.replace(ANSI, '').split(/\r?\n/);
+  const cut = raw.some((l) => l.length > MAX_LINE_CHARS);
+  const lines = cut ? raw.map(cutLine) : raw;
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  let start = lines.length;
+  for (let size = 0; start > 0 && size + (lines[start - 1]?.length ?? 0) + 1 <= MAX_PARSE_CHARS; start--) size += (lines[start - 1]?.length ?? 0) + 1;
+  const clipped = start > 0;
+  const window = clipped ? lines.slice(start) : lines;
+  const complete = !clipped && !cut && !result.truncated;
 
   let runner: Runner | undefined;
   let totals: Totals = { passed: 0, failed: 0, skipped: 0 };
   for (const r of RUNNERS) {
-    const found = r.totals(lines);
+    const found = r.totals(window, complete);
     if (found === undefined) continue;
     runner = r;
     totals = found;
@@ -247,7 +261,7 @@ export function testResult(result: BashResult): TestResult {
     failed,
     skipped: totals.skipped,
     failures,
-    truncated: result.truncated || clipped || found.length > MAX_TEST_FAILURES,
-    ...(ok && runner !== undefined ? {} : { output: tail(lines) }),
+    truncated: result.truncated || clipped || cut || found.length > MAX_TEST_FAILURES,
+    ...(ok && runner !== undefined ? {} : { output: tail(window) }),
   };
 }

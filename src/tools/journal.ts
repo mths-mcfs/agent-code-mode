@@ -643,9 +643,14 @@ async function undoEntry(
     }
     const file = rooted(root, entry.path);
     const current = await readRegularFile(file);
-    // An undo that was putting this file back and was cut off before its record update leaves the original bytes: settled.
-    const untouched = current === null ? !entry.existed : current.id === entry.originalId || (entry.undoing === true && entry.existed && sha256(current.bytes) === entry.original);
+    const untouched = current === null ? !entry.existed : current.id === entry.originalId;
     if (untouched) return;
+    // An undo that was putting this file back and was cut off before its record update leaves the original bytes: settled,
+    // and counted as restored so its directory is flushed before the record goes.
+    if (entry.undoing === true && entry.existed && current !== null && sha256(current.bytes) === entry.original) {
+      restored.push(entry.path);
+      return;
+    }
     const lastConfirmed = (entry.installs ?? []).findLast((install) => install.confirmed !== undefined)?.confirmed;
     if (current === null || current.id !== lastConfirmed) {
       skipped.push({

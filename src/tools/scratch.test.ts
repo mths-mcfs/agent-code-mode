@@ -75,6 +75,15 @@ describe('scratch directory', () => {
     expect(readdirSync(s.path)).toEqual([]);
   });
 
+  it.skipIf(!posix)('counts a directory it cannot read as over the limit, and empties it anyway', async () => {
+    const s = await createScratch(base, { bytes: 64 * 1024, entries: 1000 });
+    mkdirSync(path.join(s.path, 'hidden'));
+    writeFileSync(path.join(s.path, 'hidden', 'big.bin'), Buffer.alloc(256 * 1024, 1));
+    chmodSync(path.join(s.path, 'hidden'), 0o000);
+    expect(await s.enforceLimit()).toMatch(/cannot be read.*emptied/);
+    expect(readdirSync(s.path)).toEqual([]);
+  });
+
   it.skipIf(!posix)('does not follow a link out of the directory when measuring or emptying', async () => {
     const outside = path.join(tmp, 'outside');
     mkdirSync(outside);
