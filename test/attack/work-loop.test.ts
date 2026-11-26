@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BASH_SANDBOX_AVAILABLE, callAt, claudeServer, codexServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
@@ -160,6 +160,22 @@ describe.runIf(posix)('scratch directory, undo and test() through run', () => {
       expect(readFileSync(path.join(other, 'theirs.txt'), 'utf8')).toBe('theirs');
       expect(existsSync(path.join(other, 'new.txt'))).toBe(false);
       expect(existsSync(path.join(scratchBaseOf(lab), 'forged.owner'))).toBe(false);
+    });
+
+    it.runIf(BASH_SANDBOX_AVAILABLE)('protects a covered scratch base even when this run\'s scratch could not be made', async () => {
+      lab = makeLab();
+      const other = path.join(scratchBaseOf(lab), `${process.ppid}-${'b'.repeat(32)}`);
+      mkdirSync(other, { recursive: true, mode: 0o700 });
+      writeFileSync(path.join(other, 'theirs.txt'), 'theirs');
+      // A base others can read makes creating this run's scratch fail.
+      chmodSync(scratchBaseOf(lab), 0o755);
+      server = await codexServer(lab, { sandboxMode: 'workspace-write', tmpDirs: { slashTmp: path.dirname(lab.base), tmpdir: null } });
+      const out = await server.run(`const r = await bash({ command: 'echo mine > ${other}/theirs.txt; echo x > ${other}/new.txt' }); return { bash: r.exitCode, scratch: typeof scratchDir };`);
+      expect(out.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/no scratch directory: .*not private/)]));
+      expect(out.result).toMatchObject({ scratch: 'undefined' });
+      expect((out.result as { bash: number }).bash).not.toBe(0);
+      expect(readFileSync(path.join(other, 'theirs.txt'), 'utf8')).toBe('theirs');
+      expect(existsSync(path.join(other, 'new.txt'))).toBe(false);
     });
 
     it('under Codex workspace-write with both temp dirs excluded it is not granted', async () => {

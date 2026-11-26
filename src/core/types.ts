@@ -825,6 +825,8 @@ export interface ToolRuntime<P = unknown> {
   beginTransaction(): Transaction;
   /** Creates a private, empty scratch directory for one run. Absent: runs get none. */
   createScratch?(): Promise<ScratchDir>;
+  /** Where `createScratch` puts every run's directory, known even when creating one fails. */
+  scratchBase?(): string;
   /**
    * Fingerprints every entry matching `patterns` (see
    * `PolicySnapshot.watchedPaths`). Rejects when it cannot finish, for

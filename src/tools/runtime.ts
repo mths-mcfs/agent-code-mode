@@ -23,7 +23,7 @@ import { type DirId, type InstallId, type PathIdentity, type RegularFile, atomic
 import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { rooted } from './rooted.js';
-import { createScratch, scratchBase } from './scratch.js';
+import { createScratch, scratchBase as scratchBaseOf } from './scratch.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, type SearchTop, compileGrep, normalizeGlob, runGlob, runGrep, searchTop } from './search.js';
 import { snapshotWatched } from './watch.js';
 
@@ -428,7 +428,11 @@ export class NodeToolRuntime implements ToolRuntime {
   }
 
   createScratch(): Promise<ScratchDir> {
-    return createScratch(scratchBase(this.#opts.stateDir));
+    return createScratch(this.scratchBase());
+  }
+
+  scratchBase(): string {
+    return scratchBaseOf(this.#opts.stateDir);
   }
 
   snapshotWatched(patterns: readonly string[]): Promise<WatchedSnapshot> {

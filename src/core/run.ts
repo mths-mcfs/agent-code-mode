@@ -285,7 +285,9 @@ async function runWithin<P>(req: RunRequest, deps: RunDeps<P>, scratchDir: Scrat
     }
     let ctx = deps.ctx;
     let scratch = scratchDir !== undefined && !('error' in policy) && policy.scratchRoot === scratchDir.path ? scratchDir : undefined;
-    const scratchBase = scratchDir === undefined ? undefined : path.dirname(scratchDir.path);
+    // Known even when this run's directory could not be made: other runs' directories still sit in it.
+    const configured = deps.tools.scratchBase?.();
+    const scratchBase = scratchDir !== undefined ? path.dirname(scratchDir.path) : configured === undefined ? undefined : await realpath(configured).catch(() => path.resolve(configured));
     const cover = scratchBase === undefined || 'error' in policy ? undefined : await coveringRoot(scratchBase, policy, deps.ctx);
     if (scratchBase !== undefined && cover !== undefined) {
       if (scratch !== undefined) {
