@@ -144,7 +144,7 @@ describe.skipIf(ROOTED_OPS_REFUSED)('FileTransaction.undo', () => {
 
   it('keeps an entry in the record when its restore could not be flushed', async () => {
     let failing = false;
-    const io: JournalIo = {
+    const io: { -readonly [K in keyof JournalIo]: JournalIo[K] } = {
       syncDir: async (dir, expected) => {
         if (failing && dir === ws) throw new Error('flush failed');
         await syncDirStrict(dir, expected);
@@ -157,9 +157,29 @@ describe.skipIf(ROOTED_OPS_REFUSED)('FileTransaction.undo', () => {
     expect((await tx.undo()).restored).toEqual([at('a.txt')]);
     const manifest = JSON.parse(readFileSync(path.join(tx.dir, 'manifest.json'), 'utf8')) as { entries: { path: string }[] };
     expect(manifest.entries.map((e) => e.path)).toEqual([at('a.txt')]);
+    const flushed: string[] = [];
+    io.syncDir = async (dir, expected) => {
+      flushed.push(dir);
+      await syncDirStrict(dir, expected);
+    };
     failing = false;
     await tx.rollback();
     expect(read('a.txt')).toBe('a0\n');
+    expect(flushed).toContain(ws);
+  });
+
+  it('deletes the saved originals of undone files, so a write-and-undo loop does not pile them up', async () => {
+    const tx = begin();
+    for (let i = 0; i < 5; i++) {
+      await write('a.txt', `a${i + 1}\n`, tx);
+      await tx.undo();
+    }
+    expect(readdirSync(tx.dir).filter((n) => n.endsWith('.bin'))).toEqual([]);
+    await write('b.txt', 'b1\n', tx);
+    expect(readdirSync(tx.dir).filter((n) => n.endsWith('.bin'))).toHaveLength(1);
+    await tx.rollback();
+    expect(read('a.txt')).toBe('a0\n');
+    expect(read('b.txt')).toBe('b0\n');
   });
 
   it('is refused once the transaction finished', async () => {

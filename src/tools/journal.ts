@@ -158,6 +158,8 @@ export class FileTransaction implements Transaction {
   #bytes = 0;
   /** Blob names are never reused: undo removes entries, so the entry count can repeat a live blob's name. */
   #nextBlob = 0;
+  /** Directories an undo changed whose flush failed: the rollback flushes them before it drops the record. */
+  readonly #unflushed = new Set<string>();
   #created = false;
   /** Whether the journal root was flushed after this journal's directory was created in it. */
   #dirFlushed = false;
@@ -335,7 +337,7 @@ export class FileTransaction implements Transaction {
       }
       const ownDirs = [...this.#ownDirs.keys()];
       await removeCreatedDirs(this.#ownDirs, this.#roots);
-      const restoresOnDisk = await flushes(touchedDirs(restored, ownDirs), this.#io.syncDir);
+      const restoresOnDisk = await flushes([...new Set([...touchedDirs(restored, ownDirs), ...this.#unflushed])], this.#io.syncDir);
       const needsRecovery = !restoresOnDisk || skipped.some((s) => s.reason === 'error');
       if (needsRecovery) await this.#flushRecord();
       else await this.#removeRecord();
@@ -376,13 +378,19 @@ export class FileTransaction implements Transaction {
       }
       // An entry leaves the record only once its restore is on disk; otherwise a crash could keep the run's
       // write with the original gone from the journal.
-      if (await flushes(touchedDirs(restored, removedDirs), this.#io.syncDir)) {
-        for (const live of done) {
-          this.#entries.delete(live.entry.path);
-          this.#bytes -= live.bytes?.length ?? 0;
-        }
+      const touched = touchedDirs(restored, removedDirs);
+      if (!(await flushes(touched, this.#io.syncDir))) {
+        for (const dir of touched) this.#unflushed.add(dir);
+        if (this.#created) await this.#persist();
+        return { restored, skipped };
+      }
+      for (const live of done) {
+        this.#entries.delete(live.entry.path);
+        this.#bytes -= live.bytes?.length ?? 0;
       }
       if (this.#created) await this.#persist();
+      // Only once the record no longer names them: a write-and-undo loop must not pile up originals on disk.
+      for (const live of done) if (live.entry.blob !== null) await fs.rm(path.join(this.dir, live.entry.blob), { force: true });
       return { restored, skipped };
     });
   }
