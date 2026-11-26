@@ -5,15 +5,6 @@ import path from 'node:path';
 import { interactiveProgress, type InteractiveProgress } from './claude-interactive.ts';
 import { trackTmuxServer, untrackTmuxServer } from './proc.ts';
 
-/**
- * Drives one interactive Claude Code session in its own tmux server (`tmux -L <name>`, no user config): the
- * host starts under `env -i` with an allowlisted environment, the prompt goes in as a bracketed paste, each
- * permission prompt is denied for that call only (No, Tab and a note keep the turn going; Esc or a plain No
- * stop it, Claude Code 2.1.326), and the end of the turn is read from the transcript. Every exit path kills
- * the server: here, on SIGINT and SIGTERM through proc.ts, and after a SIGKILL through `sweepStaleTmuxServers`.
- */
-
-/** In the config hash: a change to how sessions are driven is a new config. */
 export const INTERACTIVE_DRIVER = 'tmux-v1: env -i allowlist, seeded .claude.json, bracketed paste, deny = No+Tab+note, end = transcript turn_duration + idle screen';
 export const DENY_NOTE = 'Permission for this tool call was not granted. Continue the task without it.';
 const SERVER_PREFIX = 'acmb-';
@@ -23,10 +14,8 @@ const HEIGHT = 50;
 interface ScreenState {
   readonly codeModeOn: string | null;
   readonly codeModeUnavailable: string | null;
-  /** A first-run or other blocking dialog the seeded config should have answered. */
   readonly dialog: string | null;
   readonly permission: { readonly options: readonly { readonly n: number; readonly text: string }[]; readonly selected: number | null } | null;
-  /** The prompt input is shown and nothing blocks it. */
   readonly ready: boolean;
 }
 
@@ -86,7 +75,6 @@ function alive(pid: number): boolean {
   }
 }
 
-/** Kills the servers of a harness that died without cleanup (its pid is in the server name). */
 export function sweepStaleTmuxServers(): string[] {
   let names: string[];
   try {
@@ -125,19 +113,14 @@ export function serverAlive(name: string): boolean {
 
 interface InteractiveSpec {
   readonly cwd: string;
-  /** Run as `env -i <env> <command...>`. */
   readonly command: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly prompt: string;
-  /** The transcript the host writes (`--session-id`), read for progress and the end of the turn. */
   readonly transcriptFile: () => string | null;
   readonly timeoutMs: number;
-  /** Stop once the model has made this many tool calls plus one (the `-p` `--max-turns` count). */
   readonly maxTurns: number;
-  /** Where the prompt file is written for the paste. */
   readonly scratchDir: string;
   readonly readyTimeoutMs?: number;
-  /** Poll period: 1 s against a real host, shorter in tests. */
   readonly pollMs?: number;
 }
 
@@ -145,16 +128,13 @@ type InteractiveStop = 'finished' | 'timeout' | 'max-turns' | 'not-ready' | 'hos
 
 interface InteractiveOutcome {
   readonly stop: InteractiveStop;
-  /** Why the run is unusable, when it is. */
   readonly problem: string | null;
-  /** The host's exit status after `/exit`; null when it had to be killed. */
   readonly exitCode: number | null;
   readonly timedOut: boolean;
   readonly wallMs: number;
   readonly readyMs: number | null;
   readonly codeModeLine: string | null;
   readonly permissionPrompts: number;
-  /** Screens at the points that matter (ready, each permission prompt, the end), for the record. */
   readonly screens: string;
   readonly server: string;
 }
@@ -199,6 +179,7 @@ function readProgress(spec: InteractiveSpec): InteractiveProgress {
   return { promptSeen: false, outerToolUses: 0, finished: false };
 }
 
+/** No, Tab and a note deny this call and keep the turn going; Esc or a plain No end the turn (Claude Code 2.1.326). */
 async function denyCall(server: string, permission: NonNullable<ScreenState['permission']>): Promise<void> {
   const no = permission.options.findIndex((o) => /^No\b/.test(o.text));
   if (no < 0) throw new Error('permission prompt without a No option');
@@ -214,7 +195,6 @@ async function denyCall(server: string, permission: NonNullable<ScreenState['per
   tmux(server, ['send-keys', '-t', 'main', 'Enter']);
 }
 
-/** Runs one session to the end of its first turn. Always kills its tmux server before returning. */
 export async function driveInteractive(spec: InteractiveSpec): Promise<InteractiveOutcome> {
   const server = `${SERVER_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`;
   const poll = spec.pollMs ?? 1000;
@@ -338,7 +318,6 @@ export async function driveInteractive(spec: InteractiveSpec): Promise<Interacti
   }
 }
 
-/** The transcript of `sessionId` under a Claude config dir (`projects/<cwd slug>/<id>.jsonl`). */
 export function findSessionTranscript(configDir: string, sessionId: string): string | null {
   let dirs: string[];
   try {

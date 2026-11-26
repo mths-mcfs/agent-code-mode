@@ -1,6 +1,3 @@
-// Stands in for an interactive Claude Code session in the tmux driver test: it draws the ready screen, takes
-// the pasted prompt and records it, then writes a recorded Code Mode transcript where the driver reads it.
-// Modes: `finish` answers at once, `deny` first shows a permission prompt, `hang` never answers.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 

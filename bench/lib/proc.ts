@@ -35,7 +35,6 @@ export function killGroup(pid: number): void {
   }
 }
 
-/** Private tmux servers of arm D runs (`tmux -L <name>`) still running. */
 const liveTmux = new Set<string>();
 
 export function trackTmuxServer(name: string): void {

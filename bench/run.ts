@@ -519,7 +519,6 @@ interface HostOutput {
   readonly wallMs: number;
   readonly configs: Record<string, string>;
   readonly availableTools?: string[] | null;
-  /** Arm D: what the driver observed. */
   readonly interactive?: InteractiveObserved;
 }
 
@@ -527,7 +526,6 @@ interface InteractiveObserved {
   readonly problem: string | null;
   readonly stop: string;
   readonly codeModeLine: string | null;
-  /** Plugin keys of the session's .claude.json (`pluginUsage`): the isolation proof `-p` reads from its init event. */
   readonly plugins: readonly string[] | null;
   readonly serverGone: boolean;
 }
@@ -541,10 +539,6 @@ async function cannedTranscript(host: HostId, arm: ArmId): Promise<{ stdout: str
 
 const ClaudeJsonPlugins = z.object({ pluginUsage: z.record(z.string(), z.unknown()).optional() }).passthrough();
 
-/**
- * Arm D: a temporary CLAUDE_CONFIG_DIR with a copy of the credentials file and a seeded .claude.json, the tmux
- * driver, and the session transcript trimmed and copied out before the config dir is synced back and removed.
- */
 async function runClaudeCodeMode(ctx: Context, p: PlannedRun, runWork: string, ws: string): Promise<HostOutput> {
   const task = TASKS[p.task];
   const fixture = generateFixture(ctx.opts.fixtureSeed);
@@ -600,11 +594,6 @@ async function runClaudeCodeMode(ctx: Context, p: PlannedRun, runWork: string, w
   }
 }
 
-/**
- * Arm D's validity from what was observed, not from its configuration: Code Mode on screen and in the
- * transcript, the requests' effort and permission mode, the inner calls staying on arm A's tools, and the
- * tmux server gone. The dry run checks only what its canned transcript shows.
- */
 export function codeModeReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null): string[] {
   const reasons: string[] = [];
   if (!opts.dryRun) {

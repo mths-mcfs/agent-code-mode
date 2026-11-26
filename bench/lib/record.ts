@@ -1,6 +1,5 @@
 import { z } from 'zod';
 
-/** Claude D is Claude Code's own Code Mode (the `REPL` tool), which exists only in an interactive session. */
 export const HOST_ARMS = { claude: ['A', 'B', 'C', 'D'], codex: ['A', 'B', 'C'] } as const;
 export type ArmId = 'A' | 'B' | 'C' | 'D';
 /**
@@ -49,7 +48,6 @@ export const UsageSchema = z.object({
   cacheRead: z.number().nonnegative(),
   /** Reasoning tokens when the host reports them separately (already included in `output` on Codex). */
   reasoning: z.number().nonnegative().nullable(),
-  /** Cache writes split by TTL when the host reports the split; they sum to `cacheCreation`. */
   cacheCreation5m: z.number().nonnegative().optional(),
   cacheCreation1h: z.number().nonnegative().optional(),
 });
@@ -163,7 +161,6 @@ export const CLAUDE_ARM_SURFACE: Readonly<Record<ArmId, readonly string[]>> = {
   A: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
   B: ['mcp__agent-code-mode__run'],
   C: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__agent-code-mode__run'],
-  // `REPL.<name>`: a tool a REPL script can call.
   D: ['REPL', 'REPL.Bash', 'REPL.Read', 'REPL.Write', 'REPL.Edit', 'REPL.Glob', 'REPL.Grep'],
 };
 /**

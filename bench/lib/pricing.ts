@@ -21,10 +21,6 @@ export function loadPricing(file: string = PRICING_FILE): Pricing {
   return PricingSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
 }
 
-/**
- * Cache writes are priced by TTL when the usage splits them. Null when the model has no price, or has 1-hour
- * writes but no 1-hour price: pricing those at the 5-minute rate would understate the cost.
- */
 export function costFromUsage(pricing: Pricing, model: string, usage: Usage): number | null {
   const p = pricing.models[model];
   if (p === undefined) return null;

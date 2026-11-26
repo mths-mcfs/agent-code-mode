@@ -88,7 +88,6 @@ export function seededClaudeJson(workspace: string, version: string): Record<str
   };
 }
 
-/** The semver in `claude --version` output (`2.1.326 (Claude Code)`). */
 export function claudeSemver(versionOutput: string | null | undefined): string {
   const m = /\d+\.\d+\.\d+/.exec(versionOutput ?? '');
   return m ? m[0] : (versionOutput ?? '');
@@ -144,7 +143,6 @@ function textOf(content: unknown): string {
   }).join('');
 }
 
-/** The tools a REPL script can call: the members of the description's `interface Tools` block and the names after "Also callable as tools.<name>(input)...:". */
 export function replScriptTools(description: string): string[] {
   const names = new Set<string>();
   const start = description.indexOf('interface Tools {');
@@ -156,16 +154,10 @@ export function replScriptTools(description: string): string[] {
   return [...names];
 }
 
-/** Entries and attachments that carry the system prompt or account details. */
-const DROP_TYPES = new Set(['api-request-blob', 'session-owner', 'file-history-snapshot']);
-const DROP_ATTACHMENTS = new Set(['session_context', 'credential_org', 'prompt_snapshot', 'remote_session_change', 'environment']);
-const DROP_KEYS = ['serverClassifierContext'];
+const SENSITIVE_TYPES = new Set(['api-request-blob', 'session-owner', 'file-history-snapshot']);
+const SENSITIVE_ATTACHMENTS = new Set(['session_context', 'credential_org', 'prompt_snapshot', 'remote_session_change', 'environment']);
+const SENSITIVE_KEYS = ['serverClassifierContext'];
 
-/**
- * The transcript as kept with the run: without request blobs, account entries and attachments, and with each
- * `api-request-shape` cut to its tool names (plus the REPL description). Everything the parser reads stays,
- * so the parser runs on this form and its evidence line numbers point into the kept file.
- */
 export function trimInteractiveTranscript(text: string): string {
   const out: string[] = [];
   for (const line of text.split('\n')) {
@@ -173,29 +165,25 @@ export function trimInteractiveTranscript(text: string): string {
     const value = parseJson(line);
     if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
     const entry: Record<string, unknown> = { ...value };
-    if (typeof entry['type'] === 'string' && DROP_TYPES.has(entry['type'])) continue;
+    if (typeof entry['type'] === 'string' && SENSITIVE_TYPES.has(entry['type'])) continue;
     const att = Attachment.safeParse(entry);
-    if (att.success && DROP_ATTACHMENTS.has(att.data.attachment.type)) continue;
+    if (att.success && SENSITIVE_ATTACHMENTS.has(att.data.attachment.type)) continue;
     const shape = ShapeEntry.safeParse(entry);
     if (shape.success) {
       const tools = shape.data.shape.tools.map((t) => (t.name === REPL_TOOL ? { name: t.name, description: t.description } : { name: t.name }));
       out.push(JSON.stringify({ type: 'api-request-shape', shape: { tools } }));
       continue;
     }
-    for (const k of DROP_KEYS) delete entry[k];
+    for (const k of SENSITIVE_KEYS) delete entry[k];
     out.push(JSON.stringify(entry));
   }
   return out.length === 0 ? '' : `${out.join('\n')}\n`;
 }
 
-/** What the transcript shows beyond the metrics, checked by the runner for validity. */
 export interface InteractiveFacts {
-  /** Distinct `output_config.effort` of the model requests. */
   readonly efforts: readonly string[];
   readonly permissionModes: readonly string[];
-  /** The session recorded Code Mode on (`repl-mode`). */
   readonly replMode: boolean;
-  /** Tool calls REPL scripts made, by tool. */
   readonly innerByTool: Readonly<Record<string, number>>;
   /** The last `cost-state` entry: every request of the session, side calls the transcript lacks included. */
   readonly sessionCost: { readonly totalUsd: number; readonly byModel: Readonly<Record<string, SessionModelCost>> } | null;
@@ -411,18 +399,11 @@ function finishedOf(s: Scan): boolean {
   return s.lastRealStop === 'end_turn' && !pending && s.lastTurnEndLine > s.lastRealLine;
 }
 
-/** What the driver polls while the session runs. Never throws. */
 export function interactiveProgress(text: string): InteractiveProgress {
   const s = scan(text);
   return { promptSeen: s.promptSeen, outerToolUses: s.outerToolUses.size, finished: finishedOf(s) };
 }
 
-/**
- * Requests are the distinct model responses (synthetic entries excluded), usage is their sum, and `turns`
- * counts like `-p` `num_turns` (the model's tool calls plus one). `hostCostUsd` stays null: the session's
- * `cost-state` also covers requests outside the transcript, so it goes to `facts.sessionCost`, and the cost
- * comparable with `-p` is computed from this usage. Throws when there is no model response.
- */
 export function parseClaudeInteractiveTranscript(text: string): { parsed: ParsedRun; facts: InteractiveFacts } {
   const s = scan(text);
   if (s.requests.size === 0) throw new Error('no model response in the interactive Claude transcript');

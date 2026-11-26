@@ -230,10 +230,6 @@ export function summarizeArms(records: readonly RunRecord[]): ArmSummary[] {
   return out.sort((a, b) => HOST_ORDER.indexOf(a.host) - HOST_ORDER.indexOf(b.host) || a.cohort.localeCompare(b.cohort) || a.arm.localeCompare(b.arm));
 }
 
-/**
- * The pairs compared: every arm against the native arm A, Claude's own Code Mode (D) against agent-code-mode
- * (B), and each baseline build against its current arm.
- */
 function comparedPairs(arms: readonly string[]): [string, string][] {
   const pairs: [string, string][] = [];
   if (arms.includes('A')) for (const a of arms) if (a !== 'A') pairs.push([a, 'A']);

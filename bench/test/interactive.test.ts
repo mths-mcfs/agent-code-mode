@@ -18,13 +18,11 @@ describe('interactive Claude transcript parser', () => {
   it('reads a recorded Code Mode run (claude-D.jsonl, Claude Code 2.1.326, T2)', () => {
     const { parsed: p, facts } = parseClaudeInteractiveTranscript(read('claude-D.jsonl'));
     expect(p.requests).toBe(4);
-    // Like -p num_turns: the model's tool calls (3 REPL) plus one.
     expect(p.turns).toBe(4);
     expect(p.usage).toEqual({ input: 8, output: 577, cacheCreation: 4104, cacheRead: 44726, reasoning: 0, cacheCreation5m: 0, cacheCreation1h: 4104 });
     expect(p.hostCostUsd).toBeNull();
     expect(p.model).toBe('claude-opus-5-5');
     expect(p.toolCalls).toEqual({ native: 0, run: 0, codeMode: 3, other: 0, byName: { REPL: 3 } });
-    // The calls the scripts made are inner calls, never model tool calls.
     expect(p.innerCalls).toEqual({ total: 5, byTool: { Bash: 2, Read: 2, Edit: 1 } });
     expect(p.finalAnswer).toMatch(/truncate/);
     expect(p.hostError).toBeNull();
@@ -114,7 +112,6 @@ describe('interactive Claude transcript parser', () => {
     const b = parseClaudeInteractiveTranscript(trimmed).parsed;
     expect({ ...b, evidence: {}, availableTools: null }).toEqual({ ...a, evidence: {}, availableTools: null });
     expect([...(b.availableTools ?? [])].sort()).toEqual([...(a.availableTools ?? []), 'Poll'].sort());
-    // The fixture is already in the kept form.
     expect(trimInteractiveTranscript(text)).toBe(text);
   });
 
@@ -201,7 +198,6 @@ describe('arm D validity', () => {
   });
 });
 
-// The driver against a stand-in host in a real tmux: no model call, but the same keys, screens and transcript reads.
 describe.skipIf(tmuxVersion() === null)('tmux driver', () => {
   const host = path.join(import.meta.dirname, 'fake-interactive-host.mjs');
   let dir: string;
