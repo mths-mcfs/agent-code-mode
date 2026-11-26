@@ -435,27 +435,38 @@ function strictEnvValue(raw: Buffer, key: string): string | undefined {
 /**
  * Codex starts MCP servers with a minimal environment that drops
  * `CODEX_HOME`. On Linux the parent's value is read from `/proc`, on macOS
- * from the kernel; elsewhere only the server's own environment is used.
+ * from the kernel; elsewhere only the server's own environment is used. On
+ * macOS a failed read throws: the parent argv is read separately, so it could
+ * still succeed and load the default Codex home instead of the session's.
  */
 function parentAwareEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
-  if (env['CODEX_HOME'] === undefined && (process.platform === 'linux' || process.platform === 'darwin')) {
-    let raw: Buffer;
+  if (env['CODEX_HOME'] !== undefined) return env;
+  let raw: Buffer;
+  if (process.platform === 'darwin') {
     try {
-      raw = process.platform === 'darwin' ? readMacProcessSync(process.ppid).environ : readFileSync(`/proc/${process.ppid}/environ`);
+      raw = readMacProcessSync(process.ppid).environ;
+    } catch (err) {
+      throw new ConfigError(`${err instanceof Error ? err.message : String(err)}, so the CODEX_HOME of the Codex session cannot be checked`);
+    }
+  } else if (process.platform === 'linux') {
+    try {
+      raw = readFileSync(`/proc/${process.ppid}/environ`);
     } catch {
       return env;
     }
-    const value = strictEnvValue(raw, 'CODEX_HOME');
-    if (value !== undefined) env['CODEX_HOME'] = value;
+  } else {
+    return env;
   }
+  const value = strictEnvValue(raw, 'CODEX_HOME');
+  if (value !== undefined) env['CODEX_HOME'] = value;
   return env;
 }
 
-export function codexToolTimeoutSec(cwd: string, serverName: string, io: ConfigIo = nodeConfigIo(parentAwareEnv())): number | undefined {
+export function codexToolTimeoutSec(cwd: string, serverName: string, io?: ConfigIo): number | undefined {
   let merged;
   try {
-    merged = loadCodexConfig(cwd, io).merged;
+    merged = loadCodexConfig(cwd, io ?? nodeConfigIo(parentAwareEnv())).merged;
   } catch {
     return undefined;
   }

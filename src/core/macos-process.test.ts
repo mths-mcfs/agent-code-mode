@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, realpath } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -107,6 +107,22 @@ describe('macOS process reader', () => {
       }
     } finally {
       child.kill();
+    }
+  });
+
+  it.runIf(process.platform === 'darwin')('keeps an empty argv[0] of a real process at every exec path padding', async () => {
+    const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'acm-mac-pad-')));
+    const args = ['-e', 'setInterval(() => {}, 1000)', '', 'z'];
+    for (let k = 0; k < 8; k++) {
+      const exe = path.join(dir, `n${'x'.repeat(k)}`);
+      await symlink(process.execPath, exe);
+      const child = spawn(exe, args, { argv0: '', stdio: 'ignore' });
+      try {
+        await new Promise((resolve) => child.once('spawn', resolve));
+        expect(readMacProcessSync(child.pid ?? 0).argv, exe).toEqual(['', ...args]);
+      } finally {
+        child.kill();
+      }
     }
   });
 
