@@ -51,7 +51,7 @@ function write(p: string): PreparedCall {
 }
 const check = (s: Setup, p: PreparedCall): string => s.adapter.checkStatic(p, s.ctx, s.policy).kind;
 
-const SANDBOX = { sandbox: { enabled: true } };
+const SANDBOX = { sandbox: { enabled: true, autoAllowBashIfSandboxed: true } };
 
 describe('auto mode has no classifier verdict for the script', () => {
   it('only step 2 applies, even with an allow rule for the run tool', async () => {

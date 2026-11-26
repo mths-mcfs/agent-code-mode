@@ -34,7 +34,7 @@ const [project, log] = process.argv.slice(2);
 const settingsFile = `${project}/.claude/settings.json`;
 const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
 settings.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: `sh "${project}/.claude/deny-rm.sh"` }] });
-settings.sandbox = { enabled: true };
+settings.sandbox = { enabled: true, autoAllowBashIfSandboxed: true };
 fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 const mcpFile = `${project}/.mcp.json`;
 const mcp = JSON.parse(fs.readFileSync(mcpFile, 'utf8'));
