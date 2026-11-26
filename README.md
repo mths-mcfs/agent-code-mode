@@ -132,7 +132,7 @@ test/e2e/codex.sh <dir>    # real codex exec run with the same hook (needs a log
 
 ## Benchmark
 
-`bench/` runs the same tasks with native tools, the host's own code mode and agent-code-mode, on both hosts. A real run uses your logged-in `claude` and `codex` and costs real tokens. It needs Node.js 22.18 or later. The agent-code-mode arms need `npm run build` and Linux: elsewhere the server cannot read the host's exact command line, so it denies every call.
+`bench/` runs the same tasks with native tools, the host's own code mode and agent-code-mode, on both hosts. A real run uses your logged-in `claude` and `codex` and costs real tokens. It needs Node.js 22.18 or later. The agent-code-mode arms need `npm run build`, and they do not run on Windows, where `run` refuses file operations.
 
 ```sh
 npm run bench -- --dry-run                                   # reference solutions and recorded transcripts, no model calls

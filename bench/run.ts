@@ -555,9 +555,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   const serverEntry = path.join(REPO_ROOT, 'dist', 'cli.js');
   const needsServer = plan.some((p) => (p.host === 'claude' && p.arm === 'B') || (p.host === 'codex' && p.arm === 'C'));
-  if (!opts.dryRun && needsServer && process.platform !== 'linux') {
-    // Off Linux the adapters cannot read the host's exact command line (--settings, codex exec flags) and deny every call.
-    process.stderr.write('agent-code-mode arms run on Linux only: pick native arms with --arms, or run on Linux\n');
+  if (!opts.dryRun && needsServer && process.platform === 'win32') {
+    process.stderr.write('agent-code-mode arms do not run on Windows, where run refuses file operations (#28): pick native arms with --arms\n');
     return 2;
   }
   if (!opts.dryRun && needsServer && !(await exists(serverEntry))) {

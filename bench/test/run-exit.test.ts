@@ -66,13 +66,13 @@ describe('exit code', () => {
     expect(r.errors).toMatch(/claude-T1-A-r1: dry run invalid: tool surface not observed/);
   }, 120_000);
 
-  it('is 2 before any host call when a real agent-code-mode arm is planned off Linux', async () => {
+  it('is 2 before any host call when a real agent-code-mode arm is planned on Windows', async () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
       const r = await quiet(() => main(args.filter((a) => a !== '--dry-run').map((a) => (a === 'A' ? 'B' : a))));
       expect(r.value).toBe(2);
-      expect(r.errors).toMatch(/agent-code-mode arms run on Linux only/);
+      expect(r.errors).toMatch(/agent-code-mode arms do not run on Windows/);
     } finally {
       if (platform) Object.defineProperty(process, 'platform', platform);
     }
