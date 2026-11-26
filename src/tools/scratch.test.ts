@@ -75,11 +75,24 @@ describe('scratch directory', () => {
     expect(readdirSync(s.path)).toEqual([]);
   });
 
-  it.skipIf(!posix)('counts a directory it cannot read as over the limit, and empties it anyway', async () => {
+  it.skipIf(!posix)('counts a directory it cannot read as over the limit, and empties it anyway', async (ctx) => {
     const s = await createScratch(base, { bytes: 64 * 1024, entries: 1000 });
     mkdirSync(path.join(s.path, 'hidden'));
     writeFileSync(path.join(s.path, 'hidden', 'big.bin'), Buffer.alloc(256 * 1024, 1));
     chmodSync(path.join(s.path, 'hidden'), 0o000);
+    // A process that can still read a mode-000 directory (root, some containers) cannot set up the case.
+    const stillReadable = ((): boolean => {
+      try {
+        readdirSync(path.join(s.path, 'hidden'));
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    if (stillReadable) {
+      console.warn('skipped: this process can read a mode-000 directory, so the directory cannot be made unreadable');
+      ctx.skip();
+    }
     expect(await s.enforceLimit()).toMatch(/cannot be read.*emptied/);
     expect(readdirSync(s.path)).toEqual([]);
   });
