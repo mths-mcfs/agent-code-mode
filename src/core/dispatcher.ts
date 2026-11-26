@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
 import { claimFile } from './file-claims.js';
@@ -789,8 +790,11 @@ export class Dispatcher<P = unknown> {
   /** The real absolute paths a path the script gave can name: against the cwd as given and as real, and through its symlinks. */
   #candidates(p: string): Set<string> {
     const out = new Set<string>();
+    // `~` expands as write and edit expand it.
+    const tilde = p === '~' ? '' : p.startsWith('~/') || (process.platform === 'win32' && p.startsWith('~\\')) ? p.slice(2) : undefined;
+    const given = tilde === undefined ? p : path.join(os.homedir(), tilde);
     for (const base of [this.#realCwd, this.#opts.ctx.cwd]) {
-      const abs = path.resolve(base, p);
+      const abs = path.resolve(base, given);
       out.add(abs);
       out.add(realPathOrResolved(abs));
     }

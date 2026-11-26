@@ -85,7 +85,8 @@ const JEST: Runner = {
     const m = lastMatch(lines, /^Tests:\s+(.+)$/);
     return m?.[1] === undefined ? undefined : count(m[1], { passed: 'passed', failed: 'failed', skipped: 'skipped', todo: 'skipped' });
   },
-  failures: (lines) => collect(lines, /^\s*● (.+\S)\s*$/, (i) => messageAfter(lines, i)),
+  // `● Console` heads the logs a passing test printed, not a failure.
+  failures: (lines) => collect(lines, /^\s*● (?!Console\s*$)(.+\S)\s*$/, (i) => messageAfter(lines, i)),
 };
 
 const PYTEST: Runner = {
@@ -132,7 +133,8 @@ const TAP: Runner = {
   name: 'tap',
   totals: (lines) => nodeTotals(lines, '#'),
   failures: (lines) =>
-    collect(lines, /^\s*not ok \d+ - (.+?)(?: # .*)?$/, (i) => {
+    // A `# TODO` result does not fail the run.
+    collect(lines, /^\s*not ok \d+ - (?!.*# TODO\b)(.+?)(?: # .*)?$/i, (i) => {
       for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
         const m = /^\s*error: (.+)$/.exec(lines[j] ?? '');
         if (m?.[1] !== undefined && m[1] !== '|-') return clip(m[1].replace(/^'(.*)'$/, '$1'), MAX_MESSAGE_CHARS);
@@ -191,7 +193,8 @@ export function testResult(result: BashResult): TestResult {
     totals = found;
     break;
   }
-  const found = runner?.failures(lines) ?? [];
+  // With no runner's totals, any runner's failure lines still count: a wrapper can print them and exit 0.
+  const found = runner?.failures(lines) ?? RUNNERS.flatMap((r) => r.failures(lines));
   const failures = found.slice(0, MAX_TEST_FAILURES);
   // A runner's own count wins; the failures it lists also name suites, which it does not count.
   const failed = totals.failed > 0 ? totals.failed : found.length;

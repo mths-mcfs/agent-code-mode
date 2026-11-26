@@ -6,7 +6,8 @@ import { ToolError } from '../core/errors.js';
 import type { PolicySnapshot, SessionContext, ToolCall, Transaction } from '../core/types.js';
 import { makeContext } from '../testing/context.js';
 import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
-import { FileTransaction, journalRoot } from './journal.js';
+import { FileTransaction, type JournalIo, journalRoot } from './journal.js';
+import { sha256, syncDirStrict } from './fs-ops.js';
 import { NodeToolRuntime } from './runtime.js';
 
 let base: string;
@@ -121,6 +122,42 @@ describe.skipIf(ROOTED_OPS_REFUSED)('FileTransaction.undo', () => {
     await write('a.txt', 'a1\n', tx);
     await tx.undo();
     await write('a.txt', 'a2\n', tx);
+    await tx.rollback();
+    expect(read('a.txt')).toBe('a0\n');
+  });
+
+  it('never gives a new original the blob name of one still held, after an undo', async () => {
+    writeFileSync(at('c.txt'), 'c0\n');
+    const tx = begin();
+    await write('a.txt', 'a1\n', tx);
+    await write('b.txt', 'b1\n', tx);
+    await tx.undo((p) => p === at('a.txt'));
+    await write('c.txt', 'c1\n', tx);
+    // Crash recovery restores from the blobs on disk, not from memory: each must still hold its own original.
+    const manifest = JSON.parse(readFileSync(path.join(tx.dir, 'manifest.json'), 'utf8')) as { entries: { path: string; original: string; blob: string | null }[] };
+    const blobs = manifest.entries.map((e) => e.blob);
+    expect(new Set(blobs).size).toBe(blobs.length);
+    for (const e of manifest.entries) expect(sha256(readFileSync(path.join(tx.dir, e.blob ?? '')))).toBe(e.original);
+    await tx.rollback();
+    expect(read('b.txt')).toBe('b0\n');
+  });
+
+  it('keeps an entry in the record when its restore could not be flushed', async () => {
+    let failing = false;
+    const io: JournalIo = {
+      syncDir: async (dir, expected) => {
+        if (failing && dir === ws) throw new Error('flush failed');
+        await syncDirStrict(dir, expected);
+      },
+      removeDir: (dir) => import('node:fs/promises').then((fs) => fs.rm(dir, { recursive: true, force: true })),
+    };
+    const tx = new FileTransaction(stateDir, io);
+    await write('a.txt', 'a1\n', tx);
+    failing = true;
+    expect((await tx.undo()).restored).toEqual([at('a.txt')]);
+    const manifest = JSON.parse(readFileSync(path.join(tx.dir, 'manifest.json'), 'utf8')) as { entries: { path: string }[] };
+    expect(manifest.entries.map((e) => e.path)).toEqual([at('a.txt')]);
+    failing = false;
     await tx.rollback();
     expect(read('a.txt')).toBe('a0\n');
   });

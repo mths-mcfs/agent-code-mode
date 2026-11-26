@@ -78,6 +78,22 @@ describe('testResult: never a pass that did not happen', () => {
   });
 });
 
+describe('testResult: what is not a failure, and what still is', () => {
+  it('does not count the console block jest prints for a passing test', () => {
+    const out = 'PASS ./a.test.js\n  ● Console\n\n    console.log\n      hello\n\nTests:       2 passed, 2 total\n';
+    expect(testResult(bash(out, { exitCode: 0 }))).toMatchObject({ ok: true, runner: 'jest', failed: 0, failures: [] });
+  });
+
+  it('does not count a TAP TODO result as a failure', () => {
+    const out = 'TAP version 13\nok 1 - works\nnot ok 2 - later # TODO not yet\n# pass 1\n# fail 0\n# todo 1\n';
+    expect(testResult(bash(out, { exitCode: 0 }))).toMatchObject({ ok: true, runner: 'tap', failed: 0, skipped: 1, failures: [] });
+  });
+
+  it('counts failure lines with no totals, even when the command exits 0', () => {
+    expect(testResult(bash('TAP version 13\nok 1 - fine\nnot ok 2 - broken\n', { exitCode: 0 }))).toMatchObject({ ok: false, runner: null, failed: 1, failures: [{ name: 'broken' }] });
+  });
+});
+
 describe('testResult: bounded', () => {
   it('lists at most MAX_TEST_FAILURES failures and says it cut them', () => {
     const out = `${Array.from({ length: 80 }, (_, i) => `FAILED t.py::test_${i} - boom`).join('\n')}\n==== 80 failed in 1.00s ====\n`;

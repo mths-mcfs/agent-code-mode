@@ -156,6 +156,8 @@ export class FileTransaction implements Transaction {
   readonly #changedDirs = new Map<string, DirId>();
   readonly #flushable = new Set<string>();
   #bytes = 0;
+  /** Blob names are never reused: undo removes entries, so the entry count can repeat a live blob's name. */
+  #nextBlob = 0;
   #created = false;
   /** Whether the journal root was flushed after this journal's directory was created in it. */
   #dirFlushed = false;
@@ -255,7 +257,7 @@ export class FileTransaction implements Transaction {
       let blob: string | null = null;
       if (before) {
         if (!this.#created) await this.#persist();
-        blob = `${this.#entries.size}.bin`;
+        blob = `${this.#nextBlob++}.bin`;
         await writeDurable(path.join(this.dir, blob), before.bytes);
       }
       this.#bytes += size;
@@ -352,6 +354,7 @@ export class FileTransaction implements Transaction {
     return this.#serial(async () => {
       if (this.#closed) throw new ToolError('tool-error', 'the transaction is already finished');
       const restored: string[] = [];
+      const done: LiveEntry[] = [];
       const skipped: Skipped[] = [];
       for (const live of [...this.#entries.values()].reverse()) {
         if (!accept(live.entry.path)) continue;
@@ -359,16 +362,25 @@ export class FileTransaction implements Transaction {
         if (outcome === 'restored' || outcome === 'unchanged') {
           // Unchanged: the file already holds its original again (another writer put it back), so nothing is written.
           restored.push(live.entry.path);
-          this.#entries.delete(live.entry.path);
-          this.#bytes -= live.bytes?.length ?? 0;
+          done.push(live);
         } else {
           skipped.push(outcome);
         }
       }
+      const removedDirs: string[] = [];
       for (const [dir, id] of [...this.#ownDirs].sort(([a], [b]) => b.length - a.length)) {
         if (!(await removeEmptyDirInside(dir, this.#roots, id))) continue;
+        removedDirs.push(dir);
         this.#ownDirs.delete(dir);
         this.#changedDirs.delete(dir);
+      }
+      // An entry leaves the record only once its restore is on disk; otherwise a crash could keep the run's
+      // write with the original gone from the journal.
+      if (await flushes(touchedDirs(restored, removedDirs), this.#io.syncDir)) {
+        for (const live of done) {
+          this.#entries.delete(live.entry.path);
+          this.#bytes -= live.bytes?.length ?? 0;
+        }
       }
       if (this.#created) await this.#persist();
       return { restored, skipped };
