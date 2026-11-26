@@ -238,10 +238,10 @@ function cutList<T>(list: readonly T[] | undefined, keep: number, where: string)
   return [...list.slice(0, keep), `…[${list.length - keep} more${where}]`];
 }
 
-function boundProtected(list: readonly ProtectedChange[], keep: number, textMax: number, where: string): readonly unknown[] | undefined {
+function boundProtected(list: readonly ProtectedChange[], windows: number, paths: number, textMax: number, where: string): readonly unknown[] | undefined {
   if (list.length === 0) return undefined;
-  const windows = list.map((c) => clipStrings({ ...c, changed: cutList(c.changed, keep, where) ?? [] }, textMax));
-  return cutList(windows, keep, where);
+  const kept = list.map((c) => clipStrings({ ...c, changed: cutList(c.changed, paths, where) ?? [] }, textMax));
+  return cutList(kept, windows, where);
 }
 
 function clip(text: string, max: number): string {
@@ -287,7 +287,7 @@ function capped(view: View, compact: CompactCalls, protectedChanges: readonly Pr
     const clipped = textMax === Infinity ? base : clipStrings(base, textMax);
     // File names are keys, which clipping leaves whole: a clipped envelope keeps only the totals.
     const stat = clipped.diffStat && textMax !== Infinity ? { files: {}, moreFiles: Object.keys(clipped.diffStat.files).length + (clipped.diffStat.moreFiles ?? 0), total: clipped.diffStat.total } : clipped.diffStat;
-    const kept = boundProtected(protectedChanges, Math.max(lists, 5), textMax, where);
+    const kept = boundProtected(protectedChanges, Math.max(lists, 5), Math.max(lists, 5), textMax, where);
     return {
       ...clipped,
       ...(kept ? { protectedChanges: kept } : {}),
@@ -310,7 +310,10 @@ function capped(view: View, compact: CompactCalls, protectedChanges: readonly Pr
     ...[1000, 100, 10, 1, 0].map((k) => () => withCalls(groupedCalls(200, 1, k), 0, 200)),
   ];
   const counted = (list: CompactCalls['denied'], what: string): string[] | undefined => (list === undefined ? undefined : [`…[${list.length} ${what} calls${where}]`]);
-  const fewest = boundProtected(protectedChanges, 3, 200, where);
+  // Escaping can make a short string long: the last 3 windows of 5 paths are clipped until their JSON takes at most a third of the cap.
+  const fewest = [200, 100, 40, 10]
+    .map((textMax) => boundProtected(protectedChanges, 3, 5, textMax, where))
+    .find((b, i, all) => b === undefined || safeStringify(b).length <= cap / 3 || i === all.length - 1);
   let env: View = {
     ok: view.ok,
     ...(view.error === undefined ? {} : { error: clipStrings(view.error, 200) }),

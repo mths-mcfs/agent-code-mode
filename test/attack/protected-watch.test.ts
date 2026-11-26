@@ -52,6 +52,19 @@ describe.runIf(posix)('protected policy files changed by bash are reported', () 
     expect(failed['protectedChanges']).toEqual([expect.objectContaining({ call: 'c1', changed: ['.claude/settings.local.json'] })]);
   });
 
+  it('a cut verbose response that leaves windows out still parses, and says how many', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, claude);
+    writer(lab, 1, path.join(lab.ws, '.claude', 'settings.local.json'), '{}');
+    // 400 long changed files leave room only for short lists, so 25 windows are cut to 20 and a count.
+    const out = await server.run(
+      `for (let i = 0; i < 400; i++) await write({ path: 'f' + i + '-${'n'.repeat(200)}', content: '' }); for (let i = 0; i < 25; i++) await bash({ command: 'node w1.js' }); return 'end';`,
+    );
+    expect(out.truncated).toBe(true);
+    expect(out.protectedChanges).toHaveLength(21);
+    expect(out.protectedChanges?.at(-1)).toBe('…[5 more in readOverflow]');
+  });
+
   it('reports in a transaction, which is not rolled back because of it', async () => {
     lab = makeLab();
     server = await claudeServer(lab, claude);

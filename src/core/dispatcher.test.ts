@@ -570,7 +570,9 @@ describe('Dispatcher protected-path watch', () => {
     }
   }
 
-  async function watchSetup(opts: { onBash?: (command: string) => void; failSnapshot?: () => boolean; watchedPaths?: readonly string[]; routine?: (c: WatchedChange) => Promise<boolean> } = {}) {
+  async function watchSetup(
+    opts: { onBash?: (command: string) => void; failSnapshot?: () => boolean; hang?: () => boolean; watchedPaths?: readonly string[]; routine?: (c: WatchedChange) => Promise<boolean>; tools?: MemoryToolRuntime } = {},
+  ) {
     const ctx = makeContext('/ws');
     const adapter = new StaticHostAdapter();
     const files = new Map<string, string>([['/ws/.claude/settings.json', '{}']]);
@@ -587,6 +589,7 @@ describe('Dispatcher protected-path watch', () => {
         async snapshotWatched(): Promise<WatchedSnapshot> {
           tools.snapshots++;
           if (opts.failSnapshot?.()) throw new Error('more than 5000 entries to check');
+          if (opts.hang?.()) return new Promise<WatchedSnapshot>(() => undefined);
           return new FakeSnapshot(new Map(files));
         },
       },
@@ -594,8 +597,8 @@ describe('Dispatcher protected-path watch', () => {
     const loaded = await adapter.loadPolicy(ctx);
     if ('error' in loaded) throw new Error(loaded.error);
     const policy = { ...loaded, watchedPaths: opts.watchedPaths ?? ['/ws/.claude/settings*.json'], ...(opts.routine ? { isRoutineWatchedChange: opts.routine } : {}) };
-    const dispatcher = new Dispatcher<null>({ adapter, tools, ctx, policy });
-    return { dispatcher, tools, files };
+    const dispatcher = new Dispatcher<null>({ adapter, tools, ctx, policy, watchTimeoutMs: 50 });
+    return { dispatcher, tools, files, again: () => new Dispatcher<null>({ adapter, tools, ctx, policy, watchTimeoutMs: 50 }) };
   }
 
   it('reports a change during a bash call, relative to the cwd, and nothing for a quiet one', async () => {
@@ -634,6 +637,28 @@ describe('Dispatcher protected-path watch', () => {
       { call: 'c2', command: 'bash two', when: 'during', changed: [], unchecked: why },
       { call: 'c2', command: 'bash two', when: 'after', changed: [], unchecked: why },
     ]);
+  });
+
+  it('stops waiting for a snapshot that hangs, reports it unchecked, and starts no other while it hangs', async () => {
+    let hang = false;
+    const w = await watchSetup({ hang: () => hang });
+    await w.dispatcher.dispatch('bash', { command: 'one' });
+    hang = true;
+    const second = await w.dispatcher.dispatch('bash', { command: 'two' });
+    expect(second.ok).toBe(true);
+    await w.dispatcher.finishWatch();
+    const timedOut = 'the watched files could not be read: the check did not finish within 50 ms';
+    const busy = 'the watched files could not be read: an earlier check of the watched files has not finished';
+    expect(w.dispatcher.protectedChanges).toEqual([
+      { call: 'c1', command: 'bash one', when: 'after', changed: [], unchecked: timedOut },
+      { call: 'c2', command: 'bash two', when: 'during', changed: [], unchecked: timedOut },
+      { call: 'c2', command: 'bash two', when: 'after', changed: [], unchecked: busy },
+    ]);
+    const taken = w.tools.snapshots;
+    const next = w.again();
+    await next.dispatch('bash', { command: 'three' });
+    expect(w.tools.snapshots).toBe(taken);
+    expect(next.protectedChanges.map((c) => c.unchecked)).toEqual([busy, busy]);
   });
 
   it('leaves routine changes out, and checks nothing after the end of the run, in a run without bash or without watched paths', async () => {

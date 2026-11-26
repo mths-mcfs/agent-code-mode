@@ -172,8 +172,24 @@ describe('formatRunResult', () => {
     expect(size(last)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
     const envelope = json(last);
     expect(envelope).not.toHaveProperty('rolledBack');
-    expect(envelope['protectedChanges']).toHaveLength(4);
-    expect((envelope['protectedChanges'] as unknown[]).at(-1)).toBe('…[37 more in readOverflow]');
+    const fewest = envelope['protectedChanges'] as { changed: string[] }[];
+    expect(fewest).toHaveLength(4);
+    expect(fewest.at(-1)).toBe('…[37 more in readOverflow]');
+    expect(fewest[0]?.changed).toHaveLength(6);
+    expect(fewest[0]?.changed.at(-1)).toBe('…[25 more in readOverflow]');
+  });
+
+  it('keeps the last-resort envelope under the cap when JSON escaping makes the protected paths longer', () => {
+    const rolledBack = { restored: Array.from({ length: 2_000 }, (_, i) => `f${i}.txt`), skipped: [] };
+    const escaped = (n: number) => ({ call: `c${n}`, command: '\u0001'.repeat(300), when: 'during' as const, changed: Array.from({ length: 5 }, (_, i) => `${'\u0001'.repeat(199)}${i}`) });
+    const out = formatRunResult(
+      { ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, rolledBack, protectedChanges: [escaped(1), escaped(2), escaped(3), escaped(4)] },
+      { overflow: new OverflowStore() },
+    );
+    expect(size(out)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    const kept = json(out)['protectedChanges'] as { call: string; changed: string[] }[];
+    expect(kept.slice(0, 3).map((c) => [c.call, c.changed.length])).toEqual([['c1', 5], ['c2', 5], ['c3', 5]]);
+    expect(kept.at(-1)).toBe('…[1 more in readOverflow]');
   });
 
   it('names no overflow when nothing could keep the result', () => {

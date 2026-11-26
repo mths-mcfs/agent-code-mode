@@ -82,5 +82,7 @@ describe.runIf(process.platform !== 'win32')('snapshotWatched', () => {
     for (let i = 0; i <= WATCH_MAX_ENTRIES; i++) writeFileSync(path.join(many, `f${i}`), '');
     await expect(snapshotWatched([path.join(many, '**')])).rejects.toThrow(/more than 5000 entries/);
     await expect(snapshotWatched(['/*/settings.json'])).rejects.toThrow(/literal directory/);
+    // Names that cannot match still cost: the limit bounds the reading, not only what is kept.
+    await expect(snapshotWatched([path.join(many, 'settings*.json')])).rejects.toThrow(/more than 5000 entries/);
   });
 });

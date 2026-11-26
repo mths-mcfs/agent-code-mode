@@ -1,4 +1,4 @@
-import type { BigIntStats } from 'node:fs';
+import type { BigIntStats, Dir } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { matchesPathPattern } from '../core/paths.js';
@@ -55,6 +55,16 @@ class Walk {
   readonly entries = new Map<string, Entry>();
   #count = 0;
 
+  /** Every name read counts, matching or not, so the limits bound the work and not only what is kept. */
+  spend(): void {
+    if (++this.#count > WATCH_MAX_ENTRIES) throw new Error(`more than ${WATCH_MAX_ENTRIES} entries to check`);
+    this.#inTime();
+  }
+
+  #inTime(): void {
+    if (Date.now() > this.#deadline) throw new Error(`checking took more than ${WATCH_TIME_MS} ms`);
+  }
+
   async entryAt(real: string): Promise<Entry | undefined> {
     let st: BigIntStats;
     try {
@@ -63,8 +73,7 @@ class Walk {
       if (missing(err)) return undefined;
       throw err;
     }
-    if (++this.#count > WATCH_MAX_ENTRIES) throw new Error(`more than ${WATCH_MAX_ENTRIES} entries to check`);
-    if (Date.now() > this.#deadline) throw new Error(`checking took more than ${WATCH_TIME_MS} ms`);
+    this.#inTime();
     const type = typeOf(st);
     if (type !== 'symlink') return { type, mode: Number(st.mode), key: statKey(st) };
     const link = await fs.readlink(real);
@@ -88,19 +97,21 @@ class Walk {
 
   async #walk(shownDir: string, realDir: string, pattern: string, depth: number, ancestors: ReadonlySet<string>): Promise<void> {
     const inner = new Set(ancestors).add(realDir);
-    let names: string[];
+    let dir: Dir;
     try {
-      names = await fs.readdir(realDir);
+      dir = await fs.opendir(realDir);
     } catch (err) {
       if (missing(err)) return;
       throw err;
     }
-    for (const name of names.sort()) {
+    for await (const { name } of dir) {
+      this.spend();
       const shown = path.join(shownDir, name);
       if (depth === 1 && !matchesPathPattern(shown, pattern)) continue;
       const entry = await this.entryAt(path.join(realDir, name));
       if (entry !== undefined) await this.visit(shown, entry, pattern, depth - 1, inner);
     }
+    this.#inTime();
   }
 }
 
@@ -135,6 +146,7 @@ export async function snapshotWatched(patterns: readonly string[]): Promise<Watc
   const w = new Walk();
   for (const pattern of patterns) {
     const { root, depth } = patternRoot(pattern);
+    w.spend();
     const top = await w.entryAt(root);
     if (top !== undefined) await w.visit(root, top, pattern, depth, new Set());
   }

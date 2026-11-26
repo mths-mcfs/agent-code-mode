@@ -37,7 +37,8 @@ export const RunOutputSchema = z.looseObject({
     .optional(),
   changedFiles: z.array(z.string()).optional(),
   warnings: z.array(z.string()).optional(),
-  protectedChanges: z.array(z.looseObject({ call: z.string(), when: z.string(), changed: z.array(z.string()), unchecked: z.string().optional() })).optional(),
+  // A cut response ends a list it shortened with a `…[N more]` string.
+  protectedChanges: z.array(z.union([z.looseObject({ call: z.string(), when: z.string(), changed: z.array(z.string()), unchecked: z.string().optional() }), z.string()])).optional(),
   rolledBack: z.unknown().optional(),
   truncated: z.unknown().optional(),
 });

@@ -182,6 +182,7 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     ]);
     const watchedPaths = unique([
       ...policyFolders.flatMap((f) => [path.join(f, 'config.toml'), path.join(f, 'hooks.json'), path.join(f, 'rules', '*.rules')]),
+      ...config.layers.map((l) => l.file).filter((f) => path.isAbsolute(f)),
       path.join(io.systemDir, 'requirements.toml'),
       path.join(io.systemDir, 'managed_config.toml'),
       path.join(config.cwd, '.mcp.json'),

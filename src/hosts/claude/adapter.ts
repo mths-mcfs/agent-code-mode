@@ -667,6 +667,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
           path.join(dir, 'plugins', 'installed_plugins.json'),
         ]),
         ...settings.pluginRoots.flatMap((root) => [path.join(root, 'hooks', '**'), path.join(root, '.claude-plugin', 'plugin.json')]),
+        ...settings.componentDirs.flatMap((dir) => [path.join(dir, 'skills', '*', 'SKILL.md'), path.join(dir, 'agents', '**'), path.join(dir, 'commands', '**')]),
         ...(managedDir === undefined ? [] : [path.join(managedDir, '**')]),
         ...docs.flatMap((d) => (d.file === undefined ? [] : [d.file])),
         path.join(contextDir(stateDir), '**'),

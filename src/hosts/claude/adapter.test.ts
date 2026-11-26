@@ -716,6 +716,10 @@ describe('policy snapshot', () => {
         path.join(s.home, '.claude', 'settings*.json'),
         path.join(s.home, '.claude', 'plugins', 'installed_plugins.json'),
         path.join(s.base, 'state', 'ctx', '**'),
+        // The files the adapter reads for skill, subagent and command hooks.
+        path.join(s.project, '.claude', 'skills', '*', 'SKILL.md'),
+        path.join(s.project, '.claude', 'commands', '**'),
+        path.join(s.home, '.claude', 'skills', '*', 'SKILL.md'),
       ]),
     );
     expect(watched).not.toContain(path.join(s.home, '.claude', '**'));

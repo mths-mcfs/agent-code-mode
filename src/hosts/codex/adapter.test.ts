@@ -480,6 +480,8 @@ describe.runIf(posix)('sandbox mode × tool', () => {
       ]),
     );
     expect((p.watchedPaths ?? []).some((w) => w.startsWith('/state'))).toBe(false);
+    const profiled = await policyOf(adapter({ '/home/u/.codex/fast.config.toml': 'model = "m"\n' }, { argv: ['codex', '--profile', 'fast'] }));
+    expect(profiled.watchedPaths).toContain('/home/u/.codex/fast.config.toml');
   });
 
   it('lets the turn metadata narrow the sandbox mode, never widen it', async () => {

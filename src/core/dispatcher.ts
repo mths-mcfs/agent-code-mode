@@ -51,6 +51,8 @@ export interface DispatcherOptions<P> {
   readonly checkDeadline?: () => void;
   /** Clock, for tests. */
   readonly now?: () => number;
+  /** Longest wait for one check of the watched paths (tests). */
+  readonly watchTimeoutMs?: number;
   /** Serves `readOverflow` from this server's memory; it never reaches the host. */
   readonly readOverflow?: (args: unknown) => CallReply;
 }
@@ -62,6 +64,32 @@ type Failure =
   | { readonly kind: 'error'; readonly error: ToolError };
 
 const ABORTED: unique symbol = Symbol('aborted');
+
+/** Longest wait for one snapshot or comparison of the watched paths: the runtime's own 2 s limit plus room for one slow file-system call. */
+export const WATCH_TIMEOUT_MS = 3_000;
+
+/**
+ * A snapshot each tool runtime started that outlived its wait. While one
+ * hangs, no other starts, so a stuck mount ties up one walk's file-system
+ * calls and not one per bash call.
+ */
+const hungSnapshots = new WeakMap<object, Promise<unknown>>();
+
+/** `work`, or a rejection after `ms`; `work` keeps running, and `onLate` gets it. */
+async function within<T>(work: Promise<T>, ms: number, onLate: (work: Promise<T>) => void): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onLate(work);
+      reject(new Error(`the check did not finish within ${ms} ms`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** How long `stop` waits for in-flight calls before giving up on them. */
 export const DEFAULT_SETTLE_GRACE_MS = 2_000;
@@ -633,9 +661,19 @@ export class Dispatcher<P = unknown> {
       const mark = this.#watchMark;
       if (mark === undefined && next === undefined) return;
       this.#watchMark = undefined;
+      const tools = this.#opts.tools;
+      const ms = this.#opts.watchTimeoutMs ?? WATCH_TIMEOUT_MS;
+      const hang = (work: Promise<unknown>): void => {
+        hungSnapshots.set(tools, work);
+        void work.then(
+          () => hungSnapshots.delete(tools),
+          () => hungSnapshots.delete(tools),
+        );
+      };
       let now: WatchedSnapshot;
       try {
-        now = await take.call(this.#opts.tools, patterns);
+        if (hungSnapshots.has(tools)) throw new Error('an earlier check of the watched files has not finished');
+        now = await within(take.call(tools, patterns), ms, hang);
       } catch (err) {
         const why = `the watched files could not be read: ${errorMessage(err)}`;
         if (mark) this.#reportProtected(mark, [], why);
@@ -644,7 +682,7 @@ export class Dispatcher<P = unknown> {
       }
       if (mark) {
         try {
-          const changed = await now.changedSince(mark.snapshot, policy?.isRoutineWatchedChange);
+          const changed = await within(now.changedSince(mark.snapshot, policy?.isRoutineWatchedChange), ms, hang);
           if (changed.length > 0) this.#reportProtected(mark, changed);
         } catch (err) {
           this.#reportProtected(mark, [], `the watched files could not be compared: ${errorMessage(err)}`);
