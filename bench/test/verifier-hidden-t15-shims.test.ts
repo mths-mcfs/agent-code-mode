@@ -1,5 +1,5 @@
 // The hidden-test cases of T15 on shims and look-alikes. The verifier cases are split across files so that Vitest runs them in parallel processes.
-import { rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { verifierWorkspaces, edit, hiddenLine } from './verifier-workspaces.ts';
@@ -7,6 +7,16 @@ import { verifierWorkspaces, edit, hiddenLine } from './verifier-workspaces.ts';
 const { solvedT15 } = await verifierWorkspaces();
 
 describe('hidden-test tasks', () => {
+  it('T15 accepts a caller that imports request under another name and calls that', async () => {
+    const { ws, verify } = await solvedT15();
+    const file = path.join(ws.dir, 'src', 'services', 'orders', 'lookup.js');
+    const text = await readFile(file, 'utf8');
+    expect(text).toContain("import { HttpError, request } from '../../lib/http.js';");
+    await writeFile(file, text.replace('import { HttpError, request }', 'import { HttpError, request as send }').replaceAll('await request(', 'await send('));
+    const result = await verify();
+    expect(result.pass, result.details.join('\n')).toBe(true);
+  });
+
   it('T15 rejects a shim: the old helper kept as a wrapper over request', async () => {
     const { ws, verify } = await solvedT15();
     await writeFile(

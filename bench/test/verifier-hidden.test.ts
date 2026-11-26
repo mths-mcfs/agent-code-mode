@@ -3,6 +3,7 @@ import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TASKS } from '../tasks/index.ts';
+import { formatPriceCalls } from '../tasks/T10/verify.ts';
 import { verifierWorkspaces } from './verifier-workspaces.ts';
 
 const { workspace } = await verifierWorkspaces();
@@ -41,6 +42,30 @@ describe('hidden-test tasks', () => {
     await write(ws2.dir, 'src/index.js', "export { formatPrice } from './lib/price.js';\nexport { priceLabel, plainLabel } from './catalog/labels.js';\nexport { csv, csvRow } from './catalog/export.js';\nexport { priceTable, priceDelta } from './catalog/table.js';\nexport { summaryLine, totalsByCurrency } from './catalog/summary.js';\n");
     const noCompat = await TASKS.T10.verify({ workspace: ws2.dir, answer: '', facts: ws2.fixture.facts, initial: ws2.initial });
     expect(noCompat.pass).toBe(false);
+  });
+
+  it('T10 finds calls through an alias with $, and none in strings or comments', () => {
+    const source = [
+      "import { formatPrice as $money } from '../lib/price.js';",
+      "export const a = $money(100, 'EUR', false);",
+      'export const doc = "formatPrice(100, \'USD\')"; // formatPrice(1, \'USD\')',
+      "/* $money(2, 'EUR') */",
+      "export const t = `was ${formatPrice(3, { currency: 'EUR' })}, not formatPrice(4, 'USD')`;",
+    ].join('\n');
+    expect(formatPriceCalls(source)).toEqual([['100', "'EUR'", 'false'], ['3', "{ currency: 'EUR' }"]]);
+  });
+
+  it('T11 fails an implementation that leaves the zero-weight shares empty', async () => {
+    const ws = await workspace('T11');
+    await TASKS.T11.solution(ws.dir, ws.fixture.facts);
+    const file = path.join(ws.dir, 'src', 'lib', 'split.js');
+    const text = await readFile(file, 'utf8');
+    const ret = '  return shares.map((s) => (s === 0n ? 0 : sign * Number(s)));';
+    expect(text).toContain(ret);
+    // `new Array(n)` with only the weighted shares set: the others are holes, not 0.
+    await writeFile(file, text.replace(ret, '  const out = new Array(shares.length);\n  shares.forEach((s, i) => { if (weights[i] !== 0) out[i] = s === 0n ? 0 : sign * Number(s); });\n  return out;'));
+    const result = await TASKS.T11.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.details.join('\n')).toMatch(/FAIL hidden tests pass/);
   });
 
   it('T11 fails a floating-point implementation that is right on small inputs', async () => {

@@ -36,6 +36,14 @@ const IMPORTS_HTTP = /\bfrom\s*['"]\.\.\/\.\.\/lib\/http\.js['"]/;
 // A declaration, alias, property or re-export that brings the old helper names back.
 const OLD_HELPER = /\b(?:function\s*\*?|const|let|var|class)\s+legacy(?:Fetch|Json)\b|\bas\s+legacy(?:Fetch|Json)\b|\blegacy(?:Fetch|Json)\s*[:=]|\bexport\s*\{[^}]*\blegacy(?:Fetch|Json)\b/;
 
+/** True when the file calls `request` from ../../lib/http.js, by its own name or the alias it is imported as. */
+function callsRequest(text) {
+  const named = /\bimport\s*\{([^}]*)\}\s*from\s*['"]\.\.\/\.\.\/lib\/http\.js['"]/.exec(text)?.[1] ?? '';
+  const alias = /\brequest\s+as\s+([A-Za-z_$][\w$]*)/.exec(named)?.[1];
+  const names = ['request', ...(alias === undefined ? [] : [alias.replace(/\$/g, '\\$')])];
+  return new RegExp(`(?<![\\w$])(?:${names.join('|')})\\s*\\(`).test(text);
+}
+
 test('static: src/lib/legacy-http.js is deleted', () => {
   assert.equal(existsSync(path.join(ROOT, 'src', 'lib', 'legacy-http.js')), false, 'src/lib/legacy-http.js still exists');
   const left = sourceFiles().filter((f) => /legacy-http/.test(path.posix.basename(f)));
@@ -56,7 +64,7 @@ test('static: every former caller imports src/lib/http.js and calls request itse
     }
     const text = read(file);
     if (!IMPORTS_HTTP.test(text)) missing.push(`${file}: does not import ../../lib/http.js`);
-    else if (!/\brequest\s*\(/.test(text)) missing.push(`${file}: does not call request`);
+    else if (!callsRequest(text)) missing.push(`${file}: does not call request`);
   }
   assert.deepEqual(missing, []);
 });

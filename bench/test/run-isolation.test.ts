@@ -25,7 +25,7 @@ describe('workspace isolation from the checkout', () => {
   it('refuses a --work-dir inside the checkout, also through a symlink', async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), 'acm-link-'));
     try {
-      await symlink(path.join(REPO_ROOT, 'bench'), path.join(tmp, 'bench-link'));
+      await symlink(path.join(REPO_ROOT, 'bench'), path.join(tmp, 'bench-link'), process.platform === 'win32' ? 'junction' : 'dir');
       for (const dir of [path.join(REPO_ROOT, 'bench', '.work'), REPO_ROOT, path.join(tmp, 'bench-link', 'work')]) {
         const errs: string[] = [];
         const orig = process.stderr.write.bind(process.stderr);

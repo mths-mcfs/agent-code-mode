@@ -7,15 +7,59 @@ import type { VerifyContext, VerifyResult } from '../types.ts';
 export const T10_FILES = path.join(import.meta.dirname, 'files');
 const HIDDEN = Object.fromEntries(filesFrom(path.join(import.meta.dirname, 'hidden')));
 
-/** The top-level arguments of each `formatPrice(...)` call in `source` (strings and nesting respected). */
+/**
+ * `source` with the text of comments, strings and template literals blanked to spaces, the code inside
+ * `${...}` kept. Same length, so an index into it is an index into `source`.
+ */
+function codeOnly(source: string): string {
+  const out = source.split('');
+  const blank = (from: number, to: number): void => {
+    for (let j = from; j < Math.min(to, out.length); j++) if (out[j] !== '\n') out[j] = ' ';
+  };
+  const templates: number[] = []; // brace depth outside each open `${`
+  let depth = 0;
+  for (let i = 0; i < source.length; ) {
+    const ch = source[i];
+    if (ch === '/' && (source[i + 1] === '/' || source[i + 1] === '*')) {
+      const end = source[i + 1] === '/' ? source.indexOf('\n', i) : source.indexOf('*/', i + 2) + 2;
+      const stop = end < i + 2 ? source.length : end;
+      blank(i, stop);
+      i = stop;
+    } else if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < source.length && source[j] !== ch && source[j] !== '\n') j += source[j] === '\\' ? 2 : 1;
+      blank(i + 1, j);
+      i = j + 1;
+    } else if (ch === '`' || (ch === '}' && depth === 0 && templates.length > 0)) {
+      if (ch === '}') depth = templates.pop() ?? 0;
+      let j = i + 1;
+      while (j < source.length && source[j] !== '`' && !(source[j] === '$' && source[j + 1] === '{')) j += source[j] === '\\' ? 2 : 1;
+      blank(i + 1, j);
+      if (source[j] === '$') {
+        templates.push(depth);
+        depth = 0;
+        i = j + 2;
+      } else i = j + 1;
+    } else {
+      if (ch === '{') depth++;
+      if (ch === '}') depth--;
+      i++;
+    }
+  }
+  return out.join('');
+}
+
+/** The top-level arguments of each `formatPrice(...)` call in the code of `source` (strings and nesting respected). */
 export function formatPriceCalls(source: string): string[][] {
   const calls: string[][] = [];
+  const code = codeOnly(source);
   // `import { formatPrice as money }` makes `money(` a call of it too.
-  const aliases = [...source.matchAll(/\bformatPrice\s+as\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1] as string);
-  const re = new RegExp(`\\b(?:${['formatPrice', ...aliases].join('|')})\\s*\\(`, 'g');
-  for (let m = re.exec(source); m !== null; m = re.exec(source)) {
+  const aliases = [...code.matchAll(/\bformatPrice\s+as\s+([A-Za-z_$][\w$]*)/g)].map((m) => (m[1] as string).replace(/\$/g, '\\$'));
+  // An identifier may start with `$`, which `\b` does not see as part of a word.
+  const re = new RegExp(`(?<![\\w$])(?:${['formatPrice', ...aliases].join('|')})\\s*\\(`, 'g');
+  for (let m = re.exec(code); m !== null; m = re.exec(code)) {
     // A declaration (`function formatPrice(`) is not a call.
-    if (/(?:function|as)\s+$/.test(source.slice(0, m.index))) continue;
+    if (/(?:function|as)\s+$/.test(code.slice(0, m.index))) continue;
     const args: string[] = [];
     let depth = 0;
     let quote: string | null = null;

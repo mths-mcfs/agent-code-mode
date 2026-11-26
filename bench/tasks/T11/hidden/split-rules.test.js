@@ -4,7 +4,8 @@ import { splitCents } from '../src/lib/split.js';
 
 const same = (actual, expected) => {
   assert.equal(actual.length, expected.length);
-  actual.forEach((v, i) => assert.ok(Object.is(v, expected[i]), `share ${i}: got ${Object.is(v, -0) ? '-0' : v}, expected ${expected[i]}`));
+  // Over `expected`, not `actual.forEach`, which skips holes: an empty slot is not a 0 share.
+  expected.forEach((e, i) => assert.ok(i in actual && Object.is(actual[i], e), `share ${i}: got ${!(i in actual) ? 'an empty slot' : Object.is(actual[i], -0) ? '-0' : actual[i]}, expected ${e}`));
 };
 
 test('largest remainders, ties to the lower index', () => {

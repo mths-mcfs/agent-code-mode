@@ -38,6 +38,7 @@ export interface GroupSummary {
 export interface ArmSummary {
   readonly host: 'claude' | 'codex';
   readonly cohort: string;
+  /** The arm, with its build for a baseline arm (`B0@ref:<commit>`): runs of two baseline builds are never pooled. */
   readonly arm: string;
   readonly armLabel: string;
   readonly tasks: number;
@@ -170,7 +171,18 @@ export function cohortKey(r: RunRecord): string {
   return createHash('sha256').update(`${r.host}|${JSON.stringify(rest)}`).digest('hex').slice(0, 8);
 }
 
-type Cells = Map<string, Map<string, RunRecord[]>>; // arm -> task -> valid runs
+/**
+ * The column a run is counted in: its arm, with the build for a baseline arm (`B0@ref:<commit>`). The build
+ * is out of the cohort key, so B and B0 stay comparable, but two baseline builds are two different arms.
+ */
+function cellArm(r: RunRecord): string {
+  const build = r.config['acmBuild'];
+  return (r.arm === 'B0' || r.arm === 'C0') && typeof build === 'string' ? `${r.arm}@${build}` : r.arm;
+}
+
+const armLabel = (host: RunRecord['host'], cell: string): string => ARM_LABELS[host][cell.split('@')[0] ?? cell] ?? cell;
+
+type Cells = Map<string, Map<string, RunRecord[]>>; // cellArm -> task -> valid runs
 
 function cohorts(records: readonly RunRecord[]): Map<string, { host: RunRecord['host']; cells: Cells }> {
   const out = new Map<string, { host: RunRecord['host']; cells: Cells }>();
@@ -178,9 +190,9 @@ function cohorts(records: readonly RunRecord[]): Map<string, { host: RunRecord['
     if (r.warmup || !r.valid) continue;
     const key = cohortKey(r);
     const c = out.get(key) ?? { host: r.host, cells: new Map() };
-    const byTask = c.cells.get(r.arm) ?? new Map<string, RunRecord[]>();
+    const byTask = c.cells.get(cellArm(r)) ?? new Map<string, RunRecord[]>();
     byTask.set(r.task, [...(byTask.get(r.task) ?? []), r]);
-    c.cells.set(r.arm, byTask);
+    c.cells.set(cellArm(r), byTask);
     out.set(key, c);
   }
   return out;
@@ -202,10 +214,10 @@ export function summarizeArms(records: readonly RunRecord[]): ArmSummary[] {
         host,
         cohort,
         arm,
-        armLabel: ARM_LABELS[host][arm] ?? arm,
+        armLabel: armLabel(host, arm),
         tasks: tasks.length,
         validRuns: valid.length,
-        runs: all.filter((r) => r.arm === arm && cohortKey(r) === cohort).length,
+        runs: all.filter((r) => cellArm(r) === arm && cohortKey(r) === cohort).length,
         pass1: mean(tasks.map((runs) => passOf(runs) / runs.length)),
         passHatK: k >= 1 ? { k, value: mean(tasks.map((runs) => passHatK(passOf(runs), runs.length, k))) as number } : null,
         costPerRunUsd: costs.length === tasks.length ? mean(costs.map((c) => mean(c) as number)) : null,
@@ -222,7 +234,9 @@ export function summarizeArms(records: readonly RunRecord[]): ArmSummary[] {
 function comparedPairs(arms: readonly string[]): [string, string][] {
   const pairs: [string, string][] = [];
   if (arms.includes('A')) for (const a of arms) if (a !== 'A') pairs.push([a, 'A']);
-  for (const [cur, base] of [['B', 'B0'], ['C', 'C0']] as const) if (arms.includes(cur) && arms.includes(base)) pairs.push([cur, base]);
+  for (const [cur, base] of [['B', 'B0'], ['C', 'C0']] as const) {
+    if (arms.includes(cur)) for (const a of arms) if (a === base || a.startsWith(`${base}@`)) pairs.push([cur, a]);
+  }
   return pairs;
 }
 

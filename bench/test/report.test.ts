@@ -222,4 +222,21 @@ describe('quality metrics', () => {
     // The warmup record never enters a group.
     expect(summarize(records).some((g) => g.task === 'T1')).toBe(false);
   });
+
+  it('keeps B0 runs of two baseline builds apart, and compares B with each', () => {
+    const run = (task: string, arm: 'B' | 'B0', acmBuild: string, pass: boolean, cost: number) =>
+      record({ id: `claude-${task}-${arm}-${acmBuild}`, task, arm, pass, cost, configHash: acmBuild === 'checkout' ? 'cccccccccccc' : acmBuild.slice(-12), config: { model: 'm', task, arm, acmBuild } });
+    const records = ['T9', 'T10'].flatMap((t) => [run(t, 'B', 'checkout', true, 3), run(t, 'B0', 'ref:aaaaaaaaaaaa', false, 1), run(t, 'B0', 'ref:bbbbbbbbbbbb', true, 3)]);
+    const arms = summarizeArms(records);
+    expect(arms.map((a) => [a.arm, a.armLabel, a.pass1, a.costPerRunUsd, a.validRuns, a.runs])).toEqual([
+      ['B', 'agent-code-mode (strict)', 1, 3, 2, 2],
+      ['B0@ref:aaaaaaaaaaaa', 'agent-code-mode baseline build (strict)', 0, 1, 2, 2],
+      ['B0@ref:bbbbbbbbbbbb', 'agent-code-mode baseline build (strict)', 1, 3, 2, 2],
+    ]);
+    const cmp = compareArms(records, 1, 200);
+    expect(cmp.map((c) => [`${c.arm} vs ${c.reference}`, c.pass?.estimate, c.costUsd?.estimate])).toEqual([
+      ['B vs B0@ref:aaaaaaaaaaaa', 1, 2],
+      ['B vs B0@ref:bbbbbbbbbbbb', 0, 0],
+    ]);
+  });
 });

@@ -209,14 +209,16 @@ export async function checkScope(
 }
 
 /**
- * Runs tests the agent never saw: the workspace is copied without `.git` to a temporary directory, the
- * hidden files are added there under `hidden-tests/`, and only they run. The workspace itself is never
+ * Runs tests the agent never saw: the workspace is copied without `.git` and `hidden-tests/` to a temporary
+ * directory, the hidden files are added there under a new `hidden-tests/`, and only they run. The workspace itself is never
  * written, so the recorded diff is the agent's alone.
  */
 export async function runHiddenTests(workspace: string, hidden: Readonly<Record<string, string>>, timeoutMs = 60_000): Promise<NodeTestRun> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-hidden-'));
   try {
-    await cp(workspace, dir, { recursive: true, filter: (src) => path.basename(src) !== '.git' });
+    // The workspace's own hidden-tests stays out of the copy: a link there would send the writes below outside it.
+    const reserved = path.join(workspace, 'hidden-tests');
+    await cp(workspace, dir, { recursive: true, filter: (src) => path.basename(src) !== '.git' && path.resolve(src) !== path.resolve(reserved) });
     await mkdir(path.join(dir, 'hidden-tests'), { recursive: true });
     const files: string[] = [];
     for (const [name, text] of Object.entries(hidden)) {

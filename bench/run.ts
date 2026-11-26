@@ -353,7 +353,7 @@ async function dirHash(dir: string): Promise<string> {
  * Resolves the baseline build. `--acm-dist <dir>`: an existing build (its cli.js runs with the
  * node_modules it can resolve from there). `--acm-ref <ref>`: the commit, without bench/ and test/, is
  * exported with `git archive` into `<work-dir>/acm-builds/<commit>`, linked to this checkout's node_modules and built with its own
- * `npm run build` (reused on later invocations). Refused when the ref's package-lock.json differs from
+ * `npm run build` (reused on later invocations). Refused, a cached build too, when the ref's package-lock.json differs from
  * this checkout's: the shared node_modules would not be the dependencies that version declares.
  */
 export async function resolveBaseline(opts: Pick<Options, 'acmRef' | 'acmDist' | 'dryRun'>, workDir: string): Promise<AcmBuild | null> {
@@ -371,7 +371,14 @@ export async function resolveBaseline(opts: Pick<Options, 'acmRef' | 'acmDist' |
   const build = (): AcmBuild => ({ id: `ref:${commit.slice(0, 12)}`, entry, companionHook: hasCompanionHook(entry) });
   // A build made before bench/ was left out of the archive would hold hidden tests next to the runs.
   if ((await exists(path.join(dir, 'bench'))) || (await exists(path.join(dir, 'test')))) await rm(dir, { recursive: true, force: true });
-  if (opts.dryRun || (await exists(path.join(dir, '.built')))) return build();
+  const lock = async (d: string): Promise<string | null> => readFile(path.join(d, 'package-lock.json'), 'utf8').catch(() => null);
+  const lockDiffers = (): Error => new Error(`--acm-ref ${opts.acmRef}: its package-lock.json differs from this checkout's; build it in its own checkout and pass --acm-dist <that dist>`);
+  if (opts.dryRun) return build();
+  // A cached build runs on this checkout's node_modules too, which may have moved on since it was built.
+  if (await exists(path.join(dir, '.built'))) {
+    if ((await lock(dir)) !== (await lock(REPO_ROOT))) throw lockDiffers();
+    return build();
+  }
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
   // Only what the build needs: no bench/ (hidden tests, solutions) next to the run workspaces. The archive
@@ -381,10 +388,9 @@ export async function resolveBaseline(opts: Pick<Options, 'acmRef' | 'acmDist' |
   execFileSync('git', ['archive', '--format=tar', '-o', tar, commit, '--', '.', ':(exclude)bench', ':(exclude)test'], { cwd: REPO_ROOT, stdio: 'ignore' });
   execFileSync('tar', ['-xf', 'source.tar'], { cwd: dir, stdio: 'ignore' });
   await rm(tar, { force: true });
-  const lock = async (d: string): Promise<string | null> => readFile(path.join(d, 'package-lock.json'), 'utf8').catch(() => null);
   if ((await lock(dir)) !== (await lock(REPO_ROOT))) {
     await rm(dir, { recursive: true, force: true });
-    throw new Error(`--acm-ref ${opts.acmRef}: its package-lock.json differs from this checkout's; build it in its own checkout and pass --acm-dist <that dist>`);
+    throw lockDiffers();
   }
   // A junction on Windows: a directory symlink there needs a privilege the user may not have.
   await symlink(path.join(REPO_ROOT, 'node_modules'), path.join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
