@@ -49,7 +49,11 @@ class Capture {
   #size = 0;
   truncated = false;
 
-  constructor(private readonly cap: number) {}
+  private readonly cap: number;
+
+  constructor(cap: number) {
+    this.cap = cap;
+  }
 
   push(chunk: Buffer): void {
     if (this.#size >= this.cap) {

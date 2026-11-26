@@ -1,7 +1,9 @@
-import { spawn } from 'node:child_process';
-import { killGroup } from '../lib/proc.ts';
-import { readdir, readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import type { BashContainment } from '../../src/core/types.js';
+import '../lib/register-src.mjs';
 import type { VerifyResult } from './types.ts';
 
 export class Checks {
@@ -54,42 +56,40 @@ export interface NodeTestRun {
   readonly output: string;
 }
 
-/** What the tests see of the environment: enough to run node, none of the operator's credentials. */
-function testEnv(): Record<string, string> {
-  const keep = ['PATH', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR'];
-  return { ...Object.fromEntries(keep.flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k] ?? '']]))), NODE_OPTIONS: '' };
+/**
+ * The command that runs the tests: none of the operator's environment beyond PATH, temp files in `tmp`.
+ * `SystemRoot` is what Node needs on Windows.
+ */
+function testCommand(tmp: string, shellQuote: (s: string) => string): string {
+  const vars = [`PATH="$PATH"`, ...['TMPDIR', 'TMP', 'TEMP'].map((k) => `${k}=${shellQuote(tmp)}`), 'NODE_OPTIONS=', ...(process.platform === 'win32' ? ['SystemRoot="$SYSTEMROOT"'] : [])];
+  return `exec env -i ${vars.join(' ')} ${shellQuote(process.execPath)} --test --test-reporter=spec`;
 }
 
 /**
- * Runs `node --test` in the workspace. It leads its own process group, so a timeout kills the test files'
- * processes with it; a runner that cannot start is a failed run.
+ * Runs `node --test` on the agent's code in the containment the runtime gives `bash`: writes only inside
+ * the workspace and a temp dir of its own, no network, and the whole process tree killed on timeout.
+ * Windows has no such sandbox, so there the tests run unconfined, with the same environment and tree
+ * cleanup. A run that cannot start, containment that is unavailable included, is a failed run.
  */
-export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: testEnv(), detached: process.platform !== 'win32' });
-    let output = '';
-    let settled = false;
-    const finish = (run: NodeTestRun): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(run);
-    };
-    child.stdout.on('data', (d: Buffer) => (output += d.toString('utf8')));
-    child.stderr.on('data', (d: Buffer) => (output += d.toString('utf8')));
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (child.pid !== undefined) killGroup(child.pid);
-    }, timeoutMs);
-    child.on('error', (err) => finish({ ok: false, pass: 0, fail: 0, output: `Error: node --test could not start: ${err.message}` }));
-    child.on('close', (code) => {
-      if (timedOut) output += `\nError: node --test timed out after ${timeoutMs} ms`;
-      // Spec reporter prints `ℹ pass 13`, TAP prints `# pass 13` (Node 22 without a TTY).
-      const num = (label: string): number => Number(new RegExp(`^(?:ℹ|#) ${label} (\\d+)`, 'm').exec(output)?.[1] ?? '0');
-      finish({ ok: code === 0 && !timedOut, pass: num('pass'), fail: num('fail'), output: output.slice(-4000) });
-    });
-  });
+export async function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
+  let tmp: string | undefined;
+  try {
+    // Loaded on first use, once the hook above lets plain Node resolve src/'s `.js` imports to its sources.
+    const { findBash, runBash, shellQuote } = await import('../../src/tools/bash.js');
+    const cwd = realpathSync.native(workspace);
+    tmp = realpathSync.native(await mkdtemp(path.join(os.tmpdir(), 'bench-tests-')));
+    const containment: BashContainment = process.platform === 'win32' ? { mode: 'none' } : { mode: 'sandbox', readOnly: false, writableRoots: [cwd, tmp], network: false };
+    const r = await runBash({ command: testCommand(tmp, shellQuote), shell: { path: findBash() ?? 'bash', args: ['-c'] }, cwd, timeoutMs, containment }, new AbortController().signal);
+    let output = `${r.stdout}${r.stderr}`;
+    if (r.timedOut) output += `\nError: node --test timed out after ${timeoutMs} ms`;
+    // Spec reporter prints `ℹ pass 13`, TAP prints `# pass 13` (Node 22 without a TTY).
+    const num = (label: string): number => Number(new RegExp(`^(?:ℹ|#) ${label} (\\d+)`, 'm').exec(output)?.[1] ?? '0');
+    return { ok: r.exitCode === 0 && !r.timedOut, pass: num('pass'), fail: num('fail'), output: output.slice(-4000) };
+  } catch (err) {
+    return { ok: false, pass: 0, fail: 0, output: `Error: node --test could not start: ${err instanceof Error ? err.message : String(err)}` };
+  } finally {
+    if (tmp !== undefined) await rm(tmp, { recursive: true, force: true });
+  }
 }
 
 /** Runs `node --test` and checks that it passes; a failure names the first failing tests and their errors. */

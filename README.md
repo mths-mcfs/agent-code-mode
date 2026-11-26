@@ -140,7 +140,7 @@ npm run bench -- --host claude --arms A,B --tasks T1,T5 --runs 3
 npm run bench:report                                         # re-render the newest bench/results/<date>
 ```
 
-The dry run exits non-zero when a planned run fails, is invalid or left no record.
+The dry run exits non-zero when a planned run fails, is invalid or left no record. The task checks run the workspace's tests in the same OS sandbox as `bash` (writes only to the workspace, no network), so they need its dependencies (Bubblewrap and socat on Linux). On Windows they run unconfined.
 
 ## License
 
