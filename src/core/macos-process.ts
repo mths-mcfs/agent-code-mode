@@ -27,7 +27,6 @@ const CWD_OFFSET = 152;
 const MAXPATHLEN = 1024;
 
 // Syscalls 202 (__sysctl) and 336 (proc_info). Flavors: 3 PROC_PIDTBSDINFO, 9 PROC_PIDVNODEPATHINFO.
-// Output: int64 length + KERN_PROCARGS2 bytes, then int64 result + proc_bsdinfo, then int64 result + proc_vnodepathinfo.
 const PERL_SCRIPT = String.raw`
 my $pid = $ARGV[0] + 0;
 my $amib = pack("i2", 1, 8); my $amax = pack("i", 0); my $alen = pack("Q", 4);
@@ -42,7 +41,6 @@ binmode STDOUT;
 print pack("q", $len), substr($buf, 0, $len), pack("q", $bn), $bsd, pack("q", $vn), $vp;
 `;
 
-/** Refuses a perl that is not a regular, root-owned file writable only by root. */
 export function checkSystemPerl(st: Pick<Stats, 'uid' | 'mode' | 'isFile'>): void {
   if (!st.isFile() || st.uid !== 0 || (st.mode & 0o022) !== 0) throw new Error(`${SYSTEM_PERL} is not a regular root-owned file writable only by root`);
 }
@@ -92,7 +90,6 @@ function splitProcargs(args: Buffer): { argv: string[]; environ: Buffer } {
   return { argv, environ: args.subarray(at) };
 }
 
-/** Parses the perl output for `pid`; throws unless every buffer has the expected size and layout. */
 export function parseMacProcess(pid: number, out: Buffer): MacProcess {
   let at = 0;
   const section = (fixed?: number): { result: number; bytes: Buffer } => {

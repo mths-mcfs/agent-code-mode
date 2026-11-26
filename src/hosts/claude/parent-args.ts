@@ -66,7 +66,6 @@ async function linuxProcess(pid: number): Promise<{ argv: string[]; ppid: number
   }
 }
 
-/** One process read from the macOS kernel. */
 export async function macProcess(pid: number): Promise<ProcessInfo> {
   try {
     const p = await readMacProcess(pid);

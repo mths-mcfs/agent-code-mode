@@ -14,14 +14,12 @@ interface Dump {
   readonly cwd?: string;
   readonly bsdResult?: number;
   readonly vnodeResult?: number;
-  /** Bytes between the exec path and argv[0], replacing the computed padding. */
-  readonly pad?: Buffer;
+  readonly padOverride?: Buffer;
 }
 
-/** What the perl script prints, built the way the kernel lays it out. */
-function dump(d: Dump): Buffer {
+function perlOutput(d: Dump): Buffer {
   const execPath = Buffer.from(`${d.execPath ?? '/usr/local/bin/node'}\0`);
-  const pad = d.pad ?? Buffer.alloc((8 - (execPath.length % 8)) % 8);
+  const pad = d.padOverride ?? Buffer.alloc((8 - (execPath.length % 8)) % 8);
   const strings = [...d.argv, ...(d.env ?? ['HOME=/h'])].map((s) => Buffer.from(`${s}\0`));
   const argc = Buffer.alloc(4);
   argc.writeInt32LE(d.argv.length);
@@ -59,38 +57,38 @@ describe('macOS process reader', () => {
 
   it('keeps every argument exactly, empty ones included, and returns the parent, cwd and environment', () => {
     const argv = ['/opt/my apps/claude', '--settings', '{"permissions": {"deny": ["Bash(rm:*)"]}}', '', 'x\ny', ' lead', 'ünï'];
-    const p = parseMacProcess(42, dump({ argv, env: ['CODEX_HOME=/c h', 'A=1'] }));
+    const p = parseMacProcess(42, perlOutput({ argv, env: ['CODEX_HOME=/c h', 'A=1'] }));
     expect(p).toMatchObject({ argv, ppid: 7, cwd: '/work dir' });
     expect(p.environ.toString().split('\0').filter(Boolean)).toEqual(['CODEX_HOME=/c h', 'A=1']);
   });
 
   it('reads an empty argv[0] from the padding boundary instead of skipping it as padding', () => {
-    expect(parseMacProcess(42, dump({ argv: ['', '-e', 'x'], execPath: '/bin/abc' })).argv).toEqual(['', '-e', 'x']);
-    expect(parseMacProcess(42, dump({ argv: ['', 'y'], execPath: '/bin/abcdef' })).argv).toEqual(['', 'y']);
+    expect(parseMacProcess(42, perlOutput({ argv: ['', '-e', 'x'], execPath: '/bin/abc' })).argv).toEqual(['', '-e', 'x']);
+    expect(parseMacProcess(42, perlOutput({ argv: ['', 'y'], execPath: '/bin/abcdef' })).argv).toEqual(['', 'y']);
   });
 
   it('refuses output that does not fit the layout', () => {
-    const good = dump({ argv: ['node', 'a'] });
+    const good = perlOutput({ argv: ['node', 'a'] });
     expect(() => parseMacProcess(42, good.subarray(0, good.length - 1))).toThrow(/truncated/);
     expect(() => parseMacProcess(42, Buffer.concat([good, Buffer.from([0])]))).toThrow(/trailing/);
     expect(() => parseMacProcess(43, good)).toThrow(/parent process id/);
-    expect(() => parseMacProcess(42, dump({ argv: ['node'], bsdResult: -1 }))).toThrow(/parent process id/);
-    expect(() => parseMacProcess(42, dump({ argv: ['node'], pad: Buffer.from([0x41, 0, 0, 0, 0, 0, 0]), execPath: '/a' }))).toThrow(/layout/);
-    const short = dump({ argv: ['node', 'a'], env: [] });
+    expect(() => parseMacProcess(42, perlOutput({ argv: ['node'], bsdResult: -1 }))).toThrow(/parent process id/);
+    expect(() => parseMacProcess(42, perlOutput({ argv: ['node'], padOverride: Buffer.from([0x41, 0, 0, 0, 0, 0, 0]), execPath: '/a' }))).toThrow(/layout/);
+    const short = perlOutput({ argv: ['node', 'a'], env: [] });
     short.writeInt32LE(9, 8);
     expect(() => parseMacProcess(42, short)).toThrow(/ends inside argument/);
   });
 
   it('rejects an argument that is not valid UTF-8', () => {
-    const raw = dump({ argv: ['node', 'ab'] });
+    const raw = perlOutput({ argv: ['node', 'ab'] });
     const at = raw.indexOf(Buffer.from('ab\0'));
     raw[at] = 0xff;
     expect(() => parseMacProcess(42, raw)).toThrow(/argument 1 is not valid UTF-8/);
   });
 
   it('leaves the cwd unknown when the kernel does not report it or it is not absolute UTF-8', () => {
-    expect(parseMacProcess(42, dump({ argv: ['node'], vnodeResult: -1 })).cwd).toBeUndefined();
-    expect(parseMacProcess(42, dump({ argv: ['node'], cwd: 'relative' })).cwd).toBeUndefined();
+    expect(parseMacProcess(42, perlOutput({ argv: ['node'], vnodeResult: -1 })).cwd).toBeUndefined();
+    expect(parseMacProcess(42, perlOutput({ argv: ['node'], cwd: 'relative' })).cwd).toBeUndefined();
   });
 
   it.runIf(process.platform === 'darwin')('reads the exact argv, parent, cwd and environment of a real process', async () => {

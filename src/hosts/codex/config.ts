@@ -158,7 +158,6 @@ export function decodeNulList(raw: Uint8Array, what: string): string[] {
   return out;
 }
 
-/** The exact parent argv; throws with the reason when it cannot be read. */
 function readParentArgv(platform: NodeJS.Platform): readonly string[] {
   if (platform === 'darwin') return readMacProcessSync(process.ppid).argv;
   if (platform !== 'linux') throw new Error('only Linux and macOS expose the exact command line of the parent process');
