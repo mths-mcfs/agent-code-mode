@@ -285,7 +285,7 @@ function sourceClaudeConfig(): string {
   return env !== undefined && env !== '' && path.isAbsolute(env) ? env : path.join(os.homedir(), '.claude');
 }
 
-function hostEnv(configDir: string | undefined): Record<string, string | undefined> {
+function hostEnv(configDir?: string): Record<string, string | undefined> {
   const keep = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN'];
   const env: Record<string, string | undefined> = {};
   for (const k of keep) if (process.env[k] !== undefined) env[k] = process.env[k];
@@ -301,7 +301,7 @@ function hostEnv(configDir: string | undefined): Record<string, string | undefin
 }
 
 export function claudeVersion(): string {
-  return execFileSync('claude', ['--version'], { encoding: 'utf8', env: hostEnv(undefined) }).trim();
+  return execFileSync('claude', ['--version'], { encoding: 'utf8', env: hostEnv() }).trim();
 }
 
 /**
@@ -314,9 +314,11 @@ export async function hostRun(setup: Setup, commands: readonly string[], maxTurn
   const world = await makeWorld(setup);
   const configDir = path.join(world.base, 'claude-config');
   const isolated = await readFile(path.join(sourceClaudeConfig(), '.credentials.json')).then(() => true, () => false);
-  if (isolated) createCodexHome(configDir, sourceClaudeConfig(), '.credentials.json');
-  // A trusted workspace, as the adapter's world is: project allow rules apply only there.
-  if (isolated) await writeFile(path.join(configDir, '.claude.json'), JSON.stringify({ projects: { [world.project]: { hasTrustDialogAccepted: true } } }));
+  // A trusted workspace, as the adapter's world is: project allow rules apply only there. Trust is written into a
+  // temporary config dir, so recording needs a credentials file to copy (not the macOS keychain).
+  if (!isolated) throw new Error(`recording needs ${path.join(sourceClaudeConfig(), '.credentials.json')}: the workspace trust is written into a temporary config dir holding a copy of it`);
+  createCodexHome(configDir, sourceClaudeConfig(), '.credentials.json');
+  await writeFile(path.join(configDir, '.claude.json'), JSON.stringify({ projects: { [world.project]: { hasTrustDialogAccepted: true } } }));
   const list = commands.map((c, i) => `${i + 1}. ${fill(c, world)}`).join('\n');
   const args = [
     '-p',
@@ -335,12 +337,12 @@ export async function hostRun(setup: Setup, commands: readonly string[], maxTurn
   const stdoutFile = path.join(world.base, 'stdout.jsonl');
   const stderrFile = path.join(world.base, 'stderr.txt');
   try {
-    const outcome = await runProcess({ command: 'claude', args, cwd: world.project, env: hostEnv(isolated ? configDir : undefined), timeoutMs: 15 * 60_000, stdoutFile, stderrFile, stdin: `Run these commands:\n${list}\n` });
+    const outcome = await runProcess({ command: 'claude', args, cwd: world.project, env: hostEnv(configDir), timeoutMs: 15 * 60_000, stdoutFile, stderrFile, stdin: `Run these commands:\n${list}\n` });
     const transcript = await readFile(stdoutFile, 'utf8');
     if (outcome.exitCode !== 0) throw new Error(`${setup.id}: claude exited ${String(outcome.exitCode)}: ${(await readFile(stderrFile, 'utf8')).slice(0, 2000)}`);
     return { parsed: parseHostTranscript(transcript, commands.map((c) => fill(c, world))), world, transcript };
   } finally {
-    if (isolated) removeCodexHome(configDir);
+    removeCodexHome(configDir);
   }
 }
 

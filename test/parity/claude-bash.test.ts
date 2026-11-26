@@ -105,6 +105,8 @@ describe.skipIf(process.platform === 'win32')('Claude bash parity with the insta
     for (const name of readdirSync(DIR).filter((n) => n.endsWith('.jsonl'))) {
       const text = readFileSync(path.join(DIR, name), 'utf8');
       expect(scrub(text, undefined), name).toBe(text);
+      // Host messages are free text: no machine path may survive outside the {project}, {outside} and {base} placeholders.
+      expect(text.match(/\/(home|Users|tmp|var|private)\/[^\s"']*/g) ?? [], name).toEqual([]);
     }
   });
 });

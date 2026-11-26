@@ -204,6 +204,7 @@ describe('Bash parity with the host', () => {
     ['rsync a.txt .git/', 'an rsync destination'],
     ['sed -i.bak s/a/b/ .bashrc', 'sed in place on a sensitive file'],
     ['/tmp/acm-outside/run.sh', 'a program outside the working directories'],
+    ['cat sub/../a.txt', 'a `..` that a symlink before it could redirect'],
   ])('an exact allow rule for `%s` still asks: %s', async (command) => {
     const s = await setup({ user: { permissions: { allow: [`Bash(${command})`] } }, mode: 'default' });
     expect(check(s, bash(command, s.project))).toBe('ask');

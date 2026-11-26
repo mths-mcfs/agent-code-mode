@@ -264,6 +264,8 @@ function exactRuleWords(analysis: BashAnalysis): { words: string[] } | { why: st
     if (operand.value === undefined || operand.glob || operand.tilde === 'unknown' || operand.assignment === true) return { why: `\`${operand.raw}\` is only known at run time` };
     const value = operand.tilde === 'literal' ? `./${operand.value}` : operand.value;
     if (value.startsWith('-') && value.includes('/') && !value.includes('=')) return { why: `\`${operand.raw}\` may join an option to a path` };
+    // The kernel follows a symlink before the `..` after it, which a path resolved by name cannot.
+    if (value.split(/[/=:]/).includes('..')) return { why: `\`${operand.raw}\` climbs with \`..\`, which a symlink before it can redirect` };
     const eq = value.indexOf('=');
     if (!value.startsWith('-') || eq !== -1) words.push(value);
     if (eq !== -1) words.push(...value.slice(eq + 1).split(':').filter((piece) => piece !== ''));
