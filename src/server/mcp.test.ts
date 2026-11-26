@@ -112,10 +112,12 @@ describe('MCP server', () => {
     const { client } = await connect({ sandbox: new QuickJsSandbox() });
     const code = `for (let i = 0; i < 500; i++) { try { await bash({ command: 'rm f' + 'a'.repeat(170) + i }); } catch {} } return 1;`;
     const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code } }))) as { calls: { denied: { calls: string[] }[] }; overflow?: { id: string } };
+    const targets = Array.from({ length: 500 }, (_, i) => `bash rm f${'a'.repeat(170)}${i}`);
     const shown = first.calls.denied.flatMap((g) => g.calls).filter((c) => !c.startsWith('…'));
-    expect(new Set(shown).size).toBe(shown.length);
-    const back = `let t = ''; for (;;) { const s = await readOverflow(${JSON.stringify(first.overflow?.id ?? '')}, t.length); t += s.text; if (!s.truncated) break; } return new Set(JSON.parse(t).calls.map((c) => c.summary)).size;`;
-    expect(JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: back } })))).toMatchObject({ result: 500 });
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown).toEqual(targets.slice(0, shown.length));
+    const back = `let t = ''; for (;;) { const s = await readOverflow(${JSON.stringify(first.overflow?.id ?? '')}, t.length); t += s.text; if (!s.truncated) break; } const denied = JSON.parse(t).calls.filter((c) => c.decision === 'denied').map((c) => c.summary); return { count: denied.length, exact: denied.every((d, i) => d === 'bash rm f' + 'a'.repeat(170) + i) };`;
+    expect(JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: back } })))).toMatchObject({ result: { count: 500, exact: true } });
   });
 
   it('logs a readOverflow failure the script caught', async () => {

@@ -67,8 +67,21 @@ function clip(s: string, max: number): string {
 }
 
 // Summaries stay whole: the call log names every target, and only a response cut to its cap abbreviates them.
+// Each newline and the whitespace around it becomes one ` ⏎ `, in a linear pass: the equivalent regex
+// backtracks quadratically over a long run of spaces.
 function oneLine(s: string): string {
-  return s.replace(/\s*\n\s*/g, ' ⏎ ');
+  const lines = s.split('\n');
+  if (lines.length === 1) return s;
+  let out = (lines[0] ?? '').trimEnd();
+  let separator = false;
+  for (let i = 1; i < lines.length; i++) {
+    separator = true;
+    const line = (lines[i] ?? '').trimStart();
+    if (line === '') continue;
+    out += ` ⏎ ${i === lines.length - 1 ? line : line.trimEnd()}`;
+    separator = false;
+  }
+  return separator ? `${out} ⏎ ` : out;
 }
 
 function containmentEquals(a: BashContainment, b: BashContainment): boolean {
