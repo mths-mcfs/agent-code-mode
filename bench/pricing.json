@@ -1,7 +1,7 @@
 {
   "currency": "USD",
   "unit": "per 1M tokens",
-  "note": "Codex: uncached input at `input`, cached input at `cachedInput`, cache writes at `input` (no separate OpenAI price), output (reasoning included) at `output`; prices for prompts up to 272K tokens. Claude `-p` runs report total_cost_usd, which equals these prices with cache writes split by TTL. Claude interactive runs (arm D) report none: their cost is computed from the transcript usage with the same prices and split.",
+  "note": "Codex: uncached input at `input`, cached input at `cachedInput`, cache writes at `input` (no separate OpenAI price), output (reasoning included) at `output`; prices for prompts up to 272K tokens. Claude `-p` runs report total_cost_usd, which equals these prices with cache writes split by TTL. Claude interactive runs (arm D): the comparable cost is computed from the transcript usage with the same prices and split; the session's own total, which also counts side calls, is kept apart as hostSessionCostUsd.",
   "models": {
     "gpt-6.1-terra": { "input": 1.0, "cachedInput": 0.05, "output": 5.0, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra" },
     "gpt-6.1-sol": { "input": 2.0, "cachedInput": 0.1, "output": 10.0, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol" },

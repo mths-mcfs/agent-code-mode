@@ -353,6 +353,7 @@ async function readEnvironment(resultsDir: string): Promise<unknown> {
   }
 }
 
+/** Writes summary.json next to the records and returns the Markdown table for the caller to print: the repo keeps no extra Markdown files. */
 export async function writeReport(resultsDir: string, now: Date = new Date()): Promise<{ summary: Summary; markdown: string }> {
   const records = await loadRecords(resultsDir);
   const warm = records.filter((r) => r.warmup);
@@ -368,7 +369,6 @@ export async function writeReport(resultsDir: string, now: Date = new Date()): P
   };
   const markdown = markdownTable(summary);
   await writeFile(path.join(resultsDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
-  await writeFile(path.join(resultsDir, 'summary.md'), markdown);
   return { summary, markdown };
 }
 
