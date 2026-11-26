@@ -27,10 +27,8 @@ const RUNNER_SUBCOMMANDS = new Set(['dlx', 'exec', 'x']);
  */
 export function startsThisServer(command: string, args: readonly string[], cwd: string, selfEntry: string | undefined = process.argv[1]): boolean {
   const self = selfEntry === undefined ? undefined : real(selfEntry);
-  const isSelf = (word: string): boolean =>
-    PACKAGE.test(word) ||
-    PACKAGE.test(path.basename(word).replace(/\.(cmd|exe|ps1)$/i, '')) ||
-    (self !== undefined && (path.isAbsolute(word) || word.includes('/') || word.includes(path.sep)) && real(path.resolve(cwd, word)) === self);
+  // An operand is this server only as the exact package name or a path to this entry file; a basename says nothing there.
+  const isSelf = (word: string): boolean => PACKAGE.test(word) || (self !== undefined && (path.isAbsolute(word) || word.includes('/') || word.includes(path.sep)) && real(path.resolve(cwd, word)) === self);
   const operand = args.find((a, i) => !a.startsWith('-') && !(i === 0 && RUNNER_SUBCOMMANDS.has(a)));
-  return isSelf(command) || (operand !== undefined && isSelf(operand));
+  return PACKAGE.test(path.basename(command).replace(/\.(cmd|exe|ps1)$/i, '')) || isSelf(command) || (operand !== undefined && isSelf(operand));
 }

@@ -6,7 +6,7 @@ import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
 import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
 import { parseMcpCall, prepareMcpCall } from '../mcp/call.js';
-import { redact } from '../mcp/secrets.js';
+import { redactDeep } from '../mcp/secrets.js';
 import type {
   BashContainment,
   BashResult,
@@ -424,7 +424,7 @@ export class Dispatcher<P = unknown> {
     let prepared = frozenCopy(first.prepared);
     const spec = first.spec;
     // A call's input can carry a value of the server's config (a hook may add one): the log never shows it.
-    summary = redact(summary, spec.secrets);
+    summary = summarizeMcp(call, spec.secrets);
     this.#labels[slot] = { id: call.id, tool: label, summary };
 
     const staticFailure = this.#checkStatic(prepared, policy);
@@ -446,7 +446,7 @@ export class Dispatcher<P = unknown> {
       const recheck = this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);
       prepared = frozenCopy(second.prepared);
-      summary = redact(summarizeMcp(reparsed), spec.secrets);
+      summary = summarizeMcp(reparsed, spec.secrets);
       this.#labels[slot] = { id: call.id, tool: label, summary };
     }
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
@@ -870,8 +870,9 @@ function mcpLabel(call: McpCall): string {
   return `mcp__${call.args.server}__${call.args.tool}`;
 }
 
-function summarizeMcp(call: McpCall): string {
-  return `mcp ${call.args.server}.${call.args.tool} ${clip(oneLine(JSON.stringify(call.args.input)), 160)}`;
+/** The input is redacted as values, before it is serialized: a secret with a quote or a newline is escaped in JSON and no longer matches as text. */
+function summarizeMcp(call: McpCall, secrets: readonly string[] = []): string {
+  return `mcp ${call.args.server}.${call.args.tool} ${clip(oneLine(JSON.stringify(redactDeep(call.args.input, secrets))), 160)}`;
 }
 
 /** Short description of a call for the call log. */

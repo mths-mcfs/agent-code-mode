@@ -147,6 +147,15 @@ describe('McpUpstreams', () => {
     expect(await pool.call(spec, effect('big'), signal())).toEqual({ isError: false, text: 'xxxxxxxxxx' });
   });
 
+  it.each([['a quote', 'ab"cd123'], ['a backslash', 'ab\\cd123'], ['a newline', 'ab\ncd123']])('redacts a secret with %s in results and errors as values, before any serialization', async (_name, secret) => {
+    const { spec, pool } = setup({ FIXTURE_SECRET: secret });
+    const r = await pool.call(spec, effect('leak'), signal());
+    expect(r).toEqual({ isError: false, structuredContent: { '<redacted>': '<redacted>' } });
+    const err = await failure(pool.call(spec, effect('leakerr'), signal()));
+    expect(err.message).not.toContain(secret);
+    expect(err.message).toContain('bad token <redacted>');
+  });
+
   it('rejects an invalid result', async () => {
     const { spec, pool } = setup();
     expect((await failure(pool.call(spec, effect('bad'), signal()))).message).toMatch(/not a valid tools\/call result/);

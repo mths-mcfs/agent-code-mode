@@ -107,6 +107,18 @@ describe('Dispatcher mcpCall', () => {
     expect(hooked.dispatcher.calls[0]?.summary).toBe('mcp srv.list {"auth":"<redacted>","page":2}');
   });
 
+  it.each([['a quote', 'ab"cd123'], ['a backslash', 'ab\\cd123'], ['a newline', 'ab\ncd123']])('redacts a secret with %s, which JSON escapes', async (_name, secret) => {
+    const ctx = makeContext('/ws');
+    const adapter = new StaticHostAdapter({ mcp: { servers: [{ ...spec, secrets: [secret] }], notes: [] }, hook: { kind: 'updatedArgs', args: { server: 'srv', tool: 'list', args: { auth: `x${secret}`, page: 2 } } } });
+    const runtime = new FakeRuntime();
+    const dispatcher = new Dispatcher<null>({ adapter, tools: new MemoryToolRuntime({ root: '/ws' }), ctx, policy: await adapter.loadPolicy(ctx), mcp: runtime });
+    await dispatcher.dispatch('mcp', { server: 'srv', tool: 'list', args: { auth: secret } });
+    const shown = JSON.stringify(dispatcher.calls);
+    expect(shown).not.toContain(JSON.stringify(secret).slice(1, -1));
+    expect(dispatcher.calls[0]?.summary).toBe('mcp srv.list {"auth":"x<redacted>","page":2}');
+    expect(runtime.sent[0]?.input).toEqual({ auth: `x${secret}`, page: 2 });
+  });
+
   it('runs mcpCalls one at a time with the mutations, in call order', async () => {
     const order: string[] = [];
     const runtime = new FakeRuntime(async (e) => {

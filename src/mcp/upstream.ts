@@ -231,7 +231,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 export function shapeResult(raw: unknown, maxChars: number, overflow: OverflowSink | undefined, what: string, secrets: readonly string[] = []): McpResult {
   const parsed = CallResult.safeParse(raw);
-  if (!parsed.success) throw new ToolError('tool-error', `${what} returned a result that is not a valid tools/call result: ${formatIssues(parsed.error)}`);
+  if (!parsed.success) throw new ToolError('tool-error', `${what} returned a result that is not a valid tools/call result: ${redact(formatIssues(parsed.error), secrets)}`);
   const { content, structuredContent, isError = false } = parsed.data;
   if (structuredContent !== undefined && !isPlainObject(structuredContent)) throw new ToolError('tool-error', `${what} returned a structuredContent that is not an object`);
   if (content === undefined && structuredContent === undefined) throw new ToolError('tool-error', `${what} returned a result with neither content nor structuredContent`);

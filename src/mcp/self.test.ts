@@ -35,6 +35,8 @@ describe('startsThisServer', () => {
     ['node', ['server.js', '--root', '/work/agent-code-mode']],
     ['node', ['server.js', '--name', 'agent-code-mode']],
     ['npx', ['-y', 'search-server', 'agent-code-mode']],
+    ['node', ['/opt/other/agent-code-mode']],
+    ['npx', ['@acme/agent-code-mode']],
   ])('%s %j is another server', (command, args) => {
     expect(startsThisServer(command, args, dir, entry)).toBe(false);
   });
