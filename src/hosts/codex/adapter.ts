@@ -24,6 +24,7 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { readMacProcessSync } from '../../core/macos-process.js';
 import { stateDirPath } from '../../core/state-dir.js';
 import type { BashContainment, BashShell, Decision, HostAdapter, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, SessionContext } from '../../core/types.js';
 import { ConfigError, decodeNulList, getPath, isTable, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
@@ -423,11 +424,6 @@ export function checkFileWrite(absPath: string, p: CodexPolicy): Decision {
   }
 }
 
-/**
- * Codex starts MCP servers with a minimal environment that drops
- * `CODEX_HOME`. On Linux the parent's value is read from `/proc`; elsewhere
- * only the server's own environment is used.
- */
 /** The value of `key` in a NUL-separated environ record; only that entry is decoded, as strict UTF-8. */
 function strictEnvValue(raw: Buffer, key: string): string | undefined {
   const prefix = `${key}=`;
@@ -436,12 +432,17 @@ function strictEnvValue(raw: Buffer, key: string): string | undefined {
   return (decodeNulList(Buffer.from(entry, 'latin1'), `${key} in the parent Codex environment`)[0] ?? '').slice(prefix.length);
 }
 
+/**
+ * Codex starts MCP servers with a minimal environment that drops
+ * `CODEX_HOME`. On Linux the parent's value is read from `/proc`, on macOS
+ * from the kernel; elsewhere only the server's own environment is used.
+ */
 function parentAwareEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
-  if (env['CODEX_HOME'] === undefined && process.platform === 'linux') {
+  if (env['CODEX_HOME'] === undefined && (process.platform === 'linux' || process.platform === 'darwin')) {
     let raw: Buffer;
     try {
-      raw = readFileSync(`/proc/${process.ppid}/environ`);
+      raw = process.platform === 'darwin' ? readMacProcessSync(process.ppid).environ : readFileSync(`/proc/${process.ppid}/environ`);
     } catch {
       return env;
     }

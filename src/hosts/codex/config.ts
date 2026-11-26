@@ -17,9 +17,10 @@
  * Constraints come from `/etc/codex/requirements.toml`.
  *
  * Settings passed only on the parent Codex command line are read from its
- * exact argv, which only Linux gives (`/proc/<ppid>/cmdline`). On macOS and
- * Windows, or when the parent is not a Codex process, the real IO refuses to
- * load a policy rather than guess those settings. Anything else that is
+ * exact argv: `/proc/<ppid>/cmdline` on Linux, the kernel through
+ * `readMacProcessSync` on macOS. On Windows, or when the parent is not a Codex
+ * process, the real IO refuses to load a policy rather than guess those
+ * settings. Anything else that is
  * ephemeral (app-server thread overrides, cloud and MDM config, settings
  * changed inside a running TUI) is invisible to this server.
  */
@@ -29,6 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { z } from 'zod';
+import { readMacProcessSync } from '../../core/macos-process.js';
 
 export type TomlTable = { [key: string]: unknown };
 
@@ -156,14 +158,15 @@ export function decodeNulList(raw: Uint8Array, what: string): string[] {
   return out;
 }
 
-/** The exact parent argv, which only Linux exposes. */
-function readParentArgv(platform: NodeJS.Platform): readonly string[] | undefined {
-  if (platform !== 'linux') return undefined;
+/** The exact parent argv; throws with the reason when it cannot be read. */
+function readParentArgv(platform: NodeJS.Platform): readonly string[] {
+  if (platform === 'darwin') return readMacProcessSync(process.ppid).argv;
+  if (platform !== 'linux') throw new Error('only Linux and macOS expose the exact command line of the parent process');
   let raw: Buffer;
   try {
     raw = readFileSync(`/proc/${process.ppid}/cmdline`);
   } catch {
-    return undefined;
+    throw new Error(`the command line of the parent process ${String(process.ppid)} cannot be read`);
   }
   return decodeNulList(raw, 'the parent Codex command line');
 }
@@ -229,9 +232,13 @@ export function nodeConfigIo(env: Readonly<Record<string, string | undefined>> =
     },
     parentArgv() {
       const why = (cause: string): ConfigError => new ConfigError(`${cause}, so the -c, --profile, -s and -a options of the Codex session cannot be checked`);
-      if (process.platform !== 'linux') throw why('only Linux exposes the exact command line of the parent process');
-      const argv = readParentArgv(process.platform);
-      if (argv === undefined) throw why(`the command line of the parent process ${String(process.ppid)} cannot be read`);
+      let argv: readonly string[];
+      try {
+        argv = readParentArgv(process.platform);
+      } catch (err) {
+        if (err instanceof ConfigError) throw err;
+        throw why(err instanceof Error ? err.message : String(err));
+      }
       if (!looksLikeCodex(argv)) throw why(`the parent process (${JSON.stringify((argv[0] ?? '').slice(0, 80))}) is not the Codex CLI`);
       return argv;
     },

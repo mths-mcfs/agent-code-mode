@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { readMacProcess } from '../../core/macos-process.js';
 import { systemPowerShell } from '../../core/windows-powershell.js';
 
 /**
@@ -13,9 +14,7 @@ import { systemPowerShell } from '../../core/windows-powershell.js';
  * Linux reads `/proc/<pid>/cmdline` (exact argv) and `/proc/<pid>/cwd`.
  * Windows reads the process table through CIM (`Win32_Process`) and splits each
  * command line with the `CommandLineToArgvW` rules; no working directory is known.
- * macOS reads `ps -ww -o ppid=,command=`, which joins argv with spaces, so
- * argument boundaries are lost: `conservativeFlags` then drops the grants and
- * refuses the restrictions it cannot read exactly.
+ * macOS reads the exact argv and working directory from the kernel (`readMacProcess`).
  *
  * Flags that reach Claude Code any other way are invisible here: an Agent SDK
  * host passing options over its control channel, environment variables read
@@ -28,8 +27,6 @@ export interface ParentProcess {
   readonly argv: readonly string[];
   /** Working directory of that process, when known (resolves a relative `--settings` path). */
   readonly cwd?: string;
-  /** True when `argv` was split from a joined command line, so its word boundaries are guesses. */
-  readonly lossy?: boolean;
 }
 
 /**
@@ -69,15 +66,14 @@ async function linuxProcess(pid: number): Promise<{ argv: string[]; ppid: number
   }
 }
 
-function psProcess(pid: number): Promise<{ argv: string[]; ppid: number; joined: string } | undefined> {
-  return new Promise((resolve) => {
-    execFile('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { timeout: 2_000 }, (err, stdout) => {
-      if (err) return resolve(undefined);
-      const m = /^\s*(\d+)\s+(.*)$/s.exec(stdout.trim());
-      if (!m?.[1] || m[2] === undefined) return resolve(undefined);
-      resolve({ ppid: Number(m[1]), argv: m[2].trim().split(/\s+/), joined: m[2].trim() });
-    });
-  });
+/** One process read from the macOS kernel. */
+export async function macProcess(pid: number): Promise<ProcessInfo> {
+  try {
+    const p = await readMacProcess(pid);
+    return { argv: p.argv, ppid: p.ppid, ...(p.cwd === undefined ? {} : { cwd: p.cwd }) };
+  } catch (err) {
+    throw new Error(`${err instanceof Error ? err.message : String(err)}, so the Claude Code launch flags cannot be ruled out`);
+  }
 }
 
 /**
@@ -196,7 +192,6 @@ export interface ProcessInfo {
   readonly argv: readonly string[];
   readonly ppid: number;
   readonly cwd?: string;
-  readonly joined?: string;
 }
 
 /** Walks up from this server's own process, so the link to its immediate parent is checked like every other. */
@@ -212,9 +207,7 @@ export async function findClaudeAncestor(pid: number, read: (pid: number) => Pro
     if (pid <= 1) return undefined;
     const info = await read(pid);
     if (!info) throw new Error(`ancestor process ${pid} cannot be read, so the Claude Code launch flags cannot be ruled out`);
-    if (looksLikeClaude(info.argv) || (info.joined !== undefined && joinedLooksLikeClaude(info.joined))) {
-      return { argv: info.argv, ...(info.cwd === undefined ? {} : { cwd: info.cwd }), ...(info.joined === undefined ? {} : { lossy: true }) };
-    }
+    if (looksLikeClaude(info.argv)) return { argv: info.argv, ...(info.cwd === undefined ? {} : { cwd: info.cwd }) };
     pid = info.ppid;
   }
   throw new Error(`no Claude Code process within ${MAX_ANCESTORS} ancestors, so its launch flags cannot be ruled out`);
@@ -228,7 +221,7 @@ export function parentReaderFor(platform: NodeJS.Platform): ParentArgsReader {
   return async () => {
     if (platform === 'win32') return findClaudeFromSelf(process.pid, await windowsProcessTable());
     if (platform !== 'linux' && platform !== 'darwin') throw new Error(`the Claude Code launch flags cannot be read on ${platform}`);
-    return findClaudeFromSelf(process.pid, platform === 'linux' ? linuxProcess : psProcess);
+    return findClaudeFromSelf(process.pid, platform === 'linux' ? linuxProcess : macProcess);
   };
 }
 
@@ -326,29 +319,4 @@ export function parseClaudeFlags(argv: readonly string[]): ClaudeCliFlags {
     addDirs,
     agents,
   };
-}
-
-const RESTRICTIVE_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);
-
-export function conservativeFlags(argv: readonly string[]): ClaudeCliFlags {
-  const words = argv.slice(1);
-  if (words.some((w) => /--(settings|disallowedTools|disallowed-tools|setting-sources|agents)(?![A-Za-z-])/.test(w))) {
-    throw new Error('--settings, --disallowedTools, --setting-sources and --agents cannot be read exactly from the Claude Code command line on this platform');
-  }
-  const modes: string[] = [];
-  words.forEach((w, i) => {
-    if (w === '--permission-mode') modes.push(words[i + 1] ?? '');
-    else if (w.startsWith('--permission-mode=')) modes.push(w.slice('--permission-mode='.length));
-    else if (w.includes('--permission-mode') || w.includes('--dangerously-skip-permissions')) modes.push('bypassPermissions');
-  });
-  if (new Set(modes).size > 1) throw new Error('the Claude Code permission mode cannot be read exactly from the command line on this platform');
-  const mode = modes[0];
-  const flags: ClaudeCliFlags = { settings: [], allowedTools: [], disallowedTools: [], addDirs: [], agents: [] };
-  if (mode === undefined) return flags;
-  return { ...flags, permissionMode: RESTRICTIVE_MODES.has(mode) ? mode : 'default' };
-}
-
-/** A joined macOS command line that runs Claude Code (its path may contain spaces, so word splitting misses it). */
-function joinedLooksLikeClaude(command: string): boolean {
-  return /(^|\/)claude(\.exe)?(\s|$)/.test(command) || /claude-code\/\S*cli\.m?js(\s|$)/.test(command);
 }

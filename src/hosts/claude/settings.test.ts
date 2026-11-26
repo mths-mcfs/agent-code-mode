@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { PreparedCall } from '../../core/types.js';
 import { makeContext } from '../../testing/index.js';
 import { ClaudeHostAdapter } from './adapter.js';
-import { findClaudeAncestor, findClaudeFromSelf, parseClaudeFlags, processTableReader, splitWindowsCommandLine, windowsPowerShellInvocation, windowsProcessTable, type ProcessInfo } from './parent-args.js';
+import { findClaudeAncestor, findClaudeFromSelf, macProcess, parseClaudeFlags, processTableReader, splitWindowsCommandLine, windowsPowerShellInvocation, windowsProcessTable, type ProcessInfo } from './parent-args.js';
 
 interface Layout {
   readonly base: string;
@@ -28,7 +28,7 @@ async function layout(files: Record<string, unknown>, trusted = true): Promise<L
   return l;
 }
 
-function adapterFor(l: Layout, argv?: readonly string[], parent?: { readonly cwd?: string; readonly lossy?: boolean }): ClaudeHostAdapter {
+function adapterFor(l: Layout, argv?: readonly string[], parent?: { readonly cwd?: string }): ClaudeHostAdapter {
   return new ClaudeHostAdapter({
     env: {},
     home: l.home,
@@ -132,7 +132,7 @@ describe('settings sources', () => {
 });
 
 describe('settings boundaries', () => {
-  const policyOf = async (l: Layout, argv: readonly string[] = [], parent: { readonly cwd?: string; readonly lossy?: boolean } = {}) => {
+  const policyOf = async (l: Layout, argv: readonly string[] = [], parent: { readonly cwd?: string } = {}) => {
     const [adapter, ctx] = [adapterFor(l, argv, parent), makeContext(l.project, { host: 'claude' })];
     return { adapter, ctx, policy: await adapter.loadPolicy(ctx) };
   };
@@ -193,26 +193,6 @@ describe('settings boundaries', () => {
     if ('error' in allowed) throw new Error(allowed.error);
     expect(allowed.payload.preHooks.map((h) => h.origin)).toEqual(['plugin guard@m']);
     expect(allowed.payload.preHooks[0]?.unsupported).toEqual(process.platform === 'win32' ? expect.stringMatching(/not supported on Windows/) : undefined);
-  });
-
-  it('drops grants and refuses restrictions read from a joined command line', async () => {
-    const l = await layout({});
-    const granted = await policyOf(l, ['--add-dir', '/extra', '--allowedTools', 'Bash', '--permission-mode', 'bypassPermissions'], { lossy: true });
-    if ('error' in granted.policy) throw new Error(granted.policy.error);
-    expect(granted.policy.payload.workingDirs).not.toContain('/extra');
-    expect(granted.policy.payload.mode).toBe('default');
-    expect(granted.policy.payload.rules.allow).toEqual([]);
-    expect((await policyOf(l, ['--disallowedTools', 'Bash'], { lossy: true })).policy).toHaveProperty('error');
-    expect((await policyOf(l, ['--add-dir', 'a', '--', '--settings', 'x.json'], { lossy: true })).policy).toHaveProperty('error');
-    expect((await policyOf(l, ['--permission-mode', 'plan', '--permission-mode', 'acceptEdits'], { lossy: true })).policy).toHaveProperty('error');
-    const plan = (await policyOf(l, ['--permission-mode', 'plan'], { lossy: true })).policy;
-    expect('error' in plan ? plan.error : plan.payload.mode).toBe(process.platform === 'win32' ? 'default' : 'plan');
-  });
-
-  it('a permissive mode read from a joined command line starts default, not the settings default', async () => {
-    const l = await layout({ 'home/.claude/settings.json': { permissions: { defaultMode: 'bypassPermissions' } } });
-    const { policy } = await policyOf(l, ['--permission-mode', 'acceptEdits'], { lossy: true });
-    expect('error' in policy ? policy.error : policy.payload.mode).toBe('default');
   });
 
   it('a rejected repository default mode starts default instead of falling through to the user default', async () => {
@@ -339,7 +319,7 @@ describe('parseClaudeFlags', () => {
 });
 
 describe('scopes and launches the policy cannot see', () => {
-  const errorOf = async (l: Layout, argv?: readonly string[], parent?: { readonly cwd?: string; readonly lossy?: boolean }): Promise<string> => {
+  const errorOf = async (l: Layout, argv?: readonly string[], parent?: { readonly cwd?: string }): Promise<string> => {
     const policy = await adapterFor(l, argv, parent).loadPolicy(makeContext(l.project, { host: 'claude' }));
     return 'error' in policy ? policy.error : '';
   };
@@ -405,12 +385,11 @@ describe('scopes and launches the policy cannot see', () => {
     expect(await errorOf(l, ['--add-dir', path.join(l.base, 'extra')])).toMatch(/extra.*SKILL\.md defines hooks/);
   });
 
-  it('refuses --agents with subagent hooks or that cannot be read, also from a joined command line', async () => {
+  it('refuses --agents with subagent hooks or that cannot be read', async () => {
     const l = await layout({});
     expect(await errorOf(l, ['--agents', JSON.stringify({ checker: { description: 'x', prompt: 'y' } })])).toBe('');
     expect(await errorOf(l, ['--agents', JSON.stringify({ checker: { description: 'x', prompt: 'y', hooks: {} } })])).toMatch(/--agents/);
     expect(await errorOf(l, ['--agents', '{not json'])).toMatch(/--agents/);
-    expect(await errorOf(l, ['--agents', '{}'], { lossy: true })).toMatch(/--agents/);
   });
 
   it('refuses the policy when the Claude process chain cannot be read', async () => {
@@ -511,4 +490,31 @@ describe('Windows launch flags', () => {
       child.kill();
     }
   }, 60_000);
+});
+
+describe('macOS launch flags', () => {
+  it.runIf(process.platform === 'darwin')('reads the exact argv and cwd of a real parent process from the kernel', async () => {
+    const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'acm-mac-')));
+    const cli = path.join(dir, 'claude-code', 'cli.js');
+    const cwd = path.join(dir, 'start "here" now');
+    await mkdir(path.dirname(cli), { recursive: true });
+    await mkdir(cwd);
+    await writeFile(cli, 'setTimeout(() => {}, 60_000);\n');
+    const settings = '{"permissions": {"deny": ["Read(./two words.txt)"]}}';
+    const args = ['--disallowedTools', 'Bash(rm:*)', '--settings', settings, '--add-dir', '/dir with space/', '--permission-mode', 'plan', '-p', '', 'say "hi" it\'s'];
+    const child = spawn(process.execPath, [cli, ...args], { cwd, stdio: 'ignore' });
+    try {
+      await new Promise((resolve) => child.once('spawn', resolve));
+      const found = await findClaudeAncestor(child.pid ?? 0, macProcess);
+      expect(found?.argv.slice(2)).toEqual(args);
+      expect(found?.cwd).toBe(cwd);
+      expect(parseClaudeFlags(found?.argv ?? [])).toMatchObject({ disallowedTools: ['Bash(rm:*)'], settings: [settings], addDirs: ['/dir with space/'], permissionMode: 'plan' });
+    } finally {
+      child.kill();
+    }
+  });
+
+  it.runIf(process.platform === 'darwin')('refuses a process of another user, so its launch flags cannot be ruled out', async () => {
+    await expect(macProcess(1)).rejects.toThrow(/process 1 cannot be read on macOS.*cannot be ruled out/);
+  });
 });
