@@ -30,7 +30,7 @@ import {
   type HookOutcome,
   type NativeCall,
 } from './hooks.js';
-import { conservativeFlags, parentReaderFor, parseClaudeFlags, type ClaudeCliFlags, type ParentArgsReader } from './parent-args.js';
+import { parentReaderFor, parseClaudeFlags, type ClaudeCliFlags, type ParentArgsReader } from './parent-args.js';
 import {
   bashSpecMayMatchDynamic,
   isInsidePath,
@@ -431,7 +431,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const stateDir = this.#opts.stateDir ?? stateDirPath(env, home);
     const managedDir = this.#opts.managedDir === null ? undefined : (this.#opts.managedDir ?? managedSettingsDir(platform));
     const parent = await (this.#opts.readParent ?? parentReaderFor(platform))();
-    const flags = parent === undefined ? NO_FLAGS : parent.lossy === true ? conservativeFlags(parent.argv) : parseClaudeFlags(parent.argv);
+    const flags = parent === undefined ? NO_FLAGS : parseClaudeFlags(parent.argv);
     const parentCwd = parent?.cwd !== undefined && path.isAbsolute(parent.cwd) ? parent.cwd : undefined;
     const liveCwd = ctx.sources['cwd'] === 'ctx-file' ? ctx.cwd : undefined;
     // Project and local settings and their rules anchor at the primary directory: Claude's process directory, else the

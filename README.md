@@ -107,6 +107,7 @@ Semantics:
 - **Crash recovery.** If the server dies mid-transaction, the next server restores the files from its journal: at start for its own cwd, and on the first run in each other workspace root. A file is restored only when it still is exactly the file the crashed run installed; anything else is reported as a conflict and left alone, and leftover temporary files are reported, never deleted. The run that follows gets the report in its warnings.
 - **Rollback covers files only.** Effects of `bash` (processes, network, files a command wrote) are never undone; the result warns when a rolled-back run had committed `bash` calls.
 - **Windows.** `read`, `write`, `edit`, `grep` and `glob` are refused for now, because Node offers no handle-relative file operations there (#28). `bash` needs Git Bash and has no OS sandbox.
+- **macOS.** The host's launch flags (and, under Codex, its `CODEX_HOME`) are read from the parent process through the kernel, by the system `/usr/bin/perl`. Apple ships that perl only for compatibility with legacy software and may remove it. If it is missing or is not a root-owned file, the flags cannot be ruled out and Code Mode refuses every call on macOS.
 - **Unknown clients.** When neither Claude Code nor Codex is detected and no `--host` is given, only `read`, `grep` and `glob` inside the workspace are allowed; every other call is denied with the reason.
 
 What the server cannot see, so it cannot apply:

@@ -1,8 +1,10 @@
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, decodeNulList, getPath, loadCodexConfig, mergeTables, nodeConfigIo, parseOverride, parseParentCommandLine, ruleFiles } from './config.js';
+import { readMacProcessSync } from '../../core/macos-process.js';
+import { codexSessionIo, ConfigError, decodeNulList, getPath, loadCodexConfig, mergeTables, nodeConfigIo, parseOverride, parseParentCommandLine, ruleFiles, type ParentRecord } from './config.js';
 import { discoverHooks } from './hooks.js';
 import { memoryIo } from './test-io.js';
 
@@ -234,10 +236,51 @@ describe('command line parsing', () => {
     expect(() => decodeNulList(raw, 'argv')).toThrow(ConfigError);
   });
 
+  it('keeps a leading byte order mark in a parent argument', () => {
+    expect(decodeNulList(Buffer.from('\uFEFFcodex\0\uFEFF\0'), 'argv')).toEqual(['\uFEFFcodex', '\uFEFF']);
+  });
+
+  it('reads the parent once for its argv and CODEX_HOME, and refuses when that read fails', () => {
+    const calls: boolean[] = [];
+    const parent: ParentRecord = { argv: ['/opt/codex', '-p', 'p1'], environ: Buffer.from('A=1\0CODEX_HOME=/c h\0') };
+    const io = codexSessionIo({}, 'darwin', (withEnv) => (calls.push(withEnv), parent));
+    expect([io.env['CODEX_HOME'], io.parentArgv(), calls]).toEqual(['/c h', parent.argv, [true]]);
+    const failing = (): ParentRecord => {
+      throw new Error('process 7 cannot be read on macOS: KERN_PROCARGS2: Invalid argument');
+    };
+    for (const platform of ['darwin', 'linux'] as const) {
+      expect(() => codexSessionIo({}, platform, failing)).toThrow(/cannot be read on macOS.*CODEX_HOME of the Codex session cannot be checked/);
+      const own = codexSessionIo({ CODEX_HOME: '/own' }, platform, failing);
+      expect(own.env['CODEX_HOME']).toBe('/own');
+      expect(() => own.parentArgv()).toThrow(/cannot be read on macOS.*-c, --profile/);
+    }
+    const windows: boolean[] = [];
+    const win = codexSessionIo({}, 'win32', (withEnv) => (windows.push(withEnv), failing()));
+    expect(() => win.parentArgv()).toThrow(ConfigError);
+    expect(windows).toEqual([false]);
+  });
+
   it('refuses a real parent command line that is not an exact Codex argv', () => {
     expect(() => nodeConfigIo().parentArgv()).toThrow(ConfigError);
     // The message names the real cause.
-    expect(() => nodeConfigIo().parentArgv()).toThrow(process.platform === 'linux' ? /is not the Codex CLI/ : /only Linux/);
+    expect(() => nodeConfigIo().parentArgv()).toThrow(process.platform === 'win32' ? /only Linux and macOS/ : /is not the Codex CLI/);
+  });
+
+  it.runIf(process.platform === 'darwin')('reads the exact argv of a real Codex-shaped process from the macOS kernel', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-codex-mac-'));
+    const script = path.join(dir, 'idle.js');
+    writeFileSync(script, 'setTimeout(() => {}, 60_000);\n');
+    const args = ['-c', 'sandbox_workspace_write.writable_roots=["/two words", "it\'s"]', '--profile', 'p1', '-s', 'workspace-write', '--add-dir', '/dir with space', '', '{"k": "v"}'];
+    const child = spawn(process.execPath, [script, ...args], { argv0: '/opt/codex dir/codex', stdio: 'ignore' });
+    try {
+      await new Promise((resolve) => child.once('spawn', resolve));
+      const argv = readMacProcessSync(child.pid ?? 0).argv;
+      expect(argv).toEqual(['/opt/codex dir/codex', script, ...args]);
+      expect(parseParentCommandLine(argv)).toMatchObject({ profile: 'p1', sandboxMode: 'workspace-write', addDirs: ['/dir with space'], overrides: [['sandbox_workspace_write.writable_roots', ['/two words', "it's"]]] });
+    } finally {
+      child.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.runIf(posix)('lists only regular rule files', () => {
