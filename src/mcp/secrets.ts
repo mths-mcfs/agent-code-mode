@@ -1,22 +1,27 @@
 /** Values of a server's config that may be credentials, and their removal from what this server returns or logs. */
 
-const SECRET_FLAG = /(token|key|secret|passw|auth|credential|bearer)/i;
-const MIN_SECRET_CHARS = 4;
+const SECRET_NAME = /(token|key|secret|passw|auth|credential|bearer|cookie|session)/i;
+/** Below this, a value under a plain name is ordinary output (`1`, `json`, a port), not a credential. */
+const MIN_PLAIN_SECRET_CHARS = 8;
 export const REDACTED = '<redacted>';
 
 /**
- * The config-declared env values, the arguments `${VAR}` expansion produced,
- * and the value of every argument that a credential-like flag names
- * (`--token x`, `--api-key=x`).
+ * Values to redact: every value of an env key or flag whose name looks like
+ * a credential (`API_TOKEN`, `--api-key x`, `--token=x`), whatever its
+ * length; and the other config env values and `${VAR}`-expanded arguments
+ * of at least 8 characters.
  */
 export function configSecrets(env: Readonly<Record<string, string>>, args: readonly string[], expandedArgs: readonly string[] = []): string[] {
-  const out = [...Object.values(env), ...expandedArgs];
+  const named: string[] = [];
+  const plain: string[] = [...expandedArgs];
+  for (const [key, value] of Object.entries(env)) (SECRET_NAME.test(key) ? named : plain).push(value);
   args.forEach((arg, i) => {
     const eq = arg.indexOf('=');
-    if (arg.startsWith('-') && eq !== -1 && SECRET_FLAG.test(arg.slice(0, eq))) out.push(arg.slice(eq + 1));
-    else if (arg.startsWith('-') && SECRET_FLAG.test(arg) && args[i + 1] !== undefined) out.push(args[i + 1] ?? '');
+    if (arg.startsWith('-') && eq !== -1 && SECRET_NAME.test(arg.slice(0, eq))) named.push(arg.slice(eq + 1));
+    else if (arg.startsWith('-') && SECRET_NAME.test(arg) && args[i + 1] !== undefined) named.push(args[i + 1] ?? '');
   });
-  return [...new Set(out.filter((s) => s.length >= MIN_SECRET_CHARS))].sort((a, b) => b.length - a.length);
+  const all = [...named.filter((s) => s !== ''), ...plain.filter((s) => s.length >= MIN_PLAIN_SECRET_CHARS)];
+  return [...new Set(all)].sort((a, b) => b.length - a.length);
 }
 
 export function redact(text: string, secrets: readonly string[]): string {

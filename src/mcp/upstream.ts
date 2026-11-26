@@ -67,20 +67,24 @@ export class McpUpstreams implements McpRuntime {
   start(specs: Promise<readonly McpServerSpec[]>): void {
     this.#started = specs.then(
       (list) => {
+        const starts: Promise<unknown>[] = [];
         for (const spec of list) {
           const key = specKey(spec);
           if (this.#closed || this.#connections.has(key) || this.#connections.size >= MAX_SERVERS) continue;
           const pending = this.#start(spec);
           pending.catch(() => undefined);
           this.#connections.set(key, pending);
+          starts.push(pending);
         }
+        // Each start is bounded by its startup timeout; a server that fails it stays refused for the session.
+        return Promise.allSettled(starts).then(() => undefined);
       },
       () => undefined,
     );
   }
 
-  /** Settles once the session's servers are spawned (not yet initialized). */
-  spawned(): Promise<void> {
+  /** Settles once every server of the session has initialized and listed its tools, or failed to within its startup timeout. */
+  ready(): Promise<void> {
     return this.#started;
   }
 
@@ -111,7 +115,7 @@ export class McpUpstreams implements McpRuntime {
       }
       throw new ToolError('tool-error', `${what} failed: ${upstreamText(errorMessage(err), spec)}`);
     }
-    return shapeResult(redactDeep(raw, spec.secrets), this.#opts.maxResultChars ?? MCP_RESULT_MAX_CHARS, this.#opts.overflow, what);
+    return shapeResult(raw, this.#opts.maxResultChars ?? MCP_RESULT_MAX_CHARS, this.#opts.overflow, what, spec.secrets);
   }
 
   /** Ends every server process: stdin closed, then SIGTERM, then SIGKILL. */
@@ -225,15 +229,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * present, else the joined text of the content blocks, plus `isError`. Past
  * `maxChars` of JSON the result is cut and the whole kept in `overflow`.
  */
-export function shapeResult(raw: unknown, maxChars: number, overflow: OverflowSink | undefined, what: string): McpResult {
+export function shapeResult(raw: unknown, maxChars: number, overflow: OverflowSink | undefined, what: string, secrets: readonly string[] = []): McpResult {
   const parsed = CallResult.safeParse(raw);
   if (!parsed.success) throw new ToolError('tool-error', `${what} returned a result that is not a valid tools/call result: ${formatIssues(parsed.error)}`);
   const { content, structuredContent, isError = false } = parsed.data;
   if (structuredContent !== undefined && !isPlainObject(structuredContent)) throw new ToolError('tool-error', `${what} returned a structuredContent that is not an object`);
   if (content === undefined && structuredContent === undefined) throw new ToolError('tool-error', `${what} returned a result with neither content nor structuredContent`);
-  const whole: McpResult = structuredContent !== undefined ? { isError, structuredContent } : { isError, text: (content ?? []).map(blockText).join('\n') };
+  // Redacted after the envelope is validated, and only in tool data: the text and structuredContent, never protocol fields.
+  const whole: McpResult =
+    structuredContent !== undefined ? { isError, structuredContent: redactDeep(structuredContent, secrets) } : { isError, text: redact((content ?? []).map(blockText).join('\n'), secrets) };
   if (JSON.stringify(whole).length <= maxChars) return whole;
-  const full = structuredContent !== undefined ? JSON.stringify(structuredContent) : (whole.text ?? '');
+  const full = whole.structuredContent !== undefined ? JSON.stringify(whole.structuredContent) : (whole.text ?? '');
   const id = overflow?.put(full);
   const cut = (head: string): McpResult =>
     id !== undefined

@@ -12,8 +12,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   switch (msg.method) {
     case 'initialize':
       if (process.env.FIXTURE_NO_INIT) return;
+      if (process.env.FIXTURE_INIT_DELAY) {
+        setTimeout(() => reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1.0.0' } }), Number(process.env.FIXTURE_INIT_DELAY));
+        return;
+      }
       return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1.0.0' } });
     case 'tools/list':
+      log({ event: 'listed' });
       return reply({ tools });
     case 'tools/call': {
       const { name, arguments: args } = msg.params;

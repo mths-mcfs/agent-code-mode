@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -283,6 +283,39 @@ describe('MCP server and the session\'s upstream servers', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(top.seen.map((l) => l.map((s) => s.name))).toEqual([['srv']]);
     expect(nested.seen).toEqual([]);
+  });
+
+  it('runs no script before a slow server has initialized, so a script cannot change a file it still loads', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-ready-'));
+    const log = path.join(dir, 'log.jsonl');
+    const upstreams = new McpUpstreams();
+    const spec: McpServerSpec = {
+      name: 'slow',
+      command: process.execPath,
+      args: [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'fixtures', 'upstream-server.mjs')],
+      env: { PATH: process.env['PATH'] ?? '', FIXTURE_LOG: log, FIXTURE_INIT_DELAY: '500' },
+      cwd: dir,
+      startupTimeoutMs: 10_000,
+      origin: 'test',
+      autostart: true,
+      secrets: [],
+    };
+    upstreams.start(Promise.resolve([spec]));
+    const adapter = new StaticHostAdapter();
+    const factory: RuntimeFactory = (host) => ({ host, contextProvider: new GenericContextProvider(), adapter, tools: new MemoryToolRuntime({ root: '/ws' }), sandbox: new FakeSandbox(), maxTimeoutMs: 10_000 });
+    const server = createMcpServer({ version: '0', env: {}, serverCwd: '/ws', stateDir: '/nonexistent-state', recoverJournals: false, createRuntime: factory, upstreams });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => {
+      await client.close();
+      await server.close();
+      await upstreams.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    await client.callTool({ name: 'run', arguments: { code: JSON.stringify([{ log: 'ran' }]) } });
+    expect(readFileSync(log, 'utf8')).toContain('"listed"');
   });
 
   it('runs no script before the session\'s upstream servers are spawned', async () => {

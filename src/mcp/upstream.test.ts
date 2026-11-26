@@ -130,6 +130,23 @@ describe('McpUpstreams', () => {
     expect(alive(pid)).toBe(false);
   });
 
+  it('is ready only once every server has initialized and listed its tools, or failed to within its startup timeout', async () => {
+    const slow = setup({ FIXTURE_INIT_DELAY: '400' });
+    await slow.pool.ready();
+    expect(slow.events().map((e) => e.event)).toContain('listed');
+    const stuck = setup({ FIXTURE_NO_INIT: '1' }, { startupTimeoutMs: 300 });
+    const t0 = Date.now();
+    await stuck.pool.ready();
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    expect((await failure(stuck.pool.call(stuck.spec, effect('echo'), signal()))).message).toMatch(/could not be started/);
+  });
+
+  it('redacts only tool data, after the envelope is checked: a secret equal to a protocol word changes nothing', async () => {
+    const { spec, pool } = setup({ API_KEY: 'text' });
+    expect(await pool.call(spec, effect('echo', { a: 1 }), signal())).toEqual({ isError: false, structuredContent: { echoed: { a: 1 } } });
+    expect(await pool.call(spec, effect('big'), signal())).toEqual({ isError: false, text: 'xxxxxxxxxx' });
+  });
+
   it('rejects an invalid result', async () => {
     const { spec, pool } = setup();
     expect((await failure(pool.call(spec, effect('bad'), signal()))).message).toMatch(/not a valid tools\/call result/);

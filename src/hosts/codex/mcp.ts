@@ -127,7 +127,7 @@ export function discoverCodexMcp(
       startupTimeoutMs: e.startup_timeout_ms ?? (e.startup_timeout_sec ?? CODEX_MCP_STARTUP_TIMEOUT_SEC) * 1000,
       toolTimeoutMs: (e.tool_timeout_sec ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
       origin,
-      secrets: configSecrets({ ...e.env, ...Object.fromEntries(passed.filter(([k]) => envVars.includes(k))) }, e.args ?? []),
+      secrets: configSecrets({ ...Object.fromEntries(passed.filter(([k]) => envVars.includes(k))), ...e.env }, e.args ?? []),
       autostart: false,
     });
     rules[name] = { ...(enabledTools === undefined ? {} : { enabledTools }), disabledTools, approval };

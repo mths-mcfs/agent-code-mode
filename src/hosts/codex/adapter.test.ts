@@ -634,3 +634,30 @@ describe('CodexContextProvider', () => {
     }
   });
 });
+
+describe('Codex requirements.toml mcp_servers allowlist, through the adapter', () => {
+  const tools = ['[mcp_servers.ok.tools.t]', 'approval_mode = "approve"', '[mcp_servers.blocked.tools.t]', 'approval_mode = "approve"'].join('\n');
+  const files = {
+    '/home/u/.codex/config.toml': `[mcp_servers.ok]\ncommand = "node"\n[mcp_servers.blocked]\ncommand = "other-server"\n${tools}\n`,
+    '/etc/codex/requirements.toml': '[mcp_servers.ok.identity]\ncommand = "node"\n[mcp_servers.blocked.identity]\ncommand = "node"\n',
+  };
+
+  it('leaves a server the allowlist does not admit out of the startable servers, and refuses calls to it unsent', async () => {
+    const a = adapter(files);
+    const policy = await policyOf(a);
+    expect(policy.mcp?.servers.map((s) => [s.name, s.autostart])).toEqual([['ok', true]]);
+    expect(policy.mcp?.notes.join(' ')).toContain('"blocked" (Codex config.toml): not allowed by mcp_servers of /etc/codex/requirements.toml');
+    const sent: string[] = [];
+    const mcp = { call: async (_s: unknown, e: { qualifiedName: string }) => (sent.push(e.qualifiedName), { isError: false }), close: async () => undefined };
+    const d = new Dispatcher({ adapter: a, tools: new MemoryToolRuntime({ root: ctx().cwd }), ctx: ctx(), policy, mcp });
+    const blocked = await d.dispatch('mcp', { server: 'blocked', tool: 't' });
+    expect(blocked.ok).toBe(false);
+    expect(await d.dispatch('mcp', { server: 'ok', tool: 't' })).toMatchObject({ ok: true });
+    expect(sent).toEqual(['mcp__ok__t']);
+  });
+
+  it('starts every approved server when requirements.toml has no mcp_servers', async () => {
+    const policy = await policyOf(adapter({ '/home/u/.codex/config.toml': files['/home/u/.codex/config.toml'] }));
+    expect(policy.mcp?.servers.map((s) => s.name)).toEqual(['ok', 'blocked']);
+  });
+});

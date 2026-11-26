@@ -281,8 +281,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
       if (extra.signal.aborted) return respond(errorResult('the run was cancelled before context resolution'));
       const ctx = await runtime.contextProvider.resolve({ env, meta, roots, serverCwd });
       const recovered = await recoverFor(ctx, runtime);
-      // No script runs before the session's servers are spawned, so none can change their files first.
-      await upstreams.spawned();
+      // No script runs before the session's servers have initialized, so none can change files they still load.
+      await upstreams.ready();
       const ran = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
         sandbox: runtime.sandbox,
         adapter: runtime.adapter,

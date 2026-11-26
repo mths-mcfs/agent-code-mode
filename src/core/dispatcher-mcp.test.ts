@@ -98,6 +98,15 @@ describe('Dispatcher mcpCall', () => {
     expect(rechecked.runtime.sent).toEqual([]);
   });
 
+  it('never shows a config secret in the call log, also after a hook rewrite adds one', async () => {
+    const plain = await setup();
+    await plain.dispatcher.dispatch('mcp', { server: 'srv', tool: 'list', args: { auth: 'secret' } });
+    expect(plain.dispatcher.calls[0]?.summary).toBe('mcp srv.list {"auth":"<redacted>"}');
+    const hooked = await setup({ hook: { kind: 'updatedArgs', args: { server: 'srv', tool: 'list', args: { auth: 'secret', page: 2 } } } });
+    await hooked.dispatcher.dispatch('mcp', { server: 'srv', tool: 'list' });
+    expect(hooked.dispatcher.calls[0]?.summary).toBe('mcp srv.list {"auth":"<redacted>","page":2}');
+  });
+
   it('runs mcpCalls one at a time with the mutations, in call order', async () => {
     const order: string[] = [];
     const runtime = new FakeRuntime(async (e) => {

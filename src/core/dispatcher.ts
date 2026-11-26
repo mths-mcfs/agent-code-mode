@@ -6,6 +6,7 @@ import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
 import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
 import { parseMcpCall, prepareMcpCall } from '../mcp/call.js';
+import { redact } from '../mcp/secrets.js';
 import type {
   BashContainment,
   BashResult,
@@ -422,6 +423,9 @@ export class Dispatcher<P = unknown> {
     if (first instanceof ToolError) return fail({ kind: 'error', error: first });
     let prepared = frozenCopy(first.prepared);
     const spec = first.spec;
+    // A call's input can carry a value of the server's config (a hook may add one): the log never shows it.
+    summary = redact(summary, spec.secrets);
+    this.#labels[slot] = { id: call.id, tool: label, summary };
 
     const staticFailure = this.#checkStatic(prepared, policy);
     if (staticFailure) return fail(staticFailure);
@@ -442,7 +446,7 @@ export class Dispatcher<P = unknown> {
       const recheck = this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);
       prepared = frozenCopy(second.prepared);
-      summary = summarizeMcp(reparsed);
+      summary = redact(summarizeMcp(reparsed), spec.secrets);
       this.#labels[slot] = { id: call.id, tool: label, summary };
     }
     if (this.#hasStopped()) return fail(this.#stoppedFailure());

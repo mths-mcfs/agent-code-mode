@@ -103,6 +103,12 @@ describe('Codex MCP servers', () => {
     expect(policy.servers.map((s) => s.name)).toEqual(['ok']);
   });
 
+  it('takes the secrets of the env the server gets: an explicit env value wins over env_vars', () => {
+    const { mcp: policy } = discoverCodexMcp({ mcp_servers: { a: { command: 'node', env_vars: ['TOKEN'], env: { TOKEN: 'explicit-1' } } } }, cwd, env, 'config.toml');
+    expect(policy.servers[0]?.env['TOKEN']).toBe('explicit-1');
+    expect(policy.servers[0]?.secrets).toEqual(['explicit-1']);
+  });
+
   it('collects the config values that may be credentials', () => {
     const { mcp: policy } = discoverCodexMcp({ mcp_servers: { a: { command: 'node', args: ['--api-key', 'k-12345', '--port', '8080', '--token=t-67890'], env: { SECRET: 's-abcde' }, env_vars: ['TOKEN'] } } }, cwd, env, 'config.toml');
     expect([...(policy.servers[0]?.secrets ?? [])].sort()).toEqual(['k-12345', 's-abcde', 't-67890', 'tok-1'].sort());
