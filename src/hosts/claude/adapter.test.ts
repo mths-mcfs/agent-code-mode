@@ -176,7 +176,6 @@ describe('Bash rules', () => {
   });
 });
 
-// Measured on Claude Code 2.1.332 (test/parity): these rows are where main was looser than the host.
 describe('Bash parity with the host', () => {
   it('auto-allows sandboxed commands only when autoAllowBashIfSandboxed is set to true, not when it is missing', async () => {
     const kinds: Record<string, string> = {};
@@ -199,7 +198,6 @@ describe('Bash parity with the host', () => {
     ['dd if=a.txt of=/tmp/acm-outside/x', 'a path after ='],
     ['sort -o/tmp/acm-outside/x a.txt', 'a path joined to an option'],
     ['cat *.txt', 'a glob'],
-    // Old #9 rows: destinations Claude Code's own parser misses still count.
     ['cp -t .git a.txt', 'a -t destination in a sensitive directory'],
     ['cp --target-directory=.git a.txt', 'a --target-directory= destination'],
     ['dd if=a.txt of=.git/x', 'a dd of= destination'],
@@ -653,11 +651,10 @@ describe.skipIf(!posix)('PostToolUse hooks', () => {
   it('cancelling the run through the dispatcher kills a running PostToolUse hook', async () => {
     const s0 = await setup();
     const pidFile = path.join(s0.base, 'post.pid');
-    const s = await setup({ user: { permissions: { allow: ['Bash(true)'] }, hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `echo $$ > "${pidFile}"; exec sleep 30` }] }] } }, mode: 'bypassPermissions' });
-    const tools = new MemoryToolRuntime({ root: '/workspace' });
-    const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: { ...s.ctx, cwd: '/workspace', roots: ['/workspace'] }, policy: s.policy });
-    // No operand: the dispatcher's /workspace lies outside the working directories the policy was loaded with.
-    const call = dispatcher.dispatch('bash', { command: 'true' });
+    const s = await setup({ user: { permissions: { allow: ['Bash(echo hi)'] }, hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `echo $$ > "${pidFile}"; exec sleep 30` }] }] } }, mode: 'bypassPermissions' });
+    const tools = new MemoryToolRuntime({ root: s.project });
+    const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: s.ctx, policy: s.policy });
+    const call = dispatcher.dispatch('bash', { command: 'echo hi' });
     for (let i = 0; i < 100 && !(await readFile(pidFile, 'utf8').catch(() => '')); i++) await new Promise((r) => setTimeout(r, 50));
     const pid = Number(await readFile(pidFile, 'utf8'));
     await dispatcher.stop('cancelled');
@@ -698,7 +695,7 @@ describe.skipIf(!posix)('with the dispatcher', () => {
   it('re-prepares and re-checks a hook rewrite; a rewrite into a denied command is refused', async () => {
     const s = await setup({
       user: {
-        permissions: { deny: ['Bash(rm:*)'], allow: ['Bash(true)'] },
+        permissions: { deny: ['Bash(rm:*)'], allow: ['Bash(echo hi)'], additionalDirectories: ['/workspace'] },
         hooks: {
           PreToolUse: [
             { matcher: 'Write', hooks: [exampleHook('update', JSON.stringify({ file_path: '/workspace/a.txt', content: 'sanitized' }))] },
@@ -714,7 +711,7 @@ describe.skipIf(!posix)('with the dispatcher', () => {
     const wrote = await dispatcher.dispatch('write', { path: 'a.txt', content: 'secret' });
     expect(wrote.ok).toBe(true);
     expect(tools.read('a.txt')).toBe('sanitized');
-    const ran = await dispatcher.dispatch('bash', { command: 'true' });
+    const ran = await dispatcher.dispatch('bash', { command: 'echo hi' });
     expect(ran).toMatchObject({ ok: false, error: { name: 'PermissionDenied', source: 'rule' } });
   });
 });

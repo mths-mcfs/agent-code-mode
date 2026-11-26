@@ -275,7 +275,6 @@ function exactRuleReach(paths: readonly string[], dirs: readonly string[]): stri
   return sensitive === undefined ? undefined : `${sensitive} is a sensitive file`;
 }
 
-/** Claude's sandbox contains the command and runs it without an allow rule. */
 function autoAllowsContained(policy: ClaudePolicy, containment: BashContainment): boolean {
   return containment.mode === 'sandbox' && policy.sandboxLimitsWrites && (policy.autoAllowSandboxedBash || policy.mode === 'bypassPermissions');
 }
@@ -789,7 +788,6 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
    */
   async #exactRuleRealReach(view: CallView, snapshot: PolicySnapshot<ClaudePolicy>): Promise<Decision | undefined> {
     const policy = snapshot.payload;
-    // Off the sandbox's auto-allow, only an exact rule approves a command.
     if (view.prepared.tool !== 'bash' || view.analysis === undefined || autoAllowsContained(policy, snapshot.bashContainment)) return undefined;
     const named = exactRuleWords(view.analysis);
     if ('why' in named) return undefined;
@@ -804,6 +802,20 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     if (reason === undefined) return undefined;
     const message = `an exact allow rule names this command, but through a symlink ${reason}`;
     return policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${message}` } : { kind: 'ask', reason: message };
+  }
+
+  /**
+   * The dispatcher re-checks a hook's rewrite with `checkStatic`, which does
+   * no I/O: the symlink check of an exact rule's command runs here instead,
+   * on a rewrite the static rules allow (one they refuse keeps that refusal).
+   */
+  async #symlinkReachOfStaticallyAllowedRewrite(prepared: PreparedCallOf<'bash'>, command: string, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Promise<Decision | undefined> {
+    const rewritten: PreparedCall = { ...prepared, args: { ...prepared.args, command }, effect: { ...prepared.effect, command } };
+    const view = this.#view(rewritten, ctx, snapshot.payload);
+    if (this.#decide(view, snapshot).kind !== 'allow') return undefined;
+    const reached = await this.#exactRuleRealReach(view, snapshot);
+    if (reached === undefined || reached.kind === 'deny') return reached;
+    return { kind: 'ask', reason: `hook rewrite: ${reached.reason}` };
   }
 
   async authorize(prepared: PreparedCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<Decision> {
@@ -839,15 +851,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         if (combined.updatedInput === undefined) return { kind: 'allow', ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
         const mapped = mapUpdatedInput(prepared, combined.updatedInput);
         if ('error' in mapped) return { kind: 'deny', source: 'hook', reason: mapped.error };
-        // The dispatcher re-checks a rewrite statically; the symlink check needs I/O, so it runs here.
-        if (prepared.tool === 'bash' && 'command' in mapped.args && typeof mapped.args.command === 'string') {
-          const command = mapped.args.command;
-          const rewritten: PreparedCall = { ...prepared, args: { ...prepared.args, command }, effect: { ...prepared.effect, command } };
-          const view2 = this.#view(rewritten, ctx, policy);
-          // A rewrite the static rules refuse is left to the dispatcher's re-check, so a deny rule keeps its deny.
-          const again = this.#decide(view2, snapshot).kind === 'allow' ? await this.#exactRuleRealReach(view2, snapshot) : undefined;
-          if (again) return again.kind === 'deny' ? again : { kind: 'ask', reason: `hook rewrite: ${again.reason}` };
-        }
+        const rewrite = prepared.tool === 'bash' && 'command' in mapped.args && typeof mapped.args.command === 'string' ? await this.#symlinkReachOfStaticallyAllowedRewrite(prepared, mapped.args.command, ctx, snapshot) : undefined;
+        if (rewrite) return rewrite;
         return { kind: 'allow', updatedArgs: mapped.args, ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
       }
     }

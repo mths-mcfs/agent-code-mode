@@ -159,7 +159,7 @@ export async function removeWorld(world: World): Promise<void> {
   await rm(world.base, { recursive: true, force: true });
 }
 
-/** The adapter's verdict on one command, as `run` would reach it: the static check, then the (empty) hooks. */
+/** The adapter's verdict on each command, as `run` would reach it: the static check, then the (empty) hooks. */
 export async function adapterVerdicts(setup: Setup): Promise<Verdict[]> {
   const world = await makeWorld(setup);
   try {
@@ -202,7 +202,6 @@ const SYSTEM_PROMPT = [
   'After the last command, reply with the single word DONE.',
 ].join(' ');
 
-/** One recorded host row: the command template, the host's verdict and, when the call did not run, the host's message. */
 export const HostRowSchema = z.object({
   setup: z.string(),
   command: z.string(),
@@ -345,7 +344,6 @@ export async function hostRun(setup: Setup, commands: readonly string[], maxTurn
   }
 }
 
-/** A recorded line, scrubbed of the world's paths and then of anything the benchmark sanitizer catches. */
 export function scrub(text: string, world: World | undefined): string {
   const unfilled = world === undefined ? text : unfill(text, world);
   return sanitize(unfilled, defaultSanitizeContext([]));

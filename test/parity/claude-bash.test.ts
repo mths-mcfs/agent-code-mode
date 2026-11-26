@@ -42,7 +42,6 @@ function writeFixture(header: HostHeader, rows: readonly HostRow[]): void {
   writeFileSync(FIXTURE, `${[header, ...sorted].map((v) => JSON.stringify(v)).join('\n')}\n`);
 }
 
-/** Runs the setups through the installed Claude Code and merges their rows into the fixture. */
 async function record(): Promise<void> {
   const version = claudeVersion();
   const old = readFixture();
