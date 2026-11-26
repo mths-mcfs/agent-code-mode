@@ -704,6 +704,26 @@ describe('policy snapshot', () => {
     );
   });
 
+  it('watches the policy files Claude reads, not the rest of the config directory', async () => {
+    const s = await setup();
+    const watched = s.policy.watchedPaths ?? [];
+    expect(watched).toEqual(
+      expect.arrayContaining([
+        path.join(s.project, '.claude', 'settings*.json'),
+        path.join(s.project, '.claude', 'hooks', '**'),
+        path.join(s.project, '.claude', 'agents', '**'),
+        path.join(s.project, '.mcp.json'),
+        path.join(s.home, '.claude', 'settings*.json'),
+        path.join(s.home, '.claude', 'plugins', 'installed_plugins.json'),
+        path.join(s.base, 'state', 'ctx', '**'),
+      ]),
+    );
+    expect(watched).not.toContain(path.join(s.home, '.claude', '**'));
+    expect(watched).not.toContain(path.join(s.home, '.claude.json'));
+    expect(watched).not.toContain(path.join(s.base, 'state', '**'));
+    expect(s.policy.isRoutineWatchedChange).toBeTypeOf('function');
+  });
+
   it('returns a sandbox containment when Claude sandboxing is enabled', async () => {
     const s = await setup({ user: { sandbox: { enabled: true, filesystem: { allowWrite: ['~/.cache/tool', '/opt/build'] } }, permissions: { additionalDirectories: ['/opt/extra'] } } });
     expect(s.policy.bashContainment).toEqual({

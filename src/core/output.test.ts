@@ -150,6 +150,33 @@ describe('formatRunResult', () => {
     expect(JSON.stringify(body['calls'])).toContain('rule: no');
   });
 
+  it('keeps protected changes when warnings are cut to a count and when only the last-resort envelope fits', () => {
+    const window = (n: number, paths: number) => ({ call: `c${n}`, command: `bash node w${n}.js`, when: 'during' as const, changed: Array.from({ length: paths }, (_, i) => `.claude/agents/${'a'.repeat(300)}${i}.md`) });
+    const warnings = Array.from({ length: 400 }, (_, i) => `warning ${i} ${'w'.repeat(200)}`);
+    const tight = json(formatRunResult({ ...base, result: 'x'.repeat(60_000), warnings, protectedChanges: [window(1, 1)] }, { overflow: new OverflowStore() }));
+    expect(tight['truncated']).toBe(true);
+    expect(tight['protectedChanges']).toEqual([window(1, 1)]);
+
+    const diff = Array.from({ length: 12 }, (_, i) => fileDiff(`${'d'.repeat(1_100)}/f${i}.ts`, 2)).join('');
+    const protectedChanges = Array.from({ length: 40 }, (_, i) => window(i + 1, 30));
+    const out = formatRunResult({ ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, diff, warnings, protectedChanges }, { overflow: new OverflowStore() });
+    expect(size(out)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    const kept = json(out)['protectedChanges'] as unknown[];
+    expect(kept[0]).toMatchObject({ call: 'c1', changed: expect.arrayContaining([expect.stringContaining('.claude/agents/')]) });
+    const shown = (kept[0] as { changed: string[] }).changed;
+    expect(shown.at(-1)).toBe(`…[${30 - (shown.length - 1)} more in readOverflow]`);
+    expect(kept.at(-1)).toBe(`…[${40 - (kept.length - 1)} more in readOverflow]`);
+
+    // A rollback report is never cut, so a long one leaves only the last-resort envelope.
+    const rolledBack = { restored: Array.from({ length: 2_000 }, (_, i) => `f${i}.txt`), skipped: [] };
+    const last = formatRunResult({ ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, rolledBack, protectedChanges }, { overflow: new OverflowStore() });
+    expect(size(last)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    const envelope = json(last);
+    expect(envelope).not.toHaveProperty('rolledBack');
+    expect(envelope['protectedChanges']).toHaveLength(4);
+    expect((envelope['protectedChanges'] as unknown[]).at(-1)).toBe('…[37 more in readOverflow]');
+  });
+
   it('names no overflow when nothing could keep the result', () => {
     const body = json(formatRunResult({ ...base, result: 'x'.repeat(100_000) }));
     expect(body).toMatchObject({ truncated: true });

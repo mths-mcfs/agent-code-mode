@@ -1,10 +1,10 @@
-import { chmod, mkdir, mkdtemp, readdir, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 import { CONTEXT_TTL_MS, runContextHook } from './context-hook.js';
 import type { HookContextRecord, HookContextStore } from '../../core/types.js';
-import { ClaudeContextProvider, FileHookContextStore, createClaudeContextProvider } from './context.js';
+import { ClaudeContextProvider, FileHookContextStore, createClaudeContextProvider, routineContextChange } from './context.js';
 
 const posix = process.platform !== 'win32';
 
@@ -198,5 +198,35 @@ describe('ClaudeContextProvider', () => {
     expect(outsideRoots.cwd).toBe('/ws');
     const throwing = await new ClaudeContextProvider({ lookup: () => Promise.reject(new Error('io')) }).resolve(input);
     expect(throwing.permissionMode).toBe('default');
+  });
+});
+
+describe.runIf(posix)('routineContextChange', () => {
+  it('passes what the hook and the server do routinely and reports the rest', async () => {
+    const base = await stateDir();
+    onTestFinished(() => rm(base, { recursive: true, force: true }));
+    const dir = path.join(base, 'ctx');
+    await mkdir(dir, { mode: 0o700 });
+    const routine = routineContextChange(dir);
+    const file = { type: 'file' as const, mode: 0o100600 };
+    const at = (name: string): string => path.join(dir, name);
+    await writeFile(at('toolu_1.json'), JSON.stringify({ tool_use_id: 'toolu_1', session_id: 's' }));
+    await writeFile(at('toolu_2.json'), JSON.stringify({ tool_use_id: 'toolu_other', session_id: 's' }));
+    await writeFile(at('toolu_3.json'), 'not json');
+    const cases: [string, Parameters<typeof routine>[0], boolean][] = [
+      ['the directory created private', { path: dir, after: { type: 'dir', mode: 0o40700 } }, true],
+      ['the directory opened up', { path: dir, after: { type: 'dir', mode: 0o40755 } }, false],
+      ['a new well-formed record', { path: at('toolu_1.json'), after: file }, true],
+      ['a new record naming another id', { path: at('toolu_2.json'), after: file }, false],
+      ['a new malformed record', { path: at('toolu_3.json'), after: file }, false],
+      ['a new record others can read', { path: at('toolu_1.json'), after: { type: 'file', mode: 0o100644 } }, false],
+      ['a record rewritten', { path: at('toolu_1.json'), before: file, after: file }, false],
+      ['a record consumed', { path: at('toolu_1.json'), before: file }, true],
+      ['a hook temp file', { path: at('.toolu_1.0123456789ab.tmp'), after: file }, true],
+      ['a server claim', { path: at('.toolu_1.0123456789ab.claimed'), after: file }, true],
+      ['another file', { path: at('notes.txt'), after: file }, false],
+      ['a nested file', { path: path.join(dir, 'sub', 'toolu_1.json'), after: file }, false],
+    ];
+    for (const [label, change, expected] of cases) expect(await routine(change), label).toBe(expected);
   });
 });

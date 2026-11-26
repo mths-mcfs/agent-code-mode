@@ -5,7 +5,7 @@ import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter, type StaticHostAdapterOptions } from '../testing/static-host-adapter.js';
 import { TransactionFinalizeError } from './errors.js';
 import { resolveTimeoutMs, runScript, toRunRequest } from './run.js';
-import type { Sandbox } from './types.js';
+import type { PolicyLoadError, PolicySnapshot, Sandbox, SessionContext, WatchedSnapshot } from './types.js';
 
 function deps(adapterOpts: StaticHostAdapterOptions = {}, files: Record<string, string> = {}, sandbox: Sandbox = new FakeSandbox()) {
   return {
@@ -514,5 +514,40 @@ describe('runScript', () => {
     };
     const result = await runScript({ code: 'x', transaction: false, timeoutMs: 5_000 }, { ...deps(), sandbox });
     expect(result.error).toMatchObject({ kind: 'error', message: 'spawn failed' });
+  });
+});
+
+describe('runScript protected-path watch', () => {
+  class WatchingAdapter extends StaticHostAdapter {
+    override async loadPolicy(ctx: SessionContext): Promise<PolicySnapshot<null> | PolicyLoadError> {
+      const p = await super.loadPolicy(ctx);
+      return 'error' in p ? p : { ...p, watchedPaths: ['/ws/.claude/settings*.json'] };
+    }
+  }
+  class Snap implements WatchedSnapshot {
+    constructor(readonly files: ReadonlyMap<string, string>) {}
+    async changedSince(earlier: WatchedSnapshot): Promise<string[]> {
+      const before = (earlier as Snap).files;
+      return [...new Set([...before.keys(), ...this.files.keys()])].filter((p) => before.get(p) !== this.files.get(p));
+    }
+  }
+
+  it('reports a change made after the last bash call, found by the end-of-run check', async () => {
+    const files = new Map([['/ws/.claude/settings.json', '{}']]);
+    let taken = 0;
+    const tools = Object.assign(new MemoryToolRuntime({ root: '/ws' }), {
+      async snapshotWatched(): Promise<WatchedSnapshot> {
+        const snap = new Snap(new Map(files));
+        // Right after the snapshot that closes the bash call: a change no bash window saw yet.
+        if (++taken === 2) files.set('/ws/.claude/settings.json', '{"x":1}');
+        return snap;
+      },
+    });
+    const result = await runScript(
+      { code: script([{ tool: 'bash', args: { command: 'true' } }, { tool: 'read', args: { path: 'a.txt' } }]), transaction: false, timeoutMs: 5_000 },
+      { ...deps(), adapter: new WatchingAdapter(), tools },
+    );
+    expect(taken).toBe(3);
+    expect(result.protectedChanges).toEqual([{ call: 'c1', command: 'bash true', when: 'after', changed: ['.claude/settings.json'] }]);
   });
 });
