@@ -214,7 +214,10 @@ export class BashAnalyzer {
     // Outside POSIX mode, bash also expands an unquoted `~` after the `=` or a `:` of an argument written as an
     // assignment (`a+=~`, `dd if=~/x`): only known at run time.
     const assignment = word.parts[0]?.type === 'Lit' && /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/.test(word.parts[0].value);
-    if (assignment && word.parts.some((p) => p.type === 'Lit' && hasUnescaped(p.value, '~'))) return { value: undefined, raw, glob, assignment: true };
+    if (assignment && word.parts.some((p) => p.type === 'Lit' && hasUnescaped(p.value, '~'))) {
+      // Still an assignment to `env` only when the tilde is all that is unknown: `$X` in `FOO=a~$X` word-splits.
+      return value === undefined ? { value, raw, glob } : { value: undefined, raw, glob, assignment: true };
+    }
     // Bash expands a leading `~` only when it is unquoted: `~` alone or `~/` is home; other prefixes are unknown here.
     let tilde: Operand['tilde'];
     if (value?.startsWith('~')) {

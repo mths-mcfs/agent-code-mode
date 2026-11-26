@@ -143,9 +143,12 @@ describe.runIf(posix && BASH_SANDBOX_AVAILABLE)('an env assignment with a run-ti
     server = await claudeServer(lab, {}, { mode: 'default' });
     expect(await attempt(server, 'env FOO=a~b printf ok')).toBe('RAN:ok');
     expect(await attempt(server, 'env FOO=$(id) printf ok')).toMatch(/^PermissionDenied:/);
+    // Bash word-splits `$X` in an env argument, so with X='y rm -rf /' env would run rm: not an assignment.
+    expect(await attempt(server, 'env FOO=a~$X printf ok')).toMatch(/^PermissionDenied:/);
     await server.close();
     server = await claudeServer(lab, { permissions: { deny: ['Bash(printf ok)'] } }, { mode: 'default' });
     expect(await attempt(server, 'env FOO=a~b printf ok')).toMatch(/^PermissionDenied:denied:denied by deny rule/);
+    expect(await attempt(server, 'env FOO=a~$X printf ok')).toMatch(/^PermissionDenied:/);
   });
 });
 
