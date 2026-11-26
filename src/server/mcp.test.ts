@@ -7,7 +7,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Sandbox, SessionContext } from '../core/types.js';
+import type { McpServerSpec, Sandbox, SessionContext } from '../core/types.js';
+import { McpUpstreams } from '../mcp/upstream.js';
 import { FakeSandbox } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter } from '../testing/static-host-adapter.js';
@@ -259,6 +260,32 @@ async function connectReal(opts: { serverCwd: string; stateDir: string; roots?: 
   });
   return client;
 }
+
+describe('MCP server and the session\'s upstream servers', () => {
+  it('runs no script before the session\'s upstream servers are spawned', async () => {
+    const upstreams = new McpUpstreams();
+    let release: (specs: readonly McpServerSpec[]) => void = () => undefined;
+    upstreams.start(new Promise((resolve) => (release = resolve)));
+    const sandbox = new FakeSandbox();
+    const adapter = new StaticHostAdapter();
+    const factory: RuntimeFactory = (host) => ({ host, contextProvider: new GenericContextProvider(), adapter, tools: new MemoryToolRuntime({ root: '/ws' }), sandbox, maxTimeoutMs: 10_000 });
+    const server = createMcpServer({ version: '0', env: {}, serverCwd: '/ws', stateDir: '/nonexistent-state', recoverJournals: false, createRuntime: factory, upstreams });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => {
+      await client.close();
+      await server.close();
+    });
+    let done = false;
+    const pending = client.callTool({ name: 'run', arguments: { code: JSON.stringify([{ log: 'ran' }]) } }).then((r) => ((done = true), r));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(done).toBe(false);
+    release([]);
+    expect(JSON.stringify((await pending).content)).toContain('ran');
+  });
+});
 
 describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
   let base: string;

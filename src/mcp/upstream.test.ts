@@ -6,6 +6,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { ToolError } from '../core/errors.js';
 import { OverflowStore } from '../core/overflow.js';
 import type { McpEffect, McpServerSpec } from '../core/types.js';
+import { configSecrets } from './secrets.js';
 import { McpUpstreams, shapeResult } from './upstream.js';
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'upstream-server.mjs');
@@ -30,6 +31,7 @@ function setup(env: Record<string, string> = {}, opts: { startupTimeoutMs?: numb
     startupTimeoutMs: opts.startupTimeoutMs ?? 10_000,
     origin: 'test config',
     autostart: true,
+    secrets: configSecrets(env, []),
   };
   const pool = new McpUpstreams({ ...(opts.overflow ? { overflow: opts.overflow } : {}), ...(opts.maxResultChars ? { maxResultChars: opts.maxResultChars } : {}) });
   pools.push(pool);
@@ -96,6 +98,36 @@ describe('McpUpstreams', () => {
     const err = await failure(pool.call(spec, effect('echo'), signal()));
     expect(err.message).toMatch(/could not be started: did not start and initialize within 300 ms/);
     expect(err.message).not.toContain('do-not-show');
+  });
+
+  it('removes the config\'s secrets from results and error text, and bounds that text', async () => {
+    const { spec, pool } = setup({ FIXTURE_SECRET: 'tok-marker-91' });
+    const r = await pool.call(spec, effect('leak'), signal());
+    expect(JSON.stringify(r)).not.toContain('tok-marker-91');
+    expect(r.structuredContent).toEqual({ '<redacted>': '<redacted>' });
+    const err = await failure(pool.call(spec, effect('leakerr'), signal()));
+    expect(err.message).not.toContain('tok-marker-91');
+    expect(err.message).toContain('bad token <redacted>');
+    expect(err.message.length).toBeLessThan(2_200);
+  });
+
+  it('refuses a server whose process exited while idle, without starting it again', async () => {
+    const { spec, pool, events } = setup();
+    await pool.call(spec, effect('echo'), signal());
+    process.kill(events()[0]?.pid ?? 0, 'SIGKILL');
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await failure(pool.call(spec, effect('echo'), signal()))).message).toMatch(/no longer running/);
+    expect(events().filter((e) => e.event === 'start')).toHaveLength(1);
+  });
+
+  it('killAll also kills a process still starting', async () => {
+    const { pool, events } = setup({ FIXTURE_NO_INIT: '1' }, { startupTimeoutMs: 20_000 });
+    for (let i = 0; i < 50 && events().length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+    const pid = events()[0]?.pid ?? 0;
+    expect(alive(pid)).toBe(true);
+    pool.killAll();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(alive(pid)).toBe(false);
   });
 
   it('rejects an invalid result', async () => {

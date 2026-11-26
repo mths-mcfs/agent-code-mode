@@ -410,6 +410,20 @@ function describe(rule: Rule): string {
 }
 
 /**
+ * Whether some tool of `server` can pass the static rules in this mode
+ * without asking: only such a server starts with the session. A deny or ask
+ * rule that covers the whole server (`mcp__srv`, `mcp__srv__*`, `mcp__*`,
+ * `*`) leaves none.
+ */
+function mcpMayAllow(server: string, mode: PermissionMode, modeUnknown: boolean, rules: ClaudePolicy['rules']): boolean {
+  if (mode === 'plan' || modeUnknown) return false;
+  const wholeServer = (r: Rule): boolean => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || matchesToolName(r.tool, `mcp__${server}__`));
+  if ([...rules.deny, ...rules.ask].some(wholeServer)) return false;
+  if (mode === 'bypassPermissions') return true;
+  return rules.allow.some((r) => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || r.tool.startsWith(`mcp__${server}__`)));
+}
+
+/**
  * The static decision for an upstream tool, as Claude Code makes it: deny
  * rules, then plan mode (no MCP tool runs before the plan is approved), then
  * ask rules, then allow rules, then the mode: only bypassPermissions runs a
@@ -663,9 +677,12 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       };
     }
 
+    // The session's --mcp-config files hold server commands like .mcp.json does.
+    const mcpConfigFiles = flags.mcpConfigs.filter((v) => !v.trim().startsWith('{') && (path.isAbsolute(v) || parentCwd !== undefined)).map((v) => path.resolve(parentCwd ?? projectRoot, v));
     const lexicalProtected = [
       ...new Set([
-        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
+        ...mcpConfigFiles,
+        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd, ...(parentCwd === undefined ? [] : [parentCwd])].flatMap((root) => [
           path.join(root, '.claude', 'settings*.json'),
           path.join(root, '.claude', 'hooks', '**'),
           path.join(root, '.claude', 'agents', '**'),
@@ -685,7 +702,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     // not the rest of the user config directory (transcripts, sessions, caches).
     const watchedPaths = [
       ...new Set([
-        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
+        ...mcpConfigFiles,
+        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd, ...(parentCwd === undefined ? [] : [parentCwd])].flatMap((root) => [
           path.join(root, '.claude', 'settings*.json'),
           path.join(root, '.claude', 'hooks', '**'),
           path.join(root, '.claude', 'agents', '**'),
@@ -725,7 +743,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
             docs,
             projectTrusted: settings.projectTrusted,
             env,
-            mayAllow: (server) => mode === 'bypassPermissions' || rules.allow.some((r) => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || r.tool.startsWith(`mcp__${server}__`))),
+            mayAllow: (server) => mcpMayAllow(server, mode, modeUnknown, rules),
           });
 
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));

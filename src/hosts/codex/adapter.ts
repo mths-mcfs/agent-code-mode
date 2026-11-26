@@ -191,7 +191,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       path.join(config.projectRoot, '.mcp.json'),
     ]);
 
-    const { mcp, rules: mcpRules } = discoverCodexMcp(config.merged, config.cwd, io.env, 'Codex config.toml');
+    const allowlist = config.requirements?.mcpServers;
+    const { mcp, rules: mcpRules } = discoverCodexMcp(config.merged, config.cwd, io.env, 'Codex config.toml', allowlist === undefined ? undefined : { file: config.requirements?.file ?? 'requirements.toml', servers: allowlist });
 
     return {
       host: 'codex',

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { formatIssues } from '../../core/schemas.js';
 import type { Decision, McpPolicy, McpServerSpec, PreparedMcpCall } from '../../core/types.js';
 import { mcpNameProblem, shownName } from '../../mcp/names.js';
+import { configSecrets } from '../../mcp/secrets.js';
 import { getPath, isTable, type ApprovalPolicy, type TomlTable } from './config.js';
 
 /**
@@ -21,8 +22,12 @@ export const CODEX_MCP_TOOL_TIMEOUT_SEC = 60;
 /** Variables Codex passes from its own environment to every stdio server. */
 const DEFAULT_ENV_VARS =
   process.platform === 'win32'
-    ? ['PATH', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'SYSTEMDRIVE', 'USERNAME', 'USERDOMAIN', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'POWERSHELL', 'PWSH']
+    ? ['PATH', 'PATHEXT', 'SHELL', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'USERNAME', 'USERDOMAIN', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'TMPDIR', 'POWERSHELL', 'PWSH']
     : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'USER', '__CF_USER_TEXT_ENCODING', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ'];
+/** Certificate variables Codex passes too when set, as absolute paths (Codex 0.169 `CUSTOM_CA_ENV_KEYS`). */
+const CA_ENV_VARS = ['CODEX_CA_CERTIFICATE', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS', 'GIT_SSL_CAINFO', 'CARGO_HTTP_CAINFO', 'PIP_CERT', 'BUNDLE_SSL_CA_CERT', 'npm_config_cafile', 'NPM_CONFIG_CAFILE'];
+/** Codex strips its own credentials from a server's environment; an entry that sets one is left out rather than guessed at. */
+const CODEX_OWN = /^(CODEX_|OPENAI_|NODE_REPL_AUTH_TOKEN$)/i;
 
 const Seconds = z.number().positive();
 const StdioEntry = z.strictObject({
@@ -53,6 +58,7 @@ export function discoverCodexMcp(
   cwd: string,
   env: Readonly<Record<string, string | undefined>>,
   origin: string,
+  allowlist?: { readonly file: string; readonly servers: TomlTable },
 ): { mcp: McpPolicy; rules: Readonly<Record<string, CodexMcpRules>> } {
   const notes: string[] = [];
   const servers: McpServerSpec[] = [];
@@ -80,16 +86,31 @@ export function discoverCodexMcp(
       continue;
     }
     const e = parsed.data;
+    if (allowlist !== undefined && !allowedByRequirements(allowlist.servers[name], e.command)) {
+      notes.push(`${where}: not allowed by mcp_servers of ${allowlist.file}`);
+      continue;
+    }
     const envVars = e.env_vars ?? [];
     const missing = envVars.find((v) => env[v] === undefined);
     if (missing !== undefined) {
       notes.push(`${where}: env_vars names ${missing}, which this server's environment does not have`);
       continue;
     }
-    const passed = [...DEFAULT_ENV_VARS, ...envVars].flatMap((k) => {
-      const v = env[k];
-      return v === undefined ? [] : [[k, v] as const];
-    });
+    const reserved = [...envVars, ...Object.keys(e.env ?? {})].find((k) => CODEX_OWN.test(k));
+    if (reserved !== undefined) {
+      notes.push(`${where}: sets ${reserved}, a variable Codex keeps out of server environments`);
+      continue;
+    }
+    const passed = [
+      ...[...DEFAULT_ENV_VARS, ...envVars].flatMap((k) => {
+        const v = env[k];
+        return v === undefined ? [] : [[k, v] as const];
+      }),
+      ...CA_ENV_VARS.flatMap((k) => {
+        const v = env[k];
+        return v === undefined || v === '' ? [] : [[k, path.resolve(cwd, v)] as const];
+      }),
+    ];
     const approval = Object.fromEntries(Object.entries(e.tools ?? {}).flatMap(([tool, t]) => (t.approval_mode === undefined ? [] : [[tool, t.approval_mode] as const])));
     const { enabled_tools: enabledTools, disabled_tools: disabledTools = [] } = e;
     servers.push({
@@ -101,11 +122,23 @@ export function discoverCodexMcp(
       startupTimeoutMs: e.startup_timeout_ms ?? (e.startup_timeout_sec ?? CODEX_MCP_STARTUP_TIMEOUT_SEC) * 1000,
       toolTimeoutMs: (e.tool_timeout_sec ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
       origin,
+      secrets: configSecrets({ ...e.env, ...Object.fromEntries(passed.filter(([k]) => envVars.includes(k))) }, e.args ?? []),
       autostart: Object.entries(approval).some(([tool, mode]) => mode === 'approve' && !disabledTools.includes(tool) && (enabledTools === undefined || enabledTools.includes(tool))),
     });
     rules[name] = { ...(enabledTools === undefined ? {} : { enabledTools }), disabledTools, approval };
   }
   return { mcp: { servers, notes }, rules };
+}
+
+/**
+ * Codex starts a server the requirements list only when its entry there names
+ * it by identity: `identity.command` equal to the configured command. The
+ * command and URL matcher forms are not evaluated, so they allow nothing here.
+ */
+function allowedByRequirements(requirement: unknown, command: string): boolean {
+  if (!isTable(requirement) || Object.keys(requirement).join() !== 'identity') return false;
+  const identity = requirement['identity'];
+  return isTable(identity) && Object.keys(identity).join() === 'command' && identity['command'] === command;
 }
 
 export function codexMcpDecision(prepared: PreparedMcpCall, rules: Readonly<Record<string, CodexMcpRules>>, approvalPolicy: ApprovalPolicy): Decision {

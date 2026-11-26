@@ -442,6 +442,8 @@ export class Dispatcher<P = unknown> {
       const recheck = this.#checkStatic(second.prepared, policy);
       if (recheck) return fail(recheck);
       prepared = frozenCopy(second.prepared);
+      summary = summarizeMcp(reparsed);
+      this.#labels[slot] = { id: call.id, tool: label, summary };
     }
     if (this.#hasStopped()) return fail(this.#stoppedFailure());
     return this.#commitMcp(slot, prepared, spec, label, summary, policy, started);

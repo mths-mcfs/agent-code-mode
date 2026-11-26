@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { errorMessage } from '../../core/errors.js';
 import type { McpPolicy, McpServerSpec } from '../../core/types.js';
 import { mcpNameProblem, shownName } from '../../mcp/names.js';
+import { configSecrets } from '../../mcp/secrets.js';
 import type { ClaudeCliFlags } from './parent-args.js';
 import type { SettingsDoc } from './settings.js';
 
@@ -20,7 +21,7 @@ import type { SettingsDoc } from './settings.js';
 export const CLAUDE_MCP_STARTUP_TIMEOUT_MS = 30_000;
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
-const RESTRICTING_KEYS = ['allowedMcpServers', 'deniedMcpServers'] as const;
+const RESTRICTING_KEYS = ['allowedMcpServers', 'deniedMcpServers', 'strictPluginOnlyCustomization'] as const;
 
 const Entry = z.strictObject({
   type: z.literal('stdio').optional(),
@@ -105,18 +106,21 @@ function toSpec(name: string, c: Candidate, input: ClaudeMcpInput): McpServerSpe
   try {
     const own = Object.fromEntries(Object.entries(parsed.data.env ?? {}).map(([k, v]) => [k, expand(v)]));
     const inherited = Object.fromEntries(Object.entries(input.env).filter((e): e is [string, string] => e[1] !== undefined));
+    const rawArgs = parsed.data.args ?? [];
+    const args = rawArgs.map(expand);
     const timeout = Number(input.env['MCP_TIMEOUT']);
     const toolTimeout = Number(input.env['MCP_TOOL_TIMEOUT']);
     return {
       name,
       command: expand(parsed.data.command),
-      args: (parsed.data.args ?? []).map(expand),
+      args,
       env: { ...inherited, ...own },
       cwd: input.projectDir,
       startupTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : CLAUDE_MCP_STARTUP_TIMEOUT_MS,
       ...(Number.isFinite(toolTimeout) && toolTimeout > 0 ? { toolTimeoutMs: toolTimeout } : {}),
       origin: c.origin,
       autostart: input.mayAllow(name),
+      secrets: configSecrets(own, args, args.filter((a, i) => a !== rawArgs[i])),
     };
   } catch (err) {
     return `server ${shownName(name)} (${c.origin}): ${errorMessage(err)}`;
@@ -215,6 +219,8 @@ export async function discoverClaudeMcp(input: ClaudeMcpInput): Promise<McpPolic
     if (typeof spec === 'string') {
       notes.push(spec);
       left.add(name);
+      const kept = servers.findIndex((s) => s.name === name);
+      if (kept !== -1) servers.splice(kept, 1);
       continue;
     }
     const earlier = servers.findIndex((s) => s.name === name);

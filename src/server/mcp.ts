@@ -11,7 +11,7 @@ import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
 import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
-import type { HostKind, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
+import type { HostKind, McpServerSpec, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
 import { McpUpstreams } from '../mcp/upstream.js';
 import { recoverStaleJournals, type RecoveredJournal } from '../tools/journal.js';
 import { detectHost } from './context.js';
@@ -69,6 +69,9 @@ export interface McpServerOptions {
 }
 
 export const RUN_LOG_ENV = 'AGENT_CODE_MODE_LOG';
+
+/** Longest wait for the host policy that names the session's upstream MCP servers. */
+export const MCP_DISCOVERY_TIMEOUT_MS = 10_000;
 
 export function recoveryProtectedPaths(stateDir: string, env: Readonly<Record<string, string | undefined>>, home: string = os.homedir()): string[] {
   const configDirs = [env['CODEX_HOME'], env['CLAUDE_CONFIG_DIR']].filter((d): d is string => d !== undefined && path.isAbsolute(d));
@@ -230,14 +233,18 @@ export function createMcpServer(opts: McpServerOptions): Server {
   const upstreams = opts.upstreams ?? new McpUpstreams({ overflow, clientVersion: opts.version });
   const sessionHost = detectHost({ flag: opts.host, env, meta: undefined });
   if (sessionHost !== 'generic') {
-    upstreams.start(
-      (async () => {
-        const runtime = runtimeFor(sessionHost);
-        const policy = await runtime.adapter.loadPolicy(await runtime.contextProvider.resolve({ env, meta: undefined, roots: [], serverCwd }));
-        if ('error' in policy || policy.mcp === undefined || policy.mcp.unsupported !== undefined) return [];
-        return policy.mcp.servers.filter((s) => s.autostart);
-      })(),
-    );
+    const discover = async (): Promise<readonly McpServerSpec[]> => {
+      const runtime = runtimeFor(sessionHost);
+      const policy = await runtime.adapter.loadPolicy(await runtime.contextProvider.resolve({ env, meta: undefined, roots: [], serverCwd }));
+      if ('error' in policy || policy.mcp === undefined || policy.mcp.unsupported !== undefined) return [];
+      return policy.mcp.servers.filter((s) => s.autostart);
+    };
+    // Bounded: a policy that cannot be read in time starts no server, and every mcpCall is refused.
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<readonly McpServerSpec[]>((resolve) => {
+      timer = setTimeout(() => resolve([]), MCP_DISCOVERY_TIMEOUT_MS);
+    });
+    upstreams.start(Promise.race([discover().catch(() => []), late]).finally(() => clearTimeout(timer)));
   }
   server.onclose = () => {
     overflow.clear();
@@ -272,6 +279,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
       if (extra.signal.aborted) return respond(errorResult('the run was cancelled before context resolution'));
       const ctx = await runtime.contextProvider.resolve({ env, meta, roots, serverCwd });
       const recovered = await recoverFor(ctx, runtime);
+      // No script runs before the session's servers are spawned, so none can change their files first.
+      await upstreams.spawned();
       const ran = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
         sandbox: runtime.sandbox,
         adapter: runtime.adapter,

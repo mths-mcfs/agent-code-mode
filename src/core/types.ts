@@ -262,6 +262,8 @@ export interface McpServerSpec {
    * Codex): only such a server starts with the session.
    */
   readonly autostart: boolean;
+  /** Config values that may be credentials; removed from every error, result and log line about this server. */
+  readonly secrets: readonly string[];
 }
 
 /** The upstream servers a host session can reach. */

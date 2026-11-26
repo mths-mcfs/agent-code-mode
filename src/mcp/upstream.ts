@@ -5,12 +5,14 @@ import { ToolError, errorMessage } from '../core/errors.js';
 import { formatIssues } from '../core/schemas.js';
 import type { McpEffect, McpResult, McpRuntime, McpServerSpec } from '../core/types.js';
 import { shownName } from './names.js';
+import { redact, redactDeep } from './secrets.js';
 
 /** Largest result (characters of its JSON) handed back whole, as for bash output. */
 export const MCP_RESULT_MAX_CHARS = 1024 * 1024;
 const LIST_PAGES = 20;
 const MAX_LISTED_TOOLS = 2_000;
 const MAX_SERVERS = 32;
+const MAX_UPSTREAM_ERROR_CHARS = 2_000;
 
 export interface OverflowSink {
   put(text: string): string | undefined;
@@ -76,6 +78,11 @@ export class McpUpstreams implements McpRuntime {
     );
   }
 
+  /** Settles once the session's servers are spawned (not yet initialized). */
+  spawned(): Promise<void> {
+    return this.#started;
+  }
+
   async call(spec: McpServerSpec, effect: McpEffect, signal: AbortSignal, onSent?: () => void): Promise<McpResult> {
     const what = effect.qualifiedName;
     if (signal.aborted) throw new ToolError('cancelled', `the run was stopped; ${what} was not sent`);
@@ -101,9 +108,9 @@ export class McpUpstreams implements McpRuntime {
       if (conn.closed !== undefined || code === -32000) {
         throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} exited or closed its pipes during ${what}; its effect is unknown, and the server is not started again in this session`);
       }
-      throw new ToolError('tool-error', `${what} failed: ${errorMessage(err)}`);
+      throw new ToolError('tool-error', `${what} failed: ${upstreamText(errorMessage(err), spec)}`);
     }
-    return shapeResult(raw, this.#opts.maxResultChars ?? MCP_RESULT_MAX_CHARS, this.#opts.overflow, what);
+    return shapeResult(redactDeep(raw, spec.secrets), this.#opts.maxResultChars ?? MCP_RESULT_MAX_CHARS, this.#opts.overflow, what);
   }
 
   /** Ends every server process: stdin closed, then SIGTERM, then SIGKILL. */
@@ -153,9 +160,14 @@ export class McpUpstreams implements McpRuntime {
       return conn;
     } catch (err) {
       await client.close().catch(() => undefined);
-      throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} (${spec.origin}) could not be started: ${errorMessage(err)}`);
+      throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} (${spec.origin}) could not be started: ${upstreamText(errorMessage(err), spec)}`);
     }
   }
+}
+
+function upstreamText(text: string, spec: McpServerSpec): string {
+  const clean = redact(text, spec.secrets);
+  return clean.length <= MAX_UPSTREAM_ERROR_CHARS ? clean : `${clean.slice(0, MAX_UPSTREAM_ERROR_CHARS - 1)}…`;
 }
 
 function untilAborted<T>(pending: Promise<T>, signal: AbortSignal, message: string): Promise<T> {

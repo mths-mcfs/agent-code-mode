@@ -6,7 +6,7 @@ import { Dispatcher } from './dispatcher.js';
 import { ToolError } from './errors.js';
 import type { CallReply, McpEffect, McpPolicy, McpResult, McpRuntime, McpServerSpec } from './types.js';
 
-const spec: McpServerSpec = { name: 'srv', command: 'node', args: [], env: { TOKEN: 'secret' }, cwd: '/ws', startupTimeoutMs: 1_000, toolTimeoutMs: 5_000, origin: 'test', autostart: true };
+const spec: McpServerSpec = { name: 'srv', command: 'node', args: [], env: { TOKEN: 'secret' }, cwd: '/ws', startupTimeoutMs: 1_000, toolTimeoutMs: 5_000, origin: 'test', autostart: true, secrets: ['secret'] };
 const MCP: McpPolicy = { servers: [spec], notes: ['server "other" (test): only stdio servers are reachable from scripts'] };
 
 class FakeRuntime implements McpRuntime {
@@ -86,6 +86,7 @@ describe('Dispatcher mcpCall', () => {
     const ok = await setup(rewrite({ server: 'srv', tool: 'list', args: { page: 3 } }));
     expect(await ok.dispatcher.dispatch('mcp', { server: 'srv', tool: 'list', args: { page: 1 } })).toMatchObject({ ok: true });
     expect(ok.runtime.sent.map((e) => e.input)).toEqual([{ page: 3 }]);
+    expect(ok.dispatcher.calls[0]?.summary).toBe('mcp srv.list {"page":3}');
     expect(ok.adapter.staticChecked).toHaveLength(2);
 
     const other = await setup(rewrite({ server: 'srv', tool: 'delete', args: {} }));

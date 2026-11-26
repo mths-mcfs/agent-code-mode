@@ -59,7 +59,8 @@ async function load(o: Options = {}): Promise<{ adapter: ClaudeHostAdapter; poli
     sessionId: 's1',
     toolUseId: 'toolu_1',
     permissionMode: o.mode ?? 'default',
-    sources: o.mode === undefined ? { cwd: 'roots' } : { cwd: 'roots', permissionMode: 'ctx-file' },
+    // A live mode from the companion record: without one, Windows refuses every call (mode unknown).
+    sources: { cwd: 'roots', permissionMode: 'ctx-file' },
   });
   const policy = await adapter.loadPolicy(ctx);
   if ('error' in policy) throw new Error(policy.error);
@@ -144,6 +145,38 @@ describe('Claude MCP servers come from where Claude Code keeps them', () => {
     expect(autostart((await load({ argv, mode: 'bypassPermissions' })).policy)).toEqual({ a: true, b: true, c: true });
   });
 
+  it('starts no server in plan mode, under a deny or ask rule for the whole server, or with an unknown mode', async () => {
+    const argv = ['--mcp-config', JSON.stringify({ mcpServers: { a: server(), b: server(), c: server(), d: server() } })];
+    const autostart = (p: PolicySnapshot<ClaudePolicy>) => Object.fromEntries((p.mcp?.servers ?? []).map((s) => [s.name, s.autostart]));
+    const allow = ['mcp__a', 'mcp__b', 'mcp__c', 'mcp__d'];
+    expect(autostart((await load({ argv, mode: 'plan', local: { permissions: { allow } } })).policy)).toEqual({ a: false, b: false, c: false, d: false });
+    expect(autostart((await load({ argv, local: { permissions: { allow, deny: ['mcp__a', 'mcp__b__*', 'mcp__d__one'], ask: ['mcp__c'] } } })).policy)).toEqual({ a: false, b: false, c: false, d: true });
+    expect(autostart((await load({ argv, mode: 'bypassPermissions', local: { permissions: { deny: ['mcp__*'] } } })).policy)).toEqual({ a: false, b: false, c: false, d: false });
+  });
+
+  it('refuses every mcpCall under strictPluginOnlyCustomization', async () => {
+    const { policy } = await load({ user: { strictPluginOnlyCustomization: ['mcp'] }, userServers: { u: server() } });
+    expect(policy.mcp?.unsupported).toMatch(/strictPluginOnlyCustomization/);
+  });
+
+  it('refuses a name whose later definition is invalid, not only that definition', async () => {
+    const { policy } = await load({ argv: ['--mcp-config', JSON.stringify({ mcpServers: { a: server() } })], userServers: { a: { type: 'http', url: 'https://x' } } });
+    expect(names(policy)).toEqual([]);
+  });
+
+  it('protects and watches the session\'s --mcp-config files', async () => {
+    const { policy, project } = await load({ argv: ['--mcp-config', 'cfg/servers.json', '{"mcpServers":{}}'] });
+    const file = path.join(project, 'cfg', 'servers.json');
+    expect(policy.protectedPaths).toContain(file);
+    expect(policy.watchedPaths).toContain(file);
+  });
+
+  it('collects the config values that may be credentials: env, expanded arguments and credential flags', async () => {
+    const entry = { command: 'node', args: ['--token', 'tok-aaaa', '${KEY}', '--name', 'plain'], env: { API: 'api-bbbb' } };
+    const { policy } = await load({ env: { PATH: '/usr/bin', KEY: 'key-cccc' }, argv: ['--mcp-config', JSON.stringify({ mcpServers: { a: entry } })] });
+    expect([...(policy.mcp?.servers[0]?.secrets ?? [])].sort()).toEqual(['api-bbbb', 'key-cccc', 'tok-aaaa']);
+  });
+
   it('expands ${VAR} and ${VAR:-default} like Claude Code', () => {
     expect(expandVars('a${X}b${Y:-d}', { X: '1' })).toBe('a1bd');
     expect(expandVars('${Z}', {})).toEqual({ missing: 'Z' });
@@ -175,6 +208,12 @@ describe('Claude MCP permission rules', () => {
     expect((await decide({ local: { permissions }, ...(mode === undefined ? {} : { mode }) })).kind).toBe(kind);
   });
 
+  it('refuses the whole policy over an MCP rule with a parameter, from settings or --disallowedTools, so no call runs', async () => {
+    for (const o of [{ argv: ['--allowedTools', 'mcp__srv', '--disallowedTools', 'mcp__srv__tool(x)'] }, { local: { permissions: { allow: ['mcp__srv'], deny: ['mcp__srv__tool(x)'] } } }]) {
+      await expect(load(o)).rejects.toThrow(/is not a valid `Tool` or `Tool\(specifier\)` rule/);
+    }
+  });
+
   it('applies the parent --allowedTools and --disallowedTools', async () => {
     expect((await decide({ argv: ['--allowedTools', 'mcp__srv'] })).kind).toBe('allow');
     expect((await decide({ argv: ['--allowedTools', 'mcp__srv', '--disallowedTools', 'mcp__srv__tool'] })).kind).toBe('deny');
@@ -187,9 +226,14 @@ describe('Claude MCP permission rules', () => {
       const { adapter, policy, ctx } = await load(o);
       return adapter.authorize(mcp('srv', 'tool', { a: 1 }), ctx, policy, new AbortController().signal);
     };
+    expect(await authorize(withHook('Bash', hook('exit2')))).toEqual({ kind: 'allow' });
+    if (process.platform === 'win32') {
+      // Command hooks are refused on Windows (the hook shell cannot be selected), so a matching one denies the call.
+      expect(await authorize(withHook('mcp__srv__tool', hook('exit2')))).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+      return;
+    }
     expect(await authorize(withHook('mcp__srv__tool', hook('exit2')))).toMatchObject({ kind: 'deny', source: 'hook' });
     expect(await authorize(withHook('mcp__srv__.*', hook('deny')))).toMatchObject({ kind: 'deny' });
-    expect(await authorize(withHook('Bash', hook('exit2')))).toEqual({ kind: 'allow' });
     expect(await authorize(withHook('mcp__srv__tool', hook('update', '{"a":2}')))).toMatchObject({ kind: 'allow', updatedArgs: { server: 'srv', tool: 'tool', args: { a: 2 } } });
   });
 });
