@@ -240,7 +240,10 @@ function cutList<T>(list: readonly T[] | undefined, keep: number, where: string)
 
 function boundProtected(list: readonly ProtectedChange[], windows: number, paths: number, textMax: number, where: string): readonly unknown[] | undefined {
   if (list.length === 0) return undefined;
-  const kept = list.map((c) => clipStrings({ ...c, changed: cutList(c.changed, paths, where) ?? [] }, textMax));
+  const kept = list.map((c) => {
+    const clipped = clipStrings(c, textMax);
+    return { ...clipped, changed: cutList(clipped.changed, paths, where) ?? [] };
+  });
   return cutList(kept, windows, where);
 }
 

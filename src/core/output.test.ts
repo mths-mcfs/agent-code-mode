@@ -190,6 +190,19 @@ describe('formatRunResult', () => {
     const kept = json(out)['protectedChanges'] as { call: string; changed: string[] }[];
     expect(kept.slice(0, 3).map((c) => [c.call, c.changed.length])).toEqual([['c1', 5], ['c2', 5], ['c3', 5]]);
     expect(kept.at(-1)).toBe('…[1 more in readOverflow]');
+
+    const many = (n: number) => ({ ...escaped(n), changed: Array.from({ length: 30 }, (_, i) => `${'\u0001'.repeat(199)}${i}`) });
+    const cut = formatRunResult(
+      { ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, rolledBack, protectedChanges: [many(1), many(2), many(3), many(4), many(5), many(6)] },
+      { overflow: new OverflowStore() },
+    );
+    expect(size(cut)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    const windows = json(cut)['protectedChanges'] as { changed: string[] }[];
+    expect(windows.at(-1)).toBe('…[3 more in readOverflow]');
+    for (const w of windows.slice(0, 3)) {
+      expect(w.changed).toHaveLength(6);
+      expect(w.changed.at(-1)).toBe('…[25 more in readOverflow]');
+    }
   });
 
   it('names no overflow when nothing could keep the result', () => {
