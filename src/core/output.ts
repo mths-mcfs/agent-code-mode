@@ -85,6 +85,23 @@ export interface DiffStat {
  * the hunk header, so a removed line that starts with `--` is not taken for a
  * file header.
  */
+/** The `b/` name of `diff --git <a-name> <b-name>`, the header of an empty new file (it has no hunk). */
+function gitHeaderNewName(rest: string): string {
+  if (rest.endsWith('"')) {
+    const start = rest.lastIndexOf(' "b/');
+    if (start !== -1) return rest.slice(start + 1);
+  }
+  const half = (rest.length - 1) / 2;
+  if (Number.isInteger(half) && rest[half] === ' ' && rest.slice(2, half) === rest.slice(half + 3)) return rest.slice(half + 1);
+  const start = rest.lastIndexOf(' b/');
+  return start === -1 ? rest : rest.slice(start + 1);
+}
+
+function unquote(name: string): string {
+  if (!(name.startsWith('"') && name.endsWith('"') && name.length >= 2)) return name;
+  return name.slice(1, -1).replace(/\\(["\\])/g, '$1');
+}
+
 export function diffStat(diff: string): DiffStat {
   const counts = new Map<string, { added: number; removed: number }>();
   let current: { added: number; removed: number } | undefined;
@@ -99,10 +116,8 @@ export function diffStat(diff: string): DiffStat {
     } else if (line.startsWith('--- ')) {
       oldName = line.slice(4);
     } else if (line.startsWith('+++ ') || line.startsWith('diff --git ')) {
-      // An empty new file has no hunk, only `diff --git <a/name> <b/name>`; both halves have the same length.
-      const rest = line.startsWith('+++ ') ? line.slice(4) : line.slice(11);
-      const newName = line.startsWith('+++ ') ? rest : rest.slice((rest.length + 1) / 2);
-      const name = (newName === '/dev/null' ? oldName : newName).replace(/^"(.*)"$/, '$1').replace(/^[ab]\//, '');
+      const newName = line.startsWith('+++ ') ? line.slice(4) : gitHeaderNewName(line.slice(11));
+      const name = unquote(newName === '/dev/null' ? oldName : newName).replace(/^[ab]\//, '');
       current = counts.get(name) ?? { added: 0, removed: 0 };
       counts.set(name, current);
     } else {

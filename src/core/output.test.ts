@@ -152,6 +152,11 @@ describe('diffStat', () => {
     expect(diffStat(diff)).toEqual({ files: { 'x.md': '+0 -1', 'new.txt': '+1 -0' }, total: '2 files +1 -1' });
   });
 
+  it('takes the new name of a git header whose old and new names differ in length', () => {
+    expect(Object.keys(diffStat('diff --git a/x b/longer.txt\nnew file mode 100644\n').files)).toEqual(['longer.txt']);
+    expect(Object.keys(diffStat('diff --git "a/a b " "b/c d e "\nnew file mode 100644\n').files)).toEqual(['c d e ']);
+  });
+
   it('counts empty new files, binary files and quoted names', () => {
     const diff = [
       ...Array.from({ length: 50 }, (_, i) => unifiedDiff(`empty-file-${i}`, null, '')),

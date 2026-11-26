@@ -55,8 +55,6 @@ type Failure =
 
 const ABORTED: unique symbol = Symbol('aborted');
 
-const MAX_SUMMARY_CHARS = 160;
-
 /** How long `stop` waits for in-flight calls before giving up on them. */
 export const DEFAULT_SETTLE_GRACE_MS = 2_000;
 
@@ -68,8 +66,9 @@ function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
+// Summaries stay whole: the call log names every target, and only a response cut to its cap abbreviates them.
 function oneLine(s: string): string {
-  return clip(s, MAX_SUMMARY_CHARS).replace(/\s*\n\s*/g, ' ⏎ ');
+  return s.replace(/\s*\n\s*/g, ' ⏎ ');
 }
 
 function containmentEquals(a: BashContainment, b: BashContainment): boolean {
@@ -659,5 +658,5 @@ export function summarize(call: ToolCall, cwd: string): string {
       s = `glob ${call.args.pattern}${call.args.path ? ` in ${p(call.args.path)}` : ''}`;
       break;
   }
-  return clip(s, MAX_SUMMARY_CHARS);
+  return s;
 }

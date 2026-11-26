@@ -15,9 +15,9 @@ describe('OverflowStore', () => {
     const id = store.put(text) ?? '';
     const pages: string[] = [];
     for (let offset = 0; offset < text.length; ) {
-      const r = store.read({ id, offset, limit: 2 });
+      const r = store.read({ id, offset, limit: 1 });
       if (!r.ok || !('totalChars' in r.value)) throw new Error('expected a slice');
-      expect(r.value.text).not.toMatch(/[\uD800-\uDBFF]$/);
+      expect(r.value.text).not.toMatch(/[\uD800-\uDBFF]$|^[\uDC00-\uDFFF]/);
       pages.push(r.value.text);
       offset += r.value.text.length;
     }

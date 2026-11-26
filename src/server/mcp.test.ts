@@ -108,6 +108,16 @@ describe('MCP server', () => {
     expect(page).toMatchObject({ ok: true, result: { offset: 0, truncated: true } });
   });
 
+  it('keeps the whole target of every denied call, however long, for readOverflow', async () => {
+    const { client } = await connect({ sandbox: new QuickJsSandbox() });
+    const code = `for (let i = 0; i < 500; i++) { try { await bash({ command: 'rm f' + 'a'.repeat(170) + i }); } catch {} } return 1;`;
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code } }))) as { calls: { denied: { calls: string[] }[] }; overflow?: { id: string } };
+    const shown = first.calls.denied.flatMap((g) => g.calls).filter((c) => !c.startsWith('…'));
+    expect(new Set(shown).size).toBe(shown.length);
+    const back = `let t = ''; for (;;) { const s = await readOverflow(${JSON.stringify(first.overflow?.id ?? '')}, t.length); t += s.text; if (!s.truncated) break; } return new Set(JSON.parse(t).calls.map((c) => c.summary)).size;`;
+    expect(JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: back } })))).toMatchObject({ result: 500 });
+  });
+
   it('logs a readOverflow failure the script caught', async () => {
     const { client } = await connect({ sandbox: new QuickJsSandbox() });
     const body = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `try { await readOverflow('unknown'); } catch (e) { return e.name; }` } })));

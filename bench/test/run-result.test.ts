@@ -40,7 +40,12 @@ describe('runInnerCalls on the server response', () => {
     const denied: CallLogEntry[] = Array.from({ length: 60 }, (_, i) => ({ id: `c${i}`, tool: 'write', summary: `write src/protected-${i}.js`, decision: 'denied', reason: 'hook: protected file', durationMs: 1 }));
     const text = formatRunResult({ ...base, calls: denied }, { successCap: 2000 }).content.map((c) => c.text).join('');
     expect(text).toContain('"count":60');
-    expect(runInnerCalls(text)).toEqual({ total: 60, byTool: { write: 60 }, denials: ['write write src/protected-0.js: hook: protected file (60 calls)'] });
+    const read = runInnerCalls(text);
+    expect(read).toMatchObject({ total: 60, byTool: { write: 60 } });
+    const denials = read?.denials ?? [];
+    expect(denials[0]).toBe('write write src/protected-0.js: hook: protected file');
+    const more = Number(/\((\d+) more calls\)$/.exec(denials.at(-1) ?? '')?.[1] ?? 0);
+    expect(denials.filter((l) => !l.includes(' more calls)')).length + more).toBe(60);
   });
 
   it('is null for text that is not a run result', () => {
