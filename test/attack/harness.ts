@@ -28,9 +28,12 @@ export const RunOutputSchema = z.looseObject({
   result: z.unknown().optional(),
   error: z.looseObject({ name: z.string(), message: z.string(), kind: z.string() }).optional(),
   logs: z.array(z.string()).optional(),
+  // Above the response cap even a verbose run comes back as counts, with nothing listed per allowed call.
   calls: z
-    .array(z.union([z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() }), z.string()]))
-    .transform((xs) => xs.filter((x) => typeof x !== 'string'))
+    .union([
+      z.array(z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() })),
+      z.looseObject({ total: z.number() }).transform(() => null),
+    ])
     .optional(),
   changedFiles: z.array(z.string()).optional(),
   warnings: z.array(z.string()).optional(),
@@ -124,7 +127,7 @@ async function serve(runtime: Runtime, lab: Lab, meta: () => Promise<Record<stri
   return {
     async run(code, opts = {}) {
       const text = await call(
-        { code, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
+        { code, verbose: true, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
         opts.signal,
       );
       return RunOutputSchema.parse(JSON.parse(text));
@@ -217,5 +220,6 @@ export async function codexServer(
 }
 
 export function callAt(out: RunOutput, n: number): { decision: string; reason?: string | undefined } | undefined {
+  if (out.calls === null) throw new Error('calls came back as counts (the response passed its cap): assert on the result instead');
   return out.calls?.find((c) => c.id === `c${n}`);
 }

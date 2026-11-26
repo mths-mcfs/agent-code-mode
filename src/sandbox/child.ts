@@ -241,6 +241,9 @@ const SHIM = String.raw`(function (hostCall, hostLog, hostDone, maxResultChars, 
     edit: function edit(arg) { return invoke('edit', arg); },
     grep: function grep(arg) { return invoke('grep', arg); },
     glob: function glob(arg) { return invoke('glob', arg); },
+    readOverflow: function readOverflow(id, offset, limit) {
+      return invoke('readOverflow', id !== null && typeof id === 'object' ? id : { id: id, offset: offset, limit: limit });
+    },
   };
   var names = objectKeys(bindings);
   for (var b = 0; b < names.length; b++) define(names[b], bindings[names[b]]);

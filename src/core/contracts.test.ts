@@ -10,7 +10,7 @@ import { StaticHostAdapter } from '../testing/static-host-adapter.js';
 import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 import { NodeToolRuntime } from '../tools/runtime.js';
 import { Dispatcher } from './dispatcher.js';
-import type { CallReply, GlobResult, GrepResult, PolicySnapshot, PreparedCall, SessionContext, ToolCall } from './types.js';
+import type { CallReply, GlobResult, GrepResult, PolicySnapshot, PreparedCall, ScriptGrepResult, SessionContext, ToolCall } from './types.js';
 
 const posix = process.platform !== 'win32';
 
@@ -82,11 +82,11 @@ describe.skipIf(ROOTED_OPS_REFUSED)('PolicySnapshot.readFilter and additionalRoo
     const { ws, ctx } = workspace();
     const policy: PolicySnapshot<null> = { ...plain, readFilter: (p) => path.basename(p) !== '.env' && !p.endsWith('.secret') };
     const d = dispatcherFor(ctx, policy);
-    const grep = value<GrepResult>(await d.dispatch('grep', { pattern: 'token' }));
-    expect(grep.matches.map((m) => path.relative(ws, m.file))).toEqual([path.join('src', 'a.ts')]);
+    const grep = value<ScriptGrepResult>(await d.dispatch('grep', { pattern: 'token' }));
+    expect(grep.rows.map(([file]) => file)).toEqual(['src/a.ts']);
     expect(grep.filtered).toBe(2);
     const glob = value<GlobResult>(await d.dispatch('glob', { pattern: '**/*' }));
-    expect(glob.files.map((f) => path.relative(ws, f))).toEqual([path.join('src', 'a.ts')]);
+    expect(glob.files).toEqual(['src/a.ts']);
     expect(glob.filtered).toBe(2);
   });
 
@@ -123,8 +123,8 @@ describe.skipIf(ROOTED_OPS_REFUSED)('PolicySnapshot.readFilter and additionalRoo
 
   it('reports filtered 0 without a filter', async () => {
     const { ctx } = workspace();
-    const grep = value<GrepResult>(await dispatcherFor(ctx, plain).dispatch('grep', { pattern: 'token' }));
-    expect(grep.matches).toHaveLength(3);
+    const grep = value<ScriptGrepResult>(await dispatcherFor(ctx, plain).dispatch('grep', { pattern: 'token' }));
+    expect(grep.count).toBe(3);
     expect(grep.filtered).toBe(0);
   });
 
@@ -137,7 +137,7 @@ describe.skipIf(ROOTED_OPS_REFUSED)('PolicySnapshot.readFilter and additionalRoo
     const denied = await dispatcherFor(ctx, plain).dispatch('read', { path: path.join(extra, 'x.txt') });
     expect(denied.ok ? undefined : denied.error.code).toBe('outside-workspace');
     const d = dispatcherFor(ctx, { ...plain, additionalRoots: [extra] });
-    expect(value<{ content: string }>(await d.dispatch('read', { path: path.join(extra, 'x.txt') })).content).toBe('x');
+    expect(value<{ content: string }>(await d.dispatch('read', { path: path.join(extra, 'x.txt') })).content).toBe('x\n');
     const stillOut = await d.dispatch('read', { path: path.join(base, 'outside.txt') });
     expect(stillOut.ok ? undefined : stillOut.error.code).toBe('outside-workspace');
   });
@@ -171,11 +171,11 @@ describe.skipIf(ROOTED_OPS_REFUSED)('Claude policy wiring', () => {
     expect(policy.readFilter?.(path.join(project, '.env'))).toBe(false);
     expect(policy.readFilter?.(path.join(project, 'private', 'p.txt'))).toBe(false);
     expect(policy.readFilter?.(path.join(project, 'src', 'ok.txt'))).toBe(true);
-    const grep = value<GrepResult>(await d.dispatch('grep', { pattern: 'key' }));
-    expect(grep.matches.map((m) => path.relative(project, m.file))).toEqual([path.join('src', 'ok.txt')]);
+    const grep = value<ScriptGrepResult>(await d.dispatch('grep', { pattern: 'key' }));
+    expect(grep.rows.map(([file]) => file)).toEqual(['src/ok.txt']);
     expect(grep.filtered).toBe(2);
     const glob = value<GlobResult>(await d.dispatch('glob', { pattern: '**/*.txt' }));
-    expect(glob.files.map((f) => path.relative(project, f))).toEqual([path.join('src', 'ok.txt')]);
+    expect(glob.files).toEqual(['src/ok.txt']);
     expect(glob.filtered).toBe(1);
   });
 
@@ -185,7 +185,7 @@ describe.skipIf(ROOTED_OPS_REFUSED)('Claude policy wiring', () => {
     writeFileSync(path.join(extra, 'x.txt'), 'x\n');
     const { d, policy } = await claude({ permissions: { additionalDirectories: [extra] } });
     expect(policy.additionalRoots).toEqual([extra]);
-    expect(value<{ content: string }>(await d.dispatch('read', { path: path.join(extra, 'x.txt') })).content).toBe('x');
+    expect(value<{ content: string }>(await d.dispatch('read', { path: path.join(extra, 'x.txt') })).content).toBe('x\n');
   });
 
   it.runIf(posix)('matches deny rules against the path as written, not only the real path', async () => {

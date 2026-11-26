@@ -22,8 +22,11 @@ describe('the agent-code-mode arms run the server as the installer configures it
     expect(codexServer(bench)).toEqual(codexServer(codexServerBlock(true)));
   });
 
-  it('Claude arm B registers the installed server entry and companion hook', () => {
-    expect(z.looseObject({ mcpServers: z.record(z.string(), z.unknown()) }).parse(claudeMcpConfig('B', entry)).mcpServers).toEqual({ 'agent-code-mode': mcpJsonEntry(true) });
+  it('Claude arm C (hybrid) registers the installed server entry and companion hook', () => {
+    const servers = (arm: 'B' | 'C') => z.looseObject({ mcpServers: z.record(z.string(), z.unknown()) }).parse(claudeMcpConfig(arm, entry)).mcpServers;
+    const installed = mcpJsonEntry(true);
+    expect(servers('C')).toEqual({ 'agent-code-mode': installed });
+    expect(servers('B')).toEqual({ 'agent-code-mode': { ...installed, args: installed.args.filter((a) => a !== '--hybrid') } });
     const settings = claudeProjectSettings(TASKS.T8, generateFixture(), companionHookCommand(entry));
     const hooks = z.object({ hooks: z.object({ PreToolUse: z.array(z.unknown()) }) }).parse(settings).hooks.PreToolUse;
     expect(hooks).toContainEqual(companionHookEntry(true));

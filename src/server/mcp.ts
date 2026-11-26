@@ -6,6 +6,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { errorMessage } from '../core/errors.js';
 import { formatRunResult, type McpToolResponse } from '../core/output.js';
+import { OverflowStore } from '../core/overflow.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
@@ -17,23 +18,31 @@ import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 
 export const SERVER_NAME = 'agent-code-mode';
 
-export const SERVER_INSTRUCTIONS = `Prefer the run tool when a step needs several tool calls: batch many reads, searches, edits and commands into one script instead of calling tools one by one.
-The script is the body of an async JavaScript function; return a value to get it back. Globals (all async, all subject to your normal permission rules and hooks):
-  bash({command, cwd?, timeoutMs?}) -> {exitCode, signal, stdout, stderr, truncated, timedOut}
-  read({path, offset?, limit?}) -> {path, content, startLine, totalLines, truncated}
-  write({path, content}) -> {path, created, diff}
-  edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStrategy, diff}
-  grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {matches: [{file, line, text}], truncated, filtered}
-  glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
-  console.log/info/warn/error
-A denied call rejects with an Error named PermissionDenied; other failures reject with ToolError. Pass transaction: true to roll back file changes if the script fails or a call is denied (bash effects are never rolled back).
+/**
+ * Only the Codex search note: Claude Code puts server instructions in each
+ * session's own messages, so anything here is paid again per session, while
+ * the tool description sits in the prefix sessions share.
+ */
+export const SERVER_INSTRUCTIONS = CODEX_SEARCH_NOTE;
+
+export const RUN_DESCRIPTION = `Run a JavaScript script (the body of an async function; return a value) that calls these async globals. Each call goes through the host's permission rules and hooks; a denied call rejects with PermissionDenied, other failures with ToolError. Paths are relative to the working directory. QuickJS, no require/process/fs.
+bash({command, cwd?, timeoutMs?}) -> {exitCode, signal, stdout, stderr, truncated, timedOut}
+read({path, offset?, limit?}) -> {path, content (exact text), startLine, totalLines, truncated}
+write({path, content}) -> {path, created, diff}
+edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStrategy, diff}
+grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {columns: [file, line, text], rows, count, truncated, filtered}
+glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
+readOverflow(id, offset?, limit?) -> {text, offset, totalChars, truncated}: a page of the result JSON a response cut (its overflow.id)
+The response counts calls per tool and lists the denied and failed ones (verbose: true lists all). A large diff comes as diffStat. transaction: true rolls back file changes if the script fails.
 ${CODEX_SEARCH_NOTE}`;
+
+export const HYBRID_GUIDANCE =
+  'Native file and shell tools are also available: use them for a single read, edit or command; use run when a step needs 3+ file/shell calls, a loop over files, or filtering a large output.';
 
 export const RUN_TOOL: Tool = {
   name: 'run',
   title: 'Run a code-mode script',
-  description:
-    `Run a JavaScript script that calls bash, read, write, edit, grep and glob. Every call goes through the host permission rules and hooks. Returns the script result, logs, a call log, changed files and the diff. ${CODEX_SEARCH_NOTE}`,
+  description: RUN_DESCRIPTION,
   inputSchema: RUN_INPUT_JSON_SCHEMA,
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   _meta: { 'anthropic/alwaysLoad': true },
@@ -43,6 +52,7 @@ export interface McpServerOptions {
   readonly version: string;
   /** `--host` flag; skips detection. */
   readonly host?: HostKind;
+  readonly hybrid?: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly serverCwd?: string;
   readonly stateDir?: string;
@@ -206,10 +216,12 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return [...new Set(await Promise.all(reported))].filter((l): l is RecoveryLog => l !== undefined);
   };
 
+  const overflow = new OverflowStore();
   const server = new Server({ name: SERVER_NAME, version: opts.version }, {
     capabilities: { tools: {} },
     instructions: SERVER_INSTRUCTIONS,
   });
+  server.onclose = () => overflow.clear();
 
   const listRoots = async (signal: AbortSignal): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
@@ -221,13 +233,16 @@ export function createMcpServer(opts: McpServerOptions): Server {
     }
   };
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [RUN_TOOL] }));
+  const listed: Tool = opts.hybrid === true ? { ...RUN_TOOL, description: `${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}` } : RUN_TOOL;
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [listed] }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<McpToolResponse> => {
-    const respond = (result: RunResult): Promise<McpToolResponse> => formatRunResult(result, { stateDir });
+    let verbose = false;
+    const respond = (result: RunResult): McpToolResponse => formatRunResult(result, { overflow, verbose });
     if (request.params.name !== RUN_TOOL.name) return respond(errorResult(`unknown tool ${JSON.stringify(request.params.name)}`));
     const args = parseRunArgs(request.params.arguments);
     if (!args.ok) return respond(errorResult(`invalid run arguments: ${args.message}`));
+    verbose = args.value.verbose === true;
     try {
       const meta: unknown = request.params._meta;
       const host = detectHost({ flag: opts.host, env, meta });
@@ -243,11 +258,12 @@ export function createMcpServer(opts: McpServerOptions): Server {
         ctx,
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
+        overflow,
       });
       const warnings = recovered.flatMap(recoveryWarnings);
       const result = warnings.length === 0 ? ran : { ...ran, warnings: [...warnings, ...ran.warnings] };
       await appendRunLog(runLog, runLogLine(ctx, result, recovered));
-      return await respond(result);
+      return respond(result);
     } catch (err) {
       return respond(errorResult(`internal error: ${errorMessage(err)}`));
     }

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
+import { runInnerCalls } from './run-result.ts';
 
 export const CLAUDE_NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
 export const CLAUDE_RUN_TOOL = 'mcp__agent-code-mode__run';
@@ -34,16 +35,19 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   // Arm A: the native tools, allowed by rule. Arm B: no built-in tools at all (`--tools ""` removes them
   // without denying them: a CLI deny rule would also deny the same tool inside agent-code-mode, by
   // parity), and the same native names allowed by rule so the inner calls are allowed exactly as in A.
-  // Both arms see no other built-in tool (no Task, ToolSearch, web...), so they differ only in native
+  // Arm C (hybrid): the native tools of A and `run`, all allowed by rule; the model picks per call.
+  // No arm sees any other built-in tool (no Task, ToolSearch, web...), so they differ only in native
   // file/shell tools vs `run`.
   if (o.arm === 'A') args.push('--tools', CLAUDE_INNER_ALLOWED.join(','), '--allowedTools', CLAUDE_INNER_ALLOWED.join(','));
-  else args.push('--tools', '', '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
+  else if (o.arm === 'B') args.push('--tools', '', '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
+  else args.push('--tools', CLAUDE_INNER_ALLOWED.join(','), '--allowedTools', [CLAUDE_RUN_TOOL, ...CLAUDE_INNER_ALLOWED].join(','));
   return args;
 }
 
 export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
   if (arm === 'A') return { mcpServers: {} };
-  return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args: [serverEntry, 'serve', '--host', 'claude'] } } };
+  const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : [])];
+  return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
 }
 
 const UsageEvent = z.object({
@@ -71,6 +75,8 @@ const ToolUse = z.object({ type: z.literal('tool_use'), id: z.string(), name: z.
 const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.string(), content: z.unknown(), is_error: z.boolean().optional() }).passthrough();
 export const DENIAL_TEXT = /denied|blocked|hook|protected|not allowed|permission/i;
 const MessageEvent = z.object({ type: z.enum(['assistant', 'user']), message: z.object({ content: z.union([z.string(), z.array(ContentBlock)]) }).passthrough() }).passthrough();
+/** An assistant event with the request's usage. Claude streams one event per content block, all with the same message id. */
+const AssistantUsage = z.object({ type: z.literal('assistant'), message: z.object({ id: z.string().min(1), usage: z.object({ output_tokens: z.number() }).passthrough() }).passthrough() }).passthrough();
 const InitEvent = z.object({
   type: z.literal('system'),
   subtype: z.literal('init'),
@@ -90,10 +96,6 @@ export function claudeIsolationIssues(ctx: { agents: readonly string[]; plugins:
   if (ctx.memory) reasons.push('auto memory is on');
   return reasons;
 }
-
-const RunResultText = z.object({
-  calls: z.array(z.object({ tool: z.string(), decision: z.string(), summary: z.string().optional(), reason: z.string().optional() }).passthrough()),
-}).passthrough();
 
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -136,7 +138,8 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   let availableTools: string[] | null = null;
   let hostContext: { agents: string[]; plugins: string[]; memory: boolean } | null = null;
   let result: z.infer<typeof ResultEvent> | undefined;
-  const evidence: Record<string, number[]> = { result: [], toolUse: [], innerCalls: [] };
+  const evidence: Record<string, number[]> = { result: [], toolUse: [], innerCalls: [], requests: [] };
+  const requestIds = new Set<string>();
 
   lines.forEach((line, i) => {
     if (line.trim() === '') return;
@@ -159,6 +162,11 @@ export function parseClaudeTranscript(text: string): ParsedRun {
       evidence['result'] = [i + 1];
       return;
     }
+    const req = AssistantUsage.safeParse(event);
+    if (req.success && !requestIds.has(req.data.message.id)) {
+      requestIds.add(req.data.message.id);
+      evidence['requests']?.push(i + 1);
+    }
     const msg = MessageEvent.safeParse(event);
     if (!msg.success || typeof msg.data.message.content === 'string') return;
     for (const block of msg.data.message.content) {
@@ -180,14 +188,12 @@ export function parseClaudeTranscript(text: string): ParsedRun {
       // A result can be replayed in the stream (e.g. on resume); count each tool_use_id once.
       if (tr.success && runToolUses.has(tr.data.tool_use_id) && !seenToolResult.has(tr.data.tool_use_id)) {
         seenToolResult.add(tr.data.tool_use_id);
-        const parsed = RunResultText.safeParse(parseJson(textOf(tr.data.content)));
-        if (parsed.success) {
+        const innerCalls = runInnerCalls(textOf(tr.data.content));
+        if (innerCalls !== null) {
           innerSeen = true;
-          for (const call of parsed.data.calls) {
-            innerTotal += 1;
-            inner[call.tool] = (inner[call.tool] ?? 0) + 1;
-            if (call.decision === 'denied') denials.push(`${call.tool} ${call.summary ?? ''}: ${call.reason ?? 'denied'}`.slice(0, 500));
-          }
+          innerTotal += innerCalls.total;
+          for (const [tool, n] of Object.entries(innerCalls.byTool)) inner[tool] = (inner[tool] ?? 0) + n;
+          denials.push(...innerCalls.denials);
           evidence['innerCalls']?.push(i + 1);
         }
       }
@@ -198,6 +204,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
   const r: z.infer<typeof ResultEvent> = result;
   return {
     turns: r.num_turns,
+    requests: requestIds.size === 0 ? null : requestIds.size,
     hostDurationMs: r.duration_ms,
     usage: {
       input: r.usage.input_tokens,

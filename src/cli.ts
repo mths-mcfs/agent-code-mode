@@ -10,7 +10,9 @@ import { createMcpServer } from './server/mcp.js';
 const USAGE = `Usage: agent-code-mode <command>
 
 Commands:
-  serve [--host claude|codex|generic]   Run the MCP stdio server
+  serve [--host claude|codex|generic] [--hybrid]
+                                        Run the MCP stdio server; --hybrid tells the model when to use run
+                                        and when a native tool is enough (for hosts that keep their own tools)
   hook                                  Claude Code companion hook (reads the hook input on stdin, prints nothing)
   install --host claude|codex [--scope user|project] [--write] [--local]
                                         Print, and with --write apply, the host configuration
@@ -30,13 +32,26 @@ function readVersion(): string {
 
 const HostSchema = z.enum(['claude', 'codex', 'generic']);
 
-function parseHost(args: readonly string[]): HostKind | undefined | Error {
-  const [arg, valueAfterFlag] = args;
-  if (arg === undefined) return undefined;
-  const value = arg === '--host' && args.length === 2 ? valueAfterFlag :
-    args.length === 1 && arg.startsWith('--host=') ? arg.slice('--host='.length) : undefined;
-  const parsed = HostSchema.safeParse(value);
-  return parsed.success ? parsed.data : new Error('serve accepts only one --host option: claude, codex or generic');
+interface ServeArgs {
+  readonly host?: HostKind;
+  readonly hybrid: boolean;
+}
+
+function parseServeArgs(args: readonly string[]): ServeArgs | Error {
+  let host: HostKind | undefined;
+  let hybrid = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? '';
+    if (arg === '--hybrid' && !hybrid) {
+      hybrid = true;
+      continue;
+    }
+    const value = arg === '--host' ? args[++i] : arg.startsWith('--host=') ? arg.slice('--host='.length) : undefined;
+    const parsed = HostSchema.safeParse(value);
+    if (host !== undefined || !parsed.success) return new Error('serve accepts one --host option (claude, codex or generic) and --hybrid');
+    host = parsed.data;
+  }
+  return { hybrid, ...(host ? { host } : {}) };
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -51,12 +66,12 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   switch (command) {
     case 'serve': {
-      const host = parseHost(rest);
-      if (host instanceof Error) {
-        process.stderr.write(`${host.message}\n`);
+      const serve = parseServeArgs(rest);
+      if (serve instanceof Error) {
+        process.stderr.write(`${serve.message}\n`);
         return 2;
       }
-      const server = createMcpServer({ version: readVersion(), ...(host ? { host } : {}) });
+      const server = createMcpServer({ version: readVersion(), ...serve });
       await server.connect(new StdioServerTransport());
       return -1; // keep running until stdin closes
     }

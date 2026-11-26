@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { BashContainment } from '../../src/core/types.js';
@@ -56,6 +56,8 @@ export interface NodeTestRun {
   readonly pass: number;
   readonly fail: number;
   readonly output: string;
+  /** Failing test names from the whole output: the tail in `output` loses the first ones when many fail. */
+  readonly failed: readonly string[];
 }
 
 /** The tests' environment: none of the operator's beyond PATH, and temp files in `tmp`. */
@@ -73,20 +75,20 @@ interface TestProcess {
  * Off Windows: `node --test` in the containment the runtime gives `bash` (src/tools/bash.ts), with writes
  * only inside the workspace and the temp dir, no network, and the whole process tree killed on timeout.
  */
-async function runContained(cwd: string, tmp: string, timeoutMs: number): Promise<TestProcess> {
+async function runContained(cwd: string, tmp: string, timeoutMs: number, files: readonly string[]): Promise<TestProcess> {
   // Loaded on first use, once the hook above lets plain Node resolve src/'s `.js` imports to its sources.
   const { findBash, runBash, shellQuote } = await import('../../src/tools/bash.js');
   const vars = Object.entries(testEnv('', tmp)).map(([k, v]) => (k === 'PATH' ? 'PATH="$PATH"' : `${k}=${shellQuote(v)}`));
-  const command = `exec env -i ${vars.join(' ')} ${shellQuote(process.execPath)} --test --test-reporter=spec`;
+  const command = `exec env -i ${vars.join(' ')} ${shellQuote(process.execPath)} --test --test-reporter=spec${files.map((f) => ` ${shellQuote(f)}`).join('')}`;
   const containment: BashContainment = { mode: 'sandbox', readOnly: false, writableRoots: [cwd, tmp], network: false };
   const r = await runBash({ command, shell: { path: findBash() ?? 'bash', args: ['-c'] }, cwd, timeoutMs, containment }, new AbortController().signal);
   return { exitCode: r.exitCode, output: `${r.stdout}${r.stderr}`, timedOut: r.timedOut };
 }
 
 /** Windows has no such sandbox: the tests run unconfined, with the same environment, and their tree is killed on timeout. */
-function runUnconfined(cwd: string, tmp: string, timeoutMs: number): Promise<TestProcess> {
+function runUnconfined(cwd: string, tmp: string, timeoutMs: number, files: readonly string[]): Promise<TestProcess> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: testEnv(process.env['PATH'] ?? '', tmp) });
+    const child = spawn(process.execPath, ['--test', '--test-reporter=spec', ...files], { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: testEnv(process.env['PATH'] ?? '', tmp) });
     let output = '';
     let timedOut = false;
     child.stdout.on('data', (d: Buffer) => (output += d.toString('utf8')));
@@ -107,18 +109,18 @@ function runUnconfined(cwd: string, tmp: string, timeoutMs: number): Promise<Tes
 }
 
 /** Runs `node --test` on the agent's code in the workspace. A run that cannot start, containment that is unavailable included, is a failed run. */
-export async function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
+export async function runNodeTests(workspace: string, timeoutMs = 60_000, files: readonly string[] = []): Promise<NodeTestRun> {
   let tmp: string | undefined;
   try {
     const cwd = realpathSync.native(workspace);
     tmp = realpathSync.native(await mkdtemp(path.join(os.tmpdir(), 'bench-tests-')));
-    const r = process.platform === 'win32' ? await runUnconfined(cwd, tmp, timeoutMs) : await runContained(cwd, tmp, timeoutMs);
+    const r = process.platform === 'win32' ? await runUnconfined(cwd, tmp, timeoutMs, files) : await runContained(cwd, tmp, timeoutMs, files);
     const output = r.timedOut ? `${r.output}\nError: node --test timed out after ${timeoutMs} ms` : r.output;
     // Spec reporter prints `ℹ pass 13`, TAP prints `# pass 13` (Node 22 without a TTY).
     const num = (label: string): number => Number(new RegExp(`^(?:ℹ|#) ${label} (\\d+)`, 'm').exec(output)?.[1] ?? '0');
-    return { ok: r.exitCode === 0 && !r.timedOut, pass: num('pass'), fail: num('fail'), output: output.slice(-4000) };
+    return { ok: r.exitCode === 0 && !r.timedOut, pass: num('pass'), fail: num('fail'), output: output.slice(-4000), failed: failedTests(output) };
   } catch (err) {
-    return { ok: false, pass: 0, fail: 0, output: `Error: node --test could not start: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, pass: 0, fail: 0, output: `Error: node --test could not start: ${err instanceof Error ? err.message : String(err)}`, failed: [] };
   } finally {
     if (tmp !== undefined) await rm(tmp, { recursive: true, force: true });
   }
@@ -187,14 +189,49 @@ export async function treeChanges(workspace: string, initial: ReadonlyMap<string
   return { modified: modified.sort(), deleted: deleted.sort(), added };
 }
 
-export async function checkScope(checks: Checks, workspace: string, initial: ReadonlyMap<string, string>, allowed?: (file: string) => boolean): Promise<void> {
+/** A deletion is never covered by `allowed`: a task that asks for one names the exact files in `allowedDeletions`. */
+export async function checkScope(
+  checks: Checks,
+  workspace: string,
+  initial: ReadonlyMap<string, string>,
+  allowed?: (file: string) => boolean,
+  opts: { readonly allowedDeletions?: readonly string[] } = {},
+): Promise<void> {
   const c = await treeChanges(workspace, initial);
   if (allowed === undefined) {
     const all = [...c.modified.map((f) => `modified ${f}`), ...c.deleted.map((f) => `deleted ${f}`), ...c.added.map((f) => `added ${f}`)];
     checks.check(all.length === 0, all.length === 0 ? 'workspace unchanged (read-only task)' : `read-only task changed the workspace: ${all.join(', ')}`);
     return;
   }
-  const outside = [...c.modified.filter((f) => !allowed(f)).map((f) => `modified ${f}`), ...c.deleted.map((f) => `deleted ${f}`)];
+  const outside = [...c.modified.filter((f) => !allowed(f)).map((f) => `modified ${f}`), ...c.deleted.filter((f) => !(opts.allowedDeletions ?? []).includes(f)).map((f) => `deleted ${f}`)];
   checks.check(outside.length === 0, outside.length === 0 ? 'no file outside the task changed' : `changed outside the task: ${outside.join(', ')}`);
   if (c.added.length > 0) checks.check(true, `new files (allowed): ${c.added.join(', ')}`);
+}
+
+/**
+ * Runs tests the agent never saw: the workspace is copied without `.git` and `hidden-tests/` to a temporary
+ * directory, the hidden files are added there under a new `hidden-tests/`, and only they run. The workspace itself is never
+ * written, so the recorded diff is the agent's alone.
+ */
+export async function runHiddenTests(workspace: string, hidden: Readonly<Record<string, string>>, timeoutMs = 60_000): Promise<NodeTestRun> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-hidden-'));
+  try {
+    // The workspace's own hidden-tests stays out of the copy: a link there would send the writes below outside it.
+    const reserved = path.join(workspace, 'hidden-tests');
+    await cp(workspace, dir, { recursive: true, filter: (src) => path.basename(src) !== '.git' && path.resolve(src) !== path.resolve(reserved) });
+    await mkdir(path.join(dir, 'hidden-tests'), { recursive: true });
+    const files: string[] = [];
+    for (const [name, text] of Object.entries(hidden)) {
+      const rel = `hidden-tests/${name}`;
+      await writeFile(path.join(dir, rel), text);
+      files.push(rel);
+    }
+    return await runNodeTests(dir, timeoutMs, files);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+export function failedTests(output: string): string[] {
+  return [...new Set([...output.matchAll(/^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/gm)].map((m) => (m[1] ?? '').trim()))].filter((n) => n !== '' && !/^failing tests:?$/.test(n));
 }

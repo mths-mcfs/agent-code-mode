@@ -18,6 +18,7 @@ import type {
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
+  ScriptValue,
   SearchLowering,
   SessionContext,
   ToolCall,
@@ -42,15 +43,17 @@ export interface DispatcherOptions<P> {
   readonly checkDeadline?: () => void;
   /** Clock, for tests. */
   readonly now?: () => number;
+  /** Serves `readOverflow` from this server's memory; it never reaches the host. */
+  readonly readOverflow?: (args: unknown) => CallReply;
 }
+
+const NO_OVERFLOW: CallReply = { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
 
 type Failure =
   | { readonly kind: 'deny'; readonly source: DenySource; readonly reason: string }
   | { readonly kind: 'error'; readonly error: ToolError };
 
 const ABORTED: unique symbol = Symbol('aborted');
-
-const MAX_SUMMARY_CHARS = 160;
 
 /** How long `stop` waits for in-flight calls before giving up on them. */
 export const DEFAULT_SETTLE_GRACE_MS = 2_000;
@@ -63,8 +66,22 @@ function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
+// Summaries stay whole: the call log names every target, and only a response cut to its cap abbreviates them.
+// Each newline and the whitespace around it becomes one ` ⏎ `, in a linear pass: the equivalent regex
+// backtracks quadratically over a long run of spaces.
 function oneLine(s: string): string {
-  return clip(s, MAX_SUMMARY_CHARS).replace(/\s*\n\s*/g, ' ⏎ ');
+  const lines = s.split('\n');
+  if (lines.length === 1) return s;
+  let out = (lines[0] ?? '').trimEnd();
+  let separator = false;
+  for (let i = 1; i < lines.length; i++) {
+    separator = true;
+    const line = (lines[i] ?? '').trimStart();
+    if (line === '') continue;
+    out += ` ⏎ ${i === lines.length - 1 ? line : line.trimEnd()}`;
+    separator = false;
+  }
+  return separator ? `${out} ⏎ ` : out;
 }
 
 function containmentEquals(a: BashContainment, b: BashContainment): boolean {
@@ -281,6 +298,7 @@ export class Dispatcher<P = unknown> {
     if (this.#hasStopped()) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, this.#stoppedFailure()));
     }
+    if (tool === 'readOverflow') return Promise.resolve(this.#readOverflow(id, slot, args, started));
     const parsed = parseToolCall(tool, args, id);
     if (parsed instanceof ToolError) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: parsed }));
@@ -517,7 +535,7 @@ export class Dispatcher<P = unknown> {
     }
 
     this.#calls[slot] = { id: prepared.id, tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
-    return { ok: true, value };
+    return { ok: true, value: scriptValue(value, [this.#realCwd, path.resolve(this.#opts.ctx.cwd)]) };
   }
 
   #toolFailure(err: unknown): Failure {
@@ -538,6 +556,15 @@ export class Dispatcher<P = unknown> {
         ? 'the script already finished; calls made after it returned are refused'
         : `the run was stopped (${reason}); the call was not executed`;
     return { kind: 'error', error: new ToolError('cancelled', message) };
+  }
+
+  #readOverflow(id: string, slot: number, args: unknown, started: number): CallReply {
+    const target = args !== null && typeof args === 'object' && 'id' in args && typeof args.id === 'string' ? args.id.slice(0, 40) : '?';
+    const summary = `readOverflow ${target}`;
+    const reply = this.#opts.readOverflow?.(args) ?? NO_OVERFLOW;
+    if (!reply.ok) return this.#fail(slot, id, 'readOverflow', summary, started, { kind: 'error', error: new ToolError(reply.error.name === 'ToolError' ? reply.error.code : 'tool-error', reply.error.message) });
+    this.#calls[slot] = { id, tool: 'readOverflow', summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+    return reply;
   }
 
   #fail(slot: number, id: string, tool: string, summary: string, started: number, failure: Failure): CallReply {
@@ -604,6 +631,26 @@ export function displayPath(absPath: string, cwd: string): string {
   return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
 }
 
+/** A path comes back in either form of the cwd: real (the tool runtime) or as given (a search lowered to a command). */
+function relative(p: string, cwds: readonly string[]): string {
+  for (const cwd of cwds) {
+    const shown = displayPath(p, cwd);
+    if (shown !== p) return shown;
+  }
+  return p;
+}
+
+function scriptValue(result: ToolResult, cwds: readonly string[]): ScriptValue {
+  const rel = (p: string): string => relative(p, cwds);
+  if ('matches' in result) {
+    const rows = result.matches.map((m) => [rel(m.file), m.line, m.text] as const);
+    return { columns: ['file', 'line', 'text'], rows, count: rows.length, truncated: result.truncated, filtered: result.filtered };
+  }
+  if ('files' in result) return { ...result, files: result.files.map(rel) };
+  if ('path' in result) return { ...result, path: rel(result.path) };
+  return result;
+}
+
 /** Short description of a call for the call log. */
 export function summarize(call: ToolCall, cwd: string): string {
   const p = (value: string): string => displayPath(path.resolve(cwd, value), cwd);
@@ -624,5 +671,5 @@ export function summarize(call: ToolCall, cwd: string): string {
       s = `glob ${call.args.pattern}${call.args.path ? ` in ${p(call.args.path)}` : ''}`;
       break;
   }
-  return clip(s, MAX_SUMMARY_CHARS);
+  return s;
 }

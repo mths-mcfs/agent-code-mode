@@ -22,13 +22,18 @@ describe('dry run', () => {
       process.stdout.write = orig;
     }
     const text = writes.join('');
-    expect(text.match(/: pass, valid/g)).toHaveLength(10);
-    expect(text.match(/^skip /gm)).toHaveLength(10);
+    expect(text.match(/^(claude|codex) T\d+ \w+ r1: pass, valid/gm)).toHaveLength(12);
+    // One warmup per host x arm before the matrix; none on the resume, which has nothing left to run.
+    expect(text.match(/^warmup (claude|codex) T1 \w+ r1: pass, valid/gm)).toHaveLength(6);
+    expect(text.match(/^skip /gm)).toHaveLength(12);
     const summary = JSON.parse(await readFile(path.join(out, '2026-01-02', 'summary.json'), 'utf8'));
     expect(summary.dryRun).toBe(true);
-    expect(summary.groups).toHaveLength(10);
-    const left = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => f.endsWith('auth.json'));
-    expect(left).toEqual([]);
+    expect(summary.groups).toHaveLength(12);
+    expect(summary.warmup.runs).toBe(6);
+    expect(text).toMatch(/Warmup: 6 run\(s\)/);
+    // Each dry run's workspace is removed once its record is written: none is left, auth files included.
+    const left = await readdir(path.join(work, 'runs'), { recursive: true }).catch(() => []);
+    expect(left.filter((f) => path.basename(f) !== '2026-01-02')).toEqual([]);
     await rm(work, { recursive: true, force: true });
   }, 300_000); // End to end through main(): on Windows it competes for the CPU with the other test files.
 });

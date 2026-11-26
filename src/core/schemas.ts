@@ -106,7 +106,7 @@ export const ToolArgsSchemas = {
   glob: GlobArgsSchema,
 } as const;
 
-function formatIssues(error: z.ZodError): string {
+export function formatIssues(error: z.ZodError): string {
   return error.issues
     .map((issue) => {
       const where = issue.path.length > 0 ? issue.path.join('.') : 'args';
@@ -160,6 +160,7 @@ export const RunArgsSchema = z.object({
   code: z.string().min(1, 'must not be empty').max(MAX_CODE_CHARS),
   transaction: z.boolean().optional(),
   timeoutMs: z.number().int().min(1).optional(),
+  verbose: z.boolean().optional(),
 });
 
 export type RunArgs = z.infer<typeof RunArgsSchema>;
@@ -175,7 +176,11 @@ export const RUN_INPUT_JSON_SCHEMA: {
     code: {
       type: 'string',
       description:
-        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob; the return value is the result.',
+        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, readOverflow; the return value is the result.',
+    },
+    verbose: {
+      type: 'boolean',
+      description: 'Return every call and the whole diff instead of call counts and a diff summary.',
     },
     transaction: {
       type: 'boolean',

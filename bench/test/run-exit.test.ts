@@ -22,7 +22,8 @@ afterEach(async () => {
 
 async function recordFile(): Promise<string> {
   const dir = path.join(work, 'results', '2026-01-04');
-  const found = (await readdir(dir, { recursive: true })).filter((f) => f.endsWith('record.json'));
+  // The warm-up run keeps its own record under warmup/.
+  const found = (await readdir(dir, { recursive: true })).filter((f) => f.endsWith('record.json') && !f.startsWith('warmup'));
   expect(found).toHaveLength(1);
   return path.join(dir, found[0] ?? '');
 }

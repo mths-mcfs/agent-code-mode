@@ -4,6 +4,7 @@ import { releasingClaims } from './file-claims.js';
 import { DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS, type RunArgs } from './schemas.js';
 import type {
   CallLogEntry,
+  CallReply,
   HostAdapter,
   LogLevel,
   PolicyLoadError,
@@ -44,6 +45,7 @@ export interface RunDeps<P = unknown> {
   readonly rollbackTimeoutMs?: number;
   /** Monotonic clock in ms, for tests. */
   readonly now?: () => number;
+  readonly overflow?: { read(args: unknown): CallReply };
 }
 
 type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
@@ -246,6 +248,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     checkDeadline();
     if (req.transaction && stopReason === undefined) tx = releasingClaims(deps.tools.beginTransaction());
 
+    const overflow = deps.overflow;
     const leftMs = deadline - now();
     if (leftMs <= 0) stop('timeout');
     dispatcher = new Dispatcher<P>({
@@ -254,6 +257,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       ctx: deps.ctx,
       policy,
       checkDeadline,
+      ...(overflow ? { readOverflow: (args: unknown) => overflow.read(args) } : {}),
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
     const active = dispatcher;

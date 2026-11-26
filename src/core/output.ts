@@ -1,14 +1,15 @@
-import { randomBytes } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import { errorMessage } from './errors.js';
-import { ensureStateDir } from './state-dir.js';
-import type { RunResult } from './types.js';
+import type { CallLogEntry, RunResult } from './types.js';
 
-/** Largest text of a successful result. */
-export const SUCCESS_CAP_CHARS = 30_000;
-/** Largest text of an error result (Claude cuts the middle of long errors). */
+/** Response budget, well below Claude Code's MAX_MCP_OUTPUT_TOKENS (25,000). */
+export const RESPONSE_CAP_TOKENS = 10_000;
+export const SUCCESS_CAP_CHARS = RESPONSE_CAP_TOKENS * 4;
+/** Largest text of an error response (Claude cuts the middle of long errors). */
 export const ERROR_CAP_CHARS = 9_500;
+export const DIFF_INLINE_CHARS = 1_500;
+export const DIFF_STAT_FILES = 10;
+export const TEXT_BLOCK_MIN_CHARS = 200;
+export const RESULT_IN_NEXT_BLOCK = '[in the next text block]';
 
 export interface McpToolResponse {
   [key: string]: unknown;
@@ -16,110 +17,328 @@ export interface McpToolResponse {
   isError: boolean;
 }
 
+export interface OverflowSink {
+  put(text: string): string | undefined;
+}
+
 export interface FormatOptions {
-  /** Directory for overflow files. Created 0700 when needed. */
-  readonly stateDir: string;
+  readonly overflow?: OverflowSink;
+  readonly verbose?: boolean;
   readonly successCap?: number;
   readonly errorCap?: number;
 }
 
-interface Limits {
-  readonly str: number;
-  readonly arr: number;
-  readonly depth: number;
-}
-
-const LEVELS: readonly Limits[] = [
-  { str: 8_000, arr: 500, depth: 12 },
-  { str: 2_000, arr: 100, depth: 10 },
-  { str: 600, arr: 40, depth: 8 },
-  { str: 200, arr: 15, depth: 6 },
-  { str: 80, arr: 6, depth: 4 },
-  { str: 30, arr: 3, depth: 3 },
-];
-
-function shrink(value: unknown, limits: Limits, depth: number): unknown {
-  if (typeof value === 'string') {
-    return value.length <= limits.str ? value : `${value.slice(0, limits.str)}…[${value.length - limits.str} more chars]`;
-  }
-  if (value === null || typeof value !== 'object') return value;
-  if (depth >= limits.depth) return Array.isArray(value) ? `[array of ${value.length} items]` : '[object]';
-  if (Array.isArray(value)) {
-    const kept = value.slice(0, limits.arr).map((item) => shrink(item, limits, depth + 1));
-    if (value.length > limits.arr) kept.push(`…[${value.length - limits.arr} more items]`);
-    return kept;
-  }
-  const out: Record<string, unknown> = {};
-  const entries = Object.entries(value);
-  for (const [key, item] of entries.slice(0, limits.arr)) out[key] = shrink(item, limits, depth + 1);
-  if (entries.length > limits.arr) out['…'] = `[${entries.length - limits.arr} more keys]`;
-  return out;
-}
-
 /** JSON text of `value`; values JSON cannot represent become strings instead of throwing. */
 export function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
+  // Only the objects on the path to the current value: a shared object that is not its own ancestor is kept.
+  const ancestors: object[] = [];
   try {
-    return JSON.stringify(value, (_key, v: unknown) => {
-      if (typeof v === 'bigint') return v.toString();
-      if (v !== null && typeof v === 'object') {
-        if (seen.has(v)) return '[circular]';
-        seen.add(v);
-      }
-      return v;
-    }) ?? 'null';
+    return (
+      JSON.stringify(value, function (this: unknown, _key, v: unknown) {
+        if (typeof v === 'bigint') return v.toString();
+        if (v === null || typeof v !== 'object') return v;
+        while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop();
+        if (ancestors.includes(v)) return '[circular]';
+        ancestors.push(v);
+        return v;
+      }) ?? 'null'
+    );
   } catch (err) {
     return JSON.stringify({ unserializable: errorMessage(err) });
   }
 }
 
+type FailedCall = Pick<CallLogEntry, 'id' | 'tool' | 'summary' | 'reason'>;
+
+interface FailedGroup {
+  readonly tool: string;
+  readonly reason?: string;
+  readonly count: number;
+  /** Summary of each call, with a marker counting the ones left out. */
+  readonly calls: readonly string[];
+}
+
+export interface CompactCalls {
+  readonly total: number;
+  readonly byTool: Record<string, number>;
+  readonly denied?: readonly (FailedCall | FailedGroup | string)[];
+  readonly errors?: readonly (FailedCall | FailedGroup | string)[];
+}
+
+export function summarizeCalls(calls: readonly CallLogEntry[]): CompactCalls {
+  const byTool: Record<string, number> = {};
+  for (const c of calls) byTool[c.tool] = (byTool[c.tool] ?? 0) + 1;
+  const pick = (decision: CallLogEntry['decision']): FailedCall[] =>
+    calls.filter((c) => c.decision === decision).map(({ id, tool, summary, reason }) => ({ id, tool, summary, ...(reason === undefined ? {} : { reason }) }));
+  const denied = pick('denied');
+  const errors = pick('error');
+  return { total: calls.length, byTool, ...(denied.length > 0 ? { denied } : {}), ...(errors.length > 0 ? { errors } : {}) };
+}
+
+export interface DiffStat {
+  readonly files: Record<string, string>;
+  readonly moreFiles?: number;
+  readonly total: string;
+}
+
 /**
- * Shrinks a JSON-compatible value until its JSON text fits `cap`, keeping the
- * structure valid: long strings and arrays are cut with explicit markers.
- * `extra` fields are added at the top level untouched.
+ * The `b/` name of `diff --git <a-name> <b-name>` when the header alone settles it: quoted, or both halves
+ * naming the same path. A rename with a space in either path is ambiguous there; `rename to` names it.
  */
-export function truncateStructurally(value: unknown, cap: number, extra: Record<string, unknown> = {}): string {
-  const plain: unknown = JSON.parse(safeStringify(value));
-  const base = plain !== null && typeof plain === 'object' && !Array.isArray(plain) ? plain : { value: plain };
-  for (const limits of LEVELS) {
-    const shrunk = shrink(base, limits, 0);
-    const text = safeStringify({ ...(shrunk !== null && typeof shrunk === 'object' ? shrunk : { value: shrunk }), ...extra, truncated: true });
-    if (text.length <= cap) return text;
+function gitHeaderNewName(rest: string): string | undefined {
+  if (rest.endsWith('"')) {
+    const start = rest.lastIndexOf(' "b/');
+    if (start !== -1) return rest.slice(start + 1);
   }
-  // Last resort: only the essentials, clipped to fit.
-  const essentials: Record<string, unknown> = { ...extra, truncated: true };
-  if ('ok' in base) essentials['ok'] = base.ok;
-  if ('error' in base) essentials['error'] = shrink(base.error, { str: 200, arr: 3, depth: 2 }, 0);
-  let text = safeStringify(essentials);
-  if (text.length > cap) text = safeStringify({ truncated: true, ...('ok' in base ? { ok: base.ok } : {}) });
-  return text.length <= cap ? text : '{"truncated":true}';
+  const half = (rest.length - 1) / 2;
+  if (Number.isInteger(half) && rest[half] === ' ' && rest.slice(2, half) === rest.slice(half + 3)) return rest.slice(half + 1);
+  return undefined;
 }
 
-async function writeOverflow(stateDir: string, text: string): Promise<string> {
-  const dir = await ensureStateDir(stateDir);
-  const file = path.join(dir, `run-${Date.now()}-${randomBytes(6).toString('hex')}.json`);
-  await writeFile(file, text, { mode: 0o600, flag: 'wx' });
-  return file;
+/** A path from a diff line: git ends a name holding a space with a tab, and quotes names with special bytes. */
+function diffName(raw: string, prefixed = true): string {
+  const name = raw.endsWith('\t') ? raw.slice(0, -1) : raw;
+  const unquoted = name.startsWith('"') && name.endsWith('"') && name.length >= 2 ? name.slice(1, -1).replace(/\\(["\\])/g, '$1') : name;
+  return prefixed ? unquoted.replace(/^[ab]\//, '') : unquoted;
 }
 
 /**
- * Formats a `RunResult` as an MCP tool response: compact JSON text, `isError`
- * when the run failed. Results above the cap are written whole to an
- * overflow file (mode 0600) and replaced by a structurally truncated preview
- * carrying `overflowPath`.
+ * Line counts per file of a combined unified diff. Hunk lines are counted from the hunk header, so a
+ * removed line that starts with `--` is not taken for a file header. A git block with no hunk (an empty
+ * new file, a pure rename) is named by its `rename to` line or its header.
  */
-export async function formatRunResult(result: RunResult, opts: FormatOptions): Promise<McpToolResponse> {
+export function diffStat(diff: string): DiffStat {
+  const counts = new Map<string, { added: number; removed: number }>();
+  let current: { added: number; removed: number } | undefined;
+  let oldLeft = 0;
+  let newLeft = 0;
+  let oldName = '';
+  /** A `diff --git` block not yet named by a `+++` line; git writes an `index` line before a block's own `---`. */
+  let block: { header: string; name?: string; indexed?: true } | undefined;
+  const file = (name: string): void => {
+    current = counts.get(name) ?? { added: 0, removed: 0 };
+    counts.set(name, current);
+  };
+  const closeBlock = (): void => {
+    if (block === undefined) return;
+    const start = block.header.lastIndexOf(' b/');
+    file(block.name ?? diffName(start === -1 ? block.header : block.header.slice(start + 1)));
+    block = undefined;
+  };
+  for (const line of diff.split('\n')) {
+    if (current && (oldLeft > 0 || newLeft > 0)) {
+      if (line.startsWith('+')) (current.added++, newLeft--);
+      else if (line.startsWith('-')) (current.removed++, oldLeft--);
+      else if (!line.startsWith('\\')) (oldLeft--, newLeft--);
+    } else if (line.startsWith('diff --git ')) {
+      closeBlock();
+      const header = line.slice(11);
+      const name = gitHeaderNewName(header);
+      block = { header, ...(name === undefined ? {} : { name: diffName(name) }) };
+    } else if (block && line.startsWith('rename to ')) {
+      // `rename to` names the path itself, with no a/ or b/ prefix.
+      block.name = diffName(line.slice(10), false);
+    } else if (block && line.startsWith('index ')) {
+      block.indexed = true;
+    } else if (line.startsWith('--- ')) {
+      // Without an index line, this `---` starts the next file: the block before it had no hunk.
+      if (!block?.indexed) closeBlock();
+      oldName = line.slice(4);
+    } else if (line.startsWith('+++ ')) {
+      const newName = line.slice(4);
+      file(diffName(newName === '/dev/null' ? oldName : newName));
+      block = undefined;
+    } else {
+      const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+      if (hunk) {
+        oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+        newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      }
+    }
+  }
+  closeBlock();
+  const entries = [...counts];
+  const added = entries.reduce((n, [, c]) => n + c.added, 0);
+  const removed = entries.reduce((n, [, c]) => n + c.removed, 0);
+  return {
+    files: Object.fromEntries(entries.slice(0, DIFF_STAT_FILES).map(([name, c]) => [name, `+${c.added} -${c.removed}`])),
+    ...(entries.length > DIFF_STAT_FILES ? { moreFiles: entries.length - DIFF_STAT_FILES } : {}),
+    total: `${entries.length} file${entries.length === 1 ? '' : 's'} +${added} -${removed}`,
+  };
+}
+
+interface View {
+  ok: boolean;
+  result?: unknown;
+  error?: unknown;
+  logs?: readonly string[];
+  calls: CompactCalls | readonly CallLogEntry[];
+  changedFiles?: readonly string[];
+  diff?: string;
+  diffStat?: DiffStat;
+  warnings?: readonly string[];
+  rolledBack?: unknown;
+  overflow?: { readonly id: string; readonly chars: number };
+  truncated?: true;
+}
+
+function textOf(view: View): { json: string; second?: string } {
+  const r = view.result;
+  if (typeof r === 'string' && r.length > TEXT_BLOCK_MIN_CHARS && r.includes('\n')) return { json: safeStringify({ ...view, result: RESULT_IN_NEXT_BLOCK }), second: r };
+  return { json: safeStringify(view) };
+}
+
+function response(view: View, isError: boolean): { readonly out: McpToolResponse; readonly chars: number } {
+  const { json, second } = textOf(view);
+  const content: McpToolResponse['content'] = [{ type: 'text', text: json }];
+  if (second !== undefined) content.push({ type: 'text', text: second });
+  return { out: { content, isError }, chars: json.length + (second?.length ?? 0) };
+}
+
+function headTail(text: string, budget: number, marker: (cut: number) => string): string {
+  if (text.length <= budget) return text;
+  const room = Math.max(0, budget - marker(text.length).length);
+  const head = Math.floor(room * 0.6);
+  const tail = room - head;
+  return `${text.slice(0, head)}${marker(text.length - head - tail)}${text.slice(text.length - tail)}`;
+}
+
+export function formatRunResult(result: RunResult, opts: FormatOptions = {}): McpToolResponse {
   const isError = !result.ok;
   const cap = isError ? (opts.errorCap ?? ERROR_CAP_CHARS) : (opts.successCap ?? SUCCESS_CAP_CHARS);
-  const full = safeStringify(result);
-  if (full.length <= cap) return { content: [{ type: 'text', text: full }], isError };
+  const verbose = opts.verbose === true;
+  const { ok, logs, calls, changedFiles, diff, warnings, rolledBack } = result;
+  const bigDiff = !verbose && diff.length > DIFF_INLINE_CHARS;
+  const view: View = {
+    ok,
+    ...('result' in result ? { result: result.result } : {}),
+    ...(result.error ? { error: result.error } : {}),
+    ...(logs.length > 0 ? { logs } : {}),
+    calls: verbose ? calls : summarizeCalls(calls),
+    ...(changedFiles.length > 0 ? { changedFiles } : {}),
+    ...(diff === '' ? {} : bigDiff ? { diffStat: diffStat(diff) } : { diff }),
+    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(rolledBack ? { rolledBack } : {}),
+  };
+  const whole = response(view, isError);
+  if (!bigDiff && whole.chars <= cap) return whole.out;
 
-  let extra: Record<string, unknown>;
-  try {
-    const overflowPath = await writeOverflow(opts.stateDir, full);
-    extra = { overflowPath, note: `Result was ${full.length} chars; the full JSON is in the file at overflowPath (open it with the host's file reading tool).` };
-  } catch (err) {
-    extra = { note: `Result was ${full.length} chars and could not be saved: ${errorMessage(err)}` };
+  const full = safeStringify(result);
+  const id = opts.overflow?.put(full);
+  const kept: View = id === undefined ? view : { ...view, overflow: { id, chars: full.length } };
+  const noted = response(kept, isError);
+  if (noted.chars <= cap) return noted.out;
+  return capped(kept, summarizeCalls(calls), cap, isError);
+}
+
+function cutList<T>(list: readonly T[] | undefined, keep: number, where: string): readonly (T | string)[] | undefined {
+  if (list === undefined || list.length <= keep) return list;
+  return [...list.slice(0, keep), `…[${list.length - keep} more${where}]`];
+}
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…[${text.length - max} chars cut]`;
+}
+
+function clipStrings<T>(value: T, max: number): T {
+  if (typeof value === 'string') return clip(value, max) as T;
+  if (Array.isArray(value)) return value.map((v: unknown) => clipStrings(v, max)) as T;
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, clipStrings(v, max)])) as T;
+  return value;
+}
+
+function grouped(list: CompactCalls['denied'], textMax: number, perGroup: number, keep: number, where: string): CompactCalls['denied'] {
+  if (list === undefined) return undefined;
+  const groups = new Map<string, { tool: string; reason?: string; count: number; summaries: string[] }>();
+  for (const c of list) {
+    if (typeof c === 'string' || !('id' in c)) continue;
+    const key = JSON.stringify([c.tool, c.reason ?? null]);
+    const g = groups.get(key) ?? { tool: clip(c.tool, textMax), ...(c.reason === undefined ? {} : { reason: clip(c.reason, textMax) }), count: 0, summaries: [] };
+    g.count++;
+    g.summaries.push(clip(c.summary, textMax));
+    groups.set(key, g);
   }
-  return { content: [{ type: 'text', text: truncateStructurally(result, cap, extra) }], isError };
+  const all: FailedGroup[] = [...groups.values()].map(({ summaries, ...g }) => ({ ...g, calls: cutList(summaries, perGroup, where) ?? [] }));
+  if (all.length <= keep) return all;
+  const left = all.slice(keep);
+  const n = left.reduce((a, g) => a + g.count, 0);
+  return [...all.slice(0, keep), `…[${left.length} more reasons (${n} calls)${where}]`];
+}
+
+function capped(view: View, compact: CompactCalls, cap: number, isError: boolean): McpToolResponse {
+  const where = view.overflow ? ' in readOverflow' : '';
+  const marker = (n: number): string => `\n…[${n} chars cut${view.overflow ? `; readOverflow(${JSON.stringify(view.overflow.id)}) has the whole result` : ''}]\n`;
+  const { result, logs, diff, ...envelope } = view;
+  const base: View = { ...envelope, calls: compact, truncated: true };
+  const resultText = result === undefined ? undefined : typeof result === 'string' ? result : safeStringify(result);
+  const logText = logs?.join('\n');
+  const bulk = [resultText, logText, diff].reduce((n, t) => n + (t?.length ?? 0), 0);
+  const envelopeMax = cap - Math.min(bulk, Math.floor(cap / 4)) - 200;
+
+  const withCalls = (calls: CompactCalls, lists: number, textMax: number): View => {
+    const clipped = textMax === Infinity ? base : clipStrings(base, textMax);
+    // File names are keys, which clipping leaves whole: a clipped envelope keeps only the totals.
+    const stat = clipped.diffStat && textMax !== Infinity ? { files: {}, moreFiles: Object.keys(clipped.diffStat.files).length + (clipped.diffStat.moreFiles ?? 0), total: clipped.diffStat.total } : clipped.diffStat;
+    return {
+      ...clipped,
+      ...(stat ? { diffStat: stat } : {}),
+      calls,
+      ...(clipped.changedFiles ? { changedFiles: cutList(clipped.changedFiles, lists, where) } : {}),
+      ...(clipped.warnings ? { warnings: cutList(clipped.warnings, lists, where) } : {}),
+    };
+  };
+  const groupedCalls = (textMax: number, perGroup: number, keep: number): CompactCalls => ({
+    ...compact,
+    ...(compact.denied ? { denied: grouped(compact.denied, textMax, perGroup, keep, where) } : {}),
+    ...(compact.errors ? { errors: grouped(compact.errors, textMax, perGroup, keep, where) } : {}),
+  });
+  const ladder: (() => View)[] = [
+    () => withCalls(compact, Infinity, Infinity),
+    () => withCalls(groupedCalls(Infinity, Infinity, Infinity), Infinity, Infinity),
+    ...[200, 20, 0].map((n) => () => withCalls(groupedCalls(Infinity, Infinity, Infinity), n, Infinity)),
+    ...[100, 10, 1].map((per) => () => withCalls(groupedCalls(200, per, Infinity), 0, 200)),
+    ...[1000, 100, 10, 1, 0].map((k) => () => withCalls(groupedCalls(200, 1, k), 0, 200)),
+  ];
+  const counted = (list: CompactCalls['denied'], what: string): string[] | undefined => (list === undefined ? undefined : [`…[${list.length} ${what} calls${where}]`]);
+  let env: View = {
+    ok: view.ok,
+    ...(view.error === undefined ? {} : { error: clipStrings(view.error, 200) }),
+    calls: { total: compact.total, byTool: {}, ...(compact.denied ? { denied: counted(compact.denied, 'denied') } : {}), ...(compact.errors ? { errors: counted(compact.errors, 'failed') } : {}) },
+    ...(view.overflow ? { overflow: view.overflow } : {}),
+    truncated: true,
+  };
+  for (const step of ladder) {
+    const candidate = step();
+    if (safeStringify(candidate).length <= envelopeMax) {
+      env = candidate;
+      break;
+    }
+  }
+
+  const parts = [resultText, logText, diff];
+  for (let scale = 1; scale > 0.01; scale *= 0.8) {
+    let room = Math.max(0, Math.floor((cap - safeStringify(env).length - 200) * scale));
+    const shares = parts.map(() => 0);
+    const bySize = parts.map((t, i) => [t?.length ?? 0, i] as const).filter(([n]) => n > 0).sort((x, y) => x[0] - y[0]);
+    bySize.forEach(([n, i], k) => {
+      shares[i] = Math.min(n, Math.floor(room / (bySize.length - k)));
+      room -= shares[i] ?? 0;
+    });
+    const shown = resultText === undefined ? undefined : headTail(resultText, shares[0] ?? 0, marker);
+    const second = shown === undefined || (shown === resultText && typeof result !== 'string') ? undefined : shown;
+    const { ok, error, ...rest } = env;
+    const out: View = {
+      ok,
+      ...(shown === undefined ? {} : { result: second === undefined ? result : RESULT_IN_NEXT_BLOCK }),
+      ...(error === undefined ? {} : { error }),
+      ...(logText === undefined ? {} : { logs: headTail(logText, shares[1] ?? 0, marker).split('\n') }),
+      ...rest,
+      ...(diff === undefined ? {} : { diff: headTail(diff, shares[2] ?? 0, marker) }),
+    };
+    const json = safeStringify(out);
+    if (json.length + (second?.length ?? 0) <= cap) {
+      return { content: [{ type: 'text', text: json }, ...(second === undefined ? [] : [{ type: 'text' as const, text: second }])], isError };
+    }
+  }
+  return { content: [{ type: 'text', text: safeStringify(env) }], isError };
 }

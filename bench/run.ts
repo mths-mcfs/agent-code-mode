@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -12,14 +12,18 @@ import { catalogForArm, CODEX_FEATURES_OFF, EMPTY_MCP_SERVER, catalogHasModel, c
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
-import { ARM_LABELS, checkArm, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, HOST_ARMS, RunRecordSchema, type ArmId, type ParsedRun, type RunRecord } from './lib/record.ts';
+import { ARM_LABELS, BASELINE_ARMS, BENCH_ARMS, checkArm, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, hostArms, isAcmArm, RunRecordSchema, surfaceArm, type ArmId, type BenchArm, type ParsedRun, type RunRecord } from './lib/record.ts';
 import { Rng } from './lib/rng.ts';
 import { defaultSanitizeContext, sanitize, type SanitizeContext } from './lib/sanitize.ts';
-import { claudeProjectSettings, CODEX_HOOK_MATCHER, companionHookCommand, createWorkspace, hookCommand, workspaceDiff, type HostId } from './lib/workspace.ts';
+import { claudeProjectSettings, CODEX_HOOK_MATCHER, companionHookCommand, createWorkspace, hookCommand, initialTree, workspaceDiff, type HostId } from './lib/workspace.ts';
 import { writeReport } from './report.ts';
 import { TASKS } from './tasks/index.ts';
 import { TASK_IDS, type TaskId } from './tasks/types.ts';
 
+/**
+ * Workspaces live outside the checkout (default `$XDG_CACHE_HOME/agent-code-mode-bench`): an agent that walks up from its
+ * workspace must not reach bench/tasks, where the hidden tests and reference solutions are.
+ */
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const BENCH_DIR = import.meta.dirname;
@@ -33,7 +37,7 @@ const csv = <T extends string>(allowed: readonly T[]) =>
 
 const OptionsSchema = z.object({
   host: z.enum(['claude', 'codex', 'all']).default('all'),
-  arms: csv(['A', 'B', 'C'] as const).optional(),
+  arms: csv(BENCH_ARMS).optional(),
   tasks: csv(TASK_IDS).optional(),
   runs: z.coerce.number().int().min(1).max(50).default(3),
   seed: z.coerce.number().int().nonnegative().optional(),
@@ -44,13 +48,64 @@ const OptionsSchema = z.object({
   codexEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
   timeoutMin: z.coerce.number().positive().max(240).default(15),
   maxTurns: z.coerce.number().int().positive().default(60),
-  workDir: z.string().default(path.join(BENCH_DIR, '.work')),
+  workDir: z.string().default(() => defaultWorkDir()),
   out: z.string().optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   dryRun: z.boolean().default(false),
+  /** Keep each dry run's workspace (a real run always keeps it). */
+  keepWork: z.boolean().default(false),
   force: z.boolean().default(false),
-});
+  /** Baseline agent-code-mode build: a git ref of this repo, built in a temporary directory... */
+  acmRef: z.string().min(1).optional(),
+  /** ...or the `dist` directory of a build made elsewhere (must contain cli.js). */
+  acmDist: z.string().min(1).optional(),
+}).refine((o) => o.acmRef === undefined || o.acmDist === undefined, { message: '--acm-ref and --acm-dist are mutually exclusive' });
 export type Options = z.infer<typeof OptionsSchema>;
+
+/**
+ * Default work dir: outside the checkout, so no run workspace has the repo (and bench/tasks) above it, and on
+ * disk rather than in the temp directory, which is often a tmpfs with few inodes.
+ */
+export function defaultWorkDir(env: Readonly<Record<string, string | undefined>> = process.env): string {
+  const xdg = env['XDG_CACHE_HOME'];
+  const cache = xdg !== undefined && path.isAbsolute(xdg) ? xdg : path.join(os.homedir(), '.cache');
+  return path.join(cache, 'agent-code-mode-bench');
+}
+
+/** `p` with symlinks resolved as far as it exists (the rest appended), so a link into the repo is caught. */
+function realish(p: string): string {
+  const abs = path.resolve(p);
+  let head = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(head), ...tail.reverse());
+    } catch {
+      const parent = path.dirname(head);
+      if (parent === head) return abs;
+      tail.push(path.basename(head));
+      head = parent;
+    }
+  }
+}
+
+/** True when `p` is the checkout or inside it. */
+export function insideRepo(p: string, repo: string = REPO_ROOT): boolean {
+  const rel = path.relative(realish(repo), realish(p));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Throws unless the run workspace is outside the checkout and no directory above it holds `bench/tasks`
+ * (hidden tests, reference solutions): the agent's file tools and shell can climb out of the workspace.
+ */
+export function assertWorkspaceIsolated(ws: string, repo: string = REPO_ROOT): void {
+  if (insideRepo(ws, repo)) throw new Error(`run workspace ${ws} is inside the repository checkout: hidden tests and solutions under bench/tasks would be readable`);
+  for (let dir = realish(ws); ; dir = path.dirname(dir)) {
+    if (existsSync(path.join(dir, 'bench', 'tasks'))) throw new Error(`run workspace ${ws} has ${dir}/bench/tasks above it: hidden tests and solutions would be readable`);
+    if (path.dirname(dir) === dir) return;
+  }
+}
 
 export function parseOptions(argv: readonly string[]): Options {
   const { values } = parseArgs({
@@ -72,7 +127,10 @@ export function parseOptions(argv: readonly string[]): Options {
       out: { type: 'string' },
       date: { type: 'string' },
       'dry-run': { type: 'boolean' },
+      'keep-work': { type: 'boolean' },
       force: { type: 'boolean' },
+      'acm-ref': { type: 'string' },
+      'acm-dist': { type: 'string' },
     },
     strict: true,
   });
@@ -93,38 +151,77 @@ export function parseOptions(argv: readonly string[]): Options {
     out: values.out,
     date: values.date,
     dryRun: values['dry-run'],
+    keepWork: values['keep-work'],
     force: values.force,
+    acmRef: values['acm-ref'],
+    acmDist: values['acm-dist'],
   });
 }
 
 export interface PlannedRun {
   readonly host: HostId;
   readonly task: TaskId;
-  readonly arm: ArmId;
+  readonly arm: BenchArm;
   readonly run: number;
   readonly round: number;
   readonly orderIndex: number;
+  /** Position of the arm inside its (round, host, task) block, 0-based. */
+  readonly position: number;
+  /** A warmup run (kept apart from the matrix and its statistics). */
+  readonly warmup?: boolean;
 }
 
-export function planRuns(hosts: readonly HostId[], tasks: readonly TaskId[], arms: readonly ArmId[] | undefined, runs: number, seed: number): PlannedRun[] {
-  const combos: { host: HostId; task: TaskId; arm: ArmId }[] = [];
+/** The arms of each host that run, given `--arms` and whether there is a baseline build. */
+export function armsFor(host: HostId, arms: readonly BenchArm[] | undefined, withBaseline: boolean): BenchArm[] {
+  return hostArms(host, withBaseline).filter((a) => arms === undefined || arms.includes(a));
+}
+
+/**
+ * Paired schedule: each round has one block per host x task in a seeded order, and a block runs every arm
+ * of that host on that task back to back. Inside a block the arm order is a seeded base order rotated by
+ * one place per round, so over any `arms` consecutive rounds each arm takes each position once.
+ */
+export function planRuns(hosts: readonly HostId[], tasks: readonly TaskId[], arms: readonly BenchArm[] | undefined, runs: number, seed: number, withBaseline = false): PlannedRun[] {
+  const rng = new Rng(seed);
+  const blocks: { host: HostId; task: TaskId; arms: BenchArm[] }[] = [];
   for (const host of hosts) {
-    const hostArms = HOST_ARMS[host].filter((a) => arms === undefined || arms.includes(a));
-    for (const task of tasks) for (const arm of hostArms) combos.push({ host, task, arm });
+    const list = armsFor(host, arms, withBaseline);
+    if (list.length === 0) continue;
+    for (const task of tasks) blocks.push({ host, task, arms: rng.shuffle(list) });
   }
   const plan: PlannedRun[] = [];
   for (let round = 1; round <= runs; round++) {
-    for (const c of new Rng(seed + round * 7919).shuffle(combos)) plan.push({ ...c, run: round, round, orderIndex: plan.length });
+    for (const b of new Rng(seed + round * 7919).shuffle(blocks)) {
+      const k = b.arms.length;
+      for (let position = 0; position < k; position++) {
+        const arm = b.arms[(position + round - 1) % k] as BenchArm;
+        plan.push({ host: b.host, task: b.task, arm, run: round, round, orderIndex: plan.length, position });
+      }
+    }
   }
   return plan;
 }
 
-export function runId(p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>): string {
-  return `${p.host}-${p.task}-${p.arm}-r${p.run}`;
+/** Task every warmup run uses: the cheapest one (the cache prefix it warms is the arm's system prompt and tools). */
+export const WARMUP_TASK: TaskId = 'T1';
+
+/** One warmup run per host and arm of the plan, in a seeded order, all arms alike. */
+export function planWarmup(plan: readonly PlannedRun[], seed: number): PlannedRun[] {
+  const pairs = [...new Map(plan.map((p) => [`${p.host}|${p.arm}`, { host: p.host, arm: p.arm }])).values()];
+  return new Rng(seed ^ 0x5eed).shuffle(pairs).map((p, i) => ({ host: p.host, arm: p.arm, task: WARMUP_TASK, run: 1, round: 1, orderIndex: i, position: i, warmup: true }));
+}
+
+export function runId(p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run' | 'warmup'>): string {
+  return `${p.warmup === true ? 'warmup-' : ''}${p.host}-${p.task}-${p.arm}-r${p.run}`;
 }
 
 export function runResultDir(resultsDir: string, p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>, configHash: string): string {
   return path.join(resultsDir, p.host, p.task, p.arm, configHash, String(p.run));
+}
+
+/** Warmup records of one invocation, under `warmup/` (the report keeps them out of every statistic). */
+export function warmupResultDir(resultsDir: string, invocation: string, p: Pick<PlannedRun, 'host' | 'task' | 'arm'>, configHash: string): string {
+  return path.join(resultsDir, 'warmup', invocation, p.host, p.task, p.arm, configHash);
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -206,6 +303,128 @@ export interface Context {
   readonly seed: number;
   readonly versions: Readonly<Record<string, string | null>>;
   readonly git: { readonly commit: string | null; readonly dirty: boolean | null };
+  /** Baseline agent-code-mode build of the B0/C0 arms, or null without `--acm-ref`/`--acm-dist`. */
+  readonly baseline: AcmBuild | null;
+  /** Timestamp of this invocation, naming its warmup directory. */
+  readonly invocation: string;
+}
+
+export interface AcmBuild {
+  /** `ref:<commit 12>` or `dist:<content sha 12>`: what the config hash records. */
+  readonly id: string;
+  /** Server entry (`cli.js`) of the build. */
+  readonly entry: string;
+  /** The build has the Claude companion hook (`cli.js hook`), so its arm gets the hook its installer adds. */
+  readonly companionHook: boolean;
+}
+
+/** The agent-code-mode server an arm runs: the baseline build for B0/C0, this checkout's dist otherwise. */
+function serverEntryFor(ctx: Context, arm: BenchArm): string {
+  if (arm === 'B0' || arm === 'C0') {
+    if (ctx.baseline === null) throw new Error(`arm ${arm} needs --acm-ref or --acm-dist`);
+    return ctx.baseline.entry;
+  }
+  return ctx.serverEntry;
+}
+
+/** The companion hook of a Claude arm that runs `run`, from the same build as its server. */
+function companionHookFor(ctx: Context, host: HostId, arm: BenchArm, serverEntry: string): string | undefined {
+  if (host !== 'claude' || !isAcmArm(host, arm)) return undefined;
+  if (arm === 'B0' && ctx.baseline?.companionHook !== true) return undefined;
+  return companionHookCommand(serverEntry);
+}
+
+/** True when `cli.js hook` exits 0 on an input it ignores; a build without the command exits non-zero. */
+function hasCompanionHook(entry: string): boolean {
+  if (!existsSync(entry)) return false;
+  try {
+    execFileSync(process.execPath, [entry, 'hook'], { input: '{}', stdio: ['pipe', 'ignore', 'ignore'], timeout: 30_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Content hash of a build directory (sorted relative paths and bytes), for `--acm-dist`. */
+async function dirHash(dir: string): Promise<string> {
+  const hash = createHash('sha256');
+  const files = (await readdir(dir, { recursive: true, withFileTypes: true })).filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name)).sort();
+  for (const f of files) {
+    hash.update(path.relative(dir, f).split(path.sep).join('/'));
+    hash.update('\0');
+    hash.update(await readFile(f));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * Resolves the baseline build. `--acm-dist <dir>`: an existing build (its cli.js runs with the
+ * node_modules it can resolve from there). `--acm-ref <ref>`: the commit, without bench/ and test/, is
+ * exported with `git archive` into `<work-dir>/acm-builds/<commit>`, linked to this checkout's node_modules and built with its own
+ * `npm run build` (reused on later invocations). Refused, a cached build too, when the ref's package-lock.json differs from
+ * this checkout's: the shared node_modules would not be the dependencies that version declares.
+ */
+export async function resolveBaseline(opts: Pick<Options, 'acmRef' | 'acmDist' | 'dryRun'>, workDir: string): Promise<AcmBuild | null> {
+  if (opts.acmDist !== undefined) {
+    const dir = path.resolve(opts.acmDist);
+    const entry = path.join(dir, 'cli.js');
+    if (!(await exists(entry))) throw new Error(`--acm-dist ${dir} has no cli.js (pass the dist directory of a build)`);
+    return { id: `dist:${(await dirHash(dir)).slice(0, 12)}`, entry, companionHook: hasCompanionHook(entry) };
+  }
+  if (opts.acmRef === undefined) return null;
+  const commit = tryExec('git', ['rev-parse', '--verify', '--quiet', `${opts.acmRef}^{commit}`], REPO_ROOT);
+  if (commit === null || commit === '') throw new Error(`--acm-ref ${opts.acmRef} is not a commit of this repository`);
+  const dir = path.join(workDir, 'acm-builds', commit);
+  const entry = path.join(dir, 'dist', 'cli.js');
+  const build = (): AcmBuild => ({ id: `ref:${commit.slice(0, 12)}`, entry, companionHook: hasCompanionHook(entry) });
+  // A build made before bench/ was left out of the archive would hold hidden tests next to the runs.
+  if ((await exists(path.join(dir, 'bench'))) || (await exists(path.join(dir, 'test')))) await rm(dir, { recursive: true, force: true });
+  const lock = async (d: string): Promise<string | null> => readFile(path.join(d, 'package-lock.json'), 'utf8').catch(() => null);
+  const lockDiffers = (): Error => new Error(`--acm-ref ${opts.acmRef}: its package-lock.json differs from this checkout's; build it in its own checkout and pass --acm-dist <that dist>`);
+  if (opts.dryRun) return build();
+  // A cached build runs on this checkout's node_modules too, which may have moved on since it was built.
+  if (await exists(path.join(dir, '.built'))) {
+    if ((await lock(dir)) !== (await lock(REPO_ROOT))) throw lockDiffers();
+    return build();
+  }
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dir, { recursive: true });
+  // Only what the build needs: no bench/ (hidden tests, solutions) next to the run workspaces. The archive
+  // is written into the build dir and unpacked there by a relative name: a GNU tar on Windows reads a
+  // drive letter (`D:\\...`) as a remote host, the system bsdtar does not care.
+  const tar = path.join(dir, 'source.tar');
+  execFileSync('git', ['archive', '--format=tar', '-o', tar, commit, '--', '.', ':(exclude)bench', ':(exclude)test'], { cwd: REPO_ROOT, stdio: 'ignore' });
+  execFileSync('tar', ['-xf', 'source.tar'], { cwd: dir, stdio: 'ignore' });
+  await rm(tar, { force: true });
+  if ((await lock(dir)) !== (await lock(REPO_ROOT))) {
+    await rm(dir, { recursive: true, force: true });
+    throw lockDiffers();
+  }
+  // A junction on Windows: a directory symlink there needs a privilege the user may not have.
+  await symlink(path.join(REPO_ROOT, 'node_modules'), path.join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+  const npm = npmCommand();
+  execFileSync(npm.command, [...npm.args, 'run', 'build'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'], timeout: 600_000 });
+  if (!(await exists(entry))) throw new Error(`--acm-ref ${opts.acmRef}: the build produced no dist/cli.js`);
+  await writeFile(path.join(dir, '.built'), `${commit}\n`);
+  return build();
+}
+
+/**
+ * How to run npm without a shell: this Node with npm's own `npm-cli.js` (`npm` is a `.cmd` shim on
+ * Windows, which `execFile` cannot start). Found from `npm_execpath` when run under npm, else next to the
+ * Node binary (Windows: `<node dir>/node_modules/npm`, POSIX: `<prefix>/lib/node_modules/npm`); plain
+ * `npm` as the last resort.
+ */
+export function npmCommand(env: NodeJS.ProcessEnv = process.env, execPath: string = process.execPath): { command: string; args: string[] } {
+  const nodeDir = path.dirname(execPath);
+  const candidates = [
+    env['npm_execpath'],
+    path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(nodeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  for (const c of candidates) if (c !== undefined && c !== '' && /npm-cli\.js$/.test(c) && existsSync(c)) return { command: execPath, args: [c] };
+  return { command: 'npm', args: [] };
 }
 
 function stableJson(value: unknown): string {
@@ -226,20 +445,21 @@ function sha256(text: string): string {
 
 function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'>): string {
   const task = TASKS[p.task];
+  const arm = surfaceArm(p.arm);
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   let def: unknown;
   if (p.host === 'claude') {
     def = {
-      args: claudeArgs({ arm: p.arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
-      settings: claudeProjectSettings(task, fixture, p.arm === 'B' ? companionHookCommand('<server>') : undefined),
-      mcp: claudeMcpConfig(p.arm, '<server>'),
+      args: claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
+      settings: claudeProjectSettings(task, fixture, companionHookFor(ctx, p.host, p.arm, '<server>')),
+      mcp: claudeMcpConfig(arm, '<server>'),
       isolation: claudeIsolationMethod(existsSync(path.join(sourceClaudeConfig(), '.credentials.json'))),
     };
   } else {
-    const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
+    const catalog = ctx.rawCatalog === null ? null : catalogForArm(arm, ctx.rawCatalog);
     def = {
       args: codexArgs('<ws>', task.protectedHook),
-      config: codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome: '<home>', catalogFile: catalog === null ? null : '<catalog>', serverEntry: '<server>', nodePath: 'node', emptyServerEntry: '<empty-server>' }),
+      config: codexConfigToml({ arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome: '<home>', catalogFile: catalog === null ? null : '<catalog>', serverEntry: '<server>', nodePath: 'node', emptyServerEntry: '<empty-server>' }),
       hooks: task.protectedHook ? codexHooksJson(CODEX_HOOK_MATCHER, hookCommand(fixture.facts.protectedFile)) : null,
       catalogSha256: catalog === null ? null : sha256(catalog),
     };
@@ -261,10 +481,14 @@ export function runConfig(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'a
     seed: ctx.seed,
     fixtureSeed: ctx.opts.fixtureSeed,
     fixtureSha256: treeHash(fixture.files),
+    /** The task's own tree (fixture plus task setup): tasks that add files are covered too. */
+    taskTreeSha256: treeHash(initialTree(TASKS[p.task], p.host, fixture)),
     promptSha256: sha256(TASKS[p.task].prompt(fixture.facts)),
     armDefinitionSha256: sha256(armDefinition(ctx, p)),
     agentCodeModeCommit: ctx.git.commit,
     agentCodeModeDirty: ctx.git.dirty,
+    /** Which agent-code-mode build the arm runs: this checkout's dist, a baseline build, or none (other arms). */
+    acmBuild: !isAcmArm(p.host, p.arm) ? null : p.arm === 'B0' || p.arm === 'C0' ? (ctx.baseline?.id ?? null) : 'checkout',
     dryRun: ctx.opts.dryRun,
   };
 }
@@ -296,13 +520,14 @@ async function runClaude(ctx: Context, p: PlannedRun, runWork: string, ws: strin
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   const settingsFile = path.join(runWork, 'claude-settings.json');
   const mcpConfigFile = path.join(runWork, 'mcp-config.json');
-  const settings = `${JSON.stringify(claudeProjectSettings(task, fixture, p.arm === 'B' ? companionHookCommand(ctx.serverEntry) : undefined), null, 2)}\n`;
-  const mcp = `${JSON.stringify(claudeMcpConfig(p.arm, ctx.serverEntry), null, 2)}\n`;
+  const settings = `${JSON.stringify(claudeProjectSettings(task, fixture, companionHookFor(ctx, p.host, p.arm, serverEntryFor(ctx, p.arm))), null, 2)}\n`;
+  const arm = surfaceArm(p.arm);
+  const mcp = `${JSON.stringify(claudeMcpConfig(arm, serverEntryFor(ctx, p.arm)), null, 2)}\n`;
   await writeFile(settingsFile, settings);
   await writeFile(mcpConfigFile, mcp);
-  const args = claudeArgs({ arm: p.arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile, mcpConfigFile });
+  const args = claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile, mcpConfigFile });
   const configs: Record<string, string> = { 'claude-settings.json': settings, 'mcp-config.json': mcp, 'command.txt': `claude ${args.map((a) => (a === '' ? '""' : a)).join(' ')}\n` };
-  if (ctx.opts.dryRun) return { ...(await cannedTranscript('claude', p.arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
+  if (ctx.opts.dryRun) return { ...(await cannedTranscript('claude', arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
   const stdoutFile = path.join(runWork, 'stdout.jsonl');
   const stderrFile = path.join(runWork, 'stderr.txt');
   const configDir = path.join(runWork, 'claude-config');
@@ -328,17 +553,18 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
   const codexHome = path.join(runWork, 'codex-home');
   await mkdir(codexHome, { recursive: true, mode: 0o700 });
   try {
-    const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
+    const arm = surfaceArm(p.arm);
+    const catalog = ctx.rawCatalog === null ? null : catalogForArm(arm, ctx.rawCatalog);
     const catalogFile = catalog === null ? null : path.join(codexHome, 'catalog.json');
     if (catalogFile !== null && catalog !== null) await writeFile(catalogFile, catalog);
-    const config = codexConfigToml({ arm: p.arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome, catalogFile, serverEntry: ctx.serverEntry, nodePath: process.execPath, emptyServerEntry: EMPTY_MCP_SERVER });
+    const config = codexConfigToml({ arm, model: ctx.opts.codexModel, effort: ctx.opts.codexEffort, codexHome, catalogFile, serverEntry: serverEntryFor(ctx, p.arm), nodePath: process.execPath, emptyServerEntry: EMPTY_MCP_SERVER });
     await writeFile(path.join(codexHome, 'config.toml'), config);
     const hooks = task.protectedHook ? codexHooksJson(CODEX_HOOK_MATCHER, hookCommand(fixture.facts.protectedFile)) : null;
     if (hooks !== null) await writeFile(path.join(codexHome, 'hooks.json'), hooks);
     const args = codexArgs(ws, hooks !== null);
     const configs: Record<string, string> = { 'codex-config.toml': config, 'command.txt': `codex ${args.join(' ')}\n` };
     if (hooks !== null) configs['codex-hooks.json'] = hooks;
-    if (ctx.opts.dryRun) return { ...(await cannedTranscript('codex', p.arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
+    if (ctx.opts.dryRun) return { ...(await cannedTranscript('codex', arm)), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
     createCodexHome(codexHome, sourceCodexHome());
     let availableTools: string[] | null = null;
     try {
@@ -362,11 +588,23 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
 }
 
 export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord> {
+  const runWork = path.join(ctx.opts.workDir, 'runs', ctx.date, `${runId(p)}-${Date.now()}`);
+  try {
+    return await executeRunIn(ctx, p, runWork);
+  } finally {
+    // A dry run's workspace is a copy of the reference solution; keeping thousands of them fills the temp volume.
+    if (ctx.opts.dryRun && !ctx.opts.keepWork) await rm(runWork, { recursive: true, force: true });
+  }
+}
+
+async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promise<RunRecord> {
   const task = TASKS[p.task];
   const id = runId(p);
   const startedAt = new Date().toISOString();
-  const runWork = path.join(ctx.opts.workDir, 'runs', ctx.date, `${id}-${Date.now()}`);
   const ws = path.join(runWork, 'ws');
+  // Claude runs with cwd = ws (its MCP roots, so arm B's server, are ws); Codex with cwd = ws and `-C ws`
+  // (arm C's MCP server inherits that cwd). Nothing the host is pointed at may be in the checkout.
+  assertWorkspaceIsolated(ws);
   const workspace = await createWorkspace(ws, task, p.host, ctx.opts.fixtureSeed);
   let solutionAnswer: string | undefined;
   if (ctx.opts.dryRun) solutionAnswer = await task.solution(ws, workspace.fixture.facts);
@@ -403,25 +641,26 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
   if (parsed !== null) {
     if (parsed.hostError !== null) invalidReasons.push(`host error: ${parsed.hostError}`);
     if (!ctx.opts.dryRun && parsed.model !== null && parsed.model !== model) invalidReasons.push(`model mismatch: ran ${parsed.model}, expected ${model}`);
-    if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, p.arm, parsed.availableTools));
+    if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, surfaceArm(p.arm), parsed.availableTools));
     else if (!ctx.opts.dryRun) invalidReasons.push('tool surface not observed');
     if (p.host === 'claude' && !ctx.opts.dryRun) {
       if (parsed.hostContext === null) invalidReasons.push('Claude init event missing: isolation not observed');
       else invalidReasons.push(...claudeIsolationIssues(parsed.hostContext));
     }
-    const arm = checkArm(p.host, p.arm, parsed.toolCalls);
+    const arm = checkArm(p.host, surfaceArm(p.arm), parsed.toolCalls);
     fallback = arm.fallback;
     invalidReasons.push(...arm.reasons);
   }
 
   const config = runConfig(ctx, p);
   const hash = configHash(config);
-  const outDir = runResultDir(ctx.resultsDir, p, hash);
+  const outDir = p.warmup === true ? warmupResultDir(ctx.resultsDir, ctx.invocation, p, hash) : runResultDir(ctx.resultsDir, p, hash);
   await mkdir(outDir, { recursive: true });
   const sctx: SanitizeContext = defaultSanitizeContext([
     { path: ws, label: '<workspace>' },
     { path: path.join(runWork, 'codex-home'), label: '<codex-home>' },
     { path: runWork, label: '<run>' },
+    ...(ctx.baseline === null ? [] : [{ path: path.dirname(ctx.baseline.entry), label: '<baseline>' }]),
     { path: REPO_ROOT, label: '<repo>' },
     { path: process.execPath, label: 'node' },
   ]);
@@ -445,6 +684,7 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     host: p.host,
     arm: p.arm,
     armLabel: ARM_LABELS[p.host][p.arm] ?? p.arm,
+    warmup: p.warmup === true,
     task: p.task,
     run: p.run,
     round: p.round,
@@ -525,20 +765,24 @@ function line(r: RunRecord): string {
   const parts = [
     r.verify.pass ? 'pass' : 'FAIL',
     r.valid ? 'valid' : `INVALID (${r.invalidReasons.join('; ')})`,
-    `${r.parsed?.turns ?? '?'} turns`,
+    `${r.parsed?.requests ?? '?'} requests (${r.parsed?.turns ?? '?'} num_turns)`,
     u ? `in ${u.input} out ${u.output} cache w ${u.cacheCreation} r ${u.cacheRead}` : 'no usage',
     r.costUsd === null ? 'no cost' : `$${r.costUsd.toFixed(4)}`,
     `${(r.wallMs / 1000).toFixed(1)}s`,
     `calls native ${r.parsed?.toolCalls.native ?? 0} run ${r.parsed?.toolCalls.run ?? 0} exec ${r.parsed?.toolCalls.codeMode ?? 0}`,
   ];
   if (r.fallback) parts.push('FALLBACK');
-  return `${r.host} ${r.task} ${r.arm} r${r.run}: ${parts.join(', ')}`;
+  return `${r.warmup ? 'warmup ' : ''}${r.host} ${r.task} ${r.arm} r${r.run}: ${parts.join(', ')}`;
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
   const opts = parseOptions(argv);
   const date = opts.date ?? new Date().toISOString().slice(0, 10);
   const workDir = path.resolve(opts.workDir);
+  if (insideRepo(workDir)) {
+    process.stderr.write(`--work-dir ${workDir} is inside the repository checkout; run workspaces there could read the hidden tests and solutions in bench/tasks. Use a directory outside it (default: ${defaultWorkDir()}).\n`);
+    return 2;
+  }
   installCleanupHandlers();
   for (const stale of sweepStaleHomes(workDir)) process.stderr.write(`removed a temp CODEX_HOME left by an interrupted run: ${path.relative(workDir, stale)}\n`);
   const resultsRoot = opts.out !== undefined ? path.resolve(opts.out) : opts.dryRun ? path.join(workDir, 'dry-run', 'results') : path.join(BENCH_DIR, 'results');
@@ -547,15 +791,30 @@ export async function main(argv: readonly string[]): Promise<number> {
   const seed = opts.seed ?? (await lastSeed(resultsDir)) ?? Math.floor(Math.random() * 2 ** 31);
   const hosts: HostId[] = opts.host === 'all' ? ['claude', 'codex'] : [opts.host];
   const tasks: TaskId[] = opts.tasks ?? [...TASK_IDS];
-  const plan = planRuns(hosts, tasks, opts.arms, opts.runs, seed);
+  const withBaseline = opts.acmRef !== undefined || opts.acmDist !== undefined;
+  const baselineArms: BenchArm[] = [BASELINE_ARMS.claude, BASELINE_ARMS.codex];
+  if (!withBaseline && opts.arms?.some((a) => baselineArms.includes(a))) {
+    process.stderr.write('arms B0/C0 run a baseline build: pass --acm-ref <commit> or --acm-dist <dir>\n');
+    return 2;
+  }
+  const plan = planRuns(hosts, tasks, opts.arms, opts.runs, seed, withBaseline);
   if (plan.length === 0) {
     process.stderr.write('nothing to run: no arm of the chosen hosts matches --arms\n');
     return 2;
   }
+  let baseline: AcmBuild | null = null;
+  if (withBaseline && plan.some((p) => baselineArms.includes(p.arm))) {
+    try {
+      baseline = await resolveBaseline(opts, workDir);
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 2;
+    }
+  }
 
   const serverEntry = path.join(REPO_ROOT, 'dist', 'cli.js');
-  const needsServer = plan.some((p) => (p.host === 'claude' && p.arm === 'B') || (p.host === 'codex' && p.arm === 'C'));
-  if (!opts.dryRun && needsServer && process.platform === 'win32') {
+  const needsServer = plan.some((p) => p.arm !== 'B0' && p.arm !== 'C0' && isAcmArm(p.host, p.arm));
+  if (!opts.dryRun && process.platform === 'win32' && plan.some((p) => isAcmArm(p.host, p.arm))) {
     process.stderr.write('agent-code-mode arms do not run on Windows, where run refuses file operations (#28): pick native arms with --arms\n');
     return 2;
   }
@@ -604,6 +863,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     runsPerArm: opts.runs,
     tasks,
     arms: opts.arms ?? 'all',
+    schedule: 'paired blocks (every arm of a host x task back to back), arm order rotated per round from a seeded base order',
+    warmup: `one ${WARMUP_TASK} run per host x arm before the matrix, kept under warmup/ and out of the statistics`,
+    baseline: baseline === null ? null : { id: baseline.id, companionHook: baseline.companionHook, arms: Object.values(BASELINE_ARMS) },
     timeoutMin: opts.timeoutMin,
     hosts: Object.fromEntries(
       hosts.map((h) => [
@@ -619,9 +881,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     agentCodeModeDirty: git.dirty,
   });
 
-  const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog, seed, versions, git };
-  process.stdout.write(`${opts.dryRun ? 'DRY RUN ' : ''}${plan.length} runs, seed ${seed}, results in ${path.relative(process.cwd(), resultsDir) || resultsDir}\n`);
-  const surfaces = new Map<string, string[]>();
+  const invocation = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog, seed, versions, git, baseline, invocation };
+  const pending: PlannedRun[] = [];
   for (const p of plan) {
     const hash = configHash(runConfig(ctx, p));
     const recordFile = path.join(runResultDir(resultsDir, p, hash), 'record.json');
@@ -631,6 +893,14 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     // A forced rerun drops the old record first, so a run that fails now cannot pass on the old one.
     await rm(recordFile, { force: true });
+    pending.push(p);
+  }
+  // Every arm of a host that still has runs gets the same warmup, so no arm starts on a cold cache.
+  const warmHosts = new Set(pending.map((p) => p.host));
+  const warmup = pending.length === 0 ? [] : planWarmup(plan.filter((p) => warmHosts.has(p.host)), seed);
+  process.stdout.write(`${opts.dryRun ? 'DRY RUN ' : ''}${pending.length} runs (+${warmup.length} warmup), seed ${seed}, results in ${path.relative(process.cwd(), resultsDir) || resultsDir}\n`);
+  const surfaces = new Map<string, string[]>();
+  for (const p of [...warmup, ...pending]) {
     try {
       const record = await executeRun(ctx, p);
       const tools = record.parsed?.availableTools;
@@ -643,7 +913,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (surfaces.size > 0) await recordSurfaces(resultsDir, Object.fromEntries(surfaces));
   const { markdown } = await writeReport(resultsDir);
   process.stdout.write(`\n${markdown}`);
-  const problems = await planProblems(ctx, plan);
+  const problems = await planProblems(ctx, [...warmup, ...plan]);
   for (const problem of problems) process.stderr.write(`${problem}\n`);
   return problems.length === 0 ? 0 : 1;
 }
@@ -651,7 +921,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 async function planProblems(ctx: Context, plan: readonly PlannedRun[]): Promise<string[]> {
   const problems: string[] = [];
   for (const p of plan) {
-    const recordFile = path.join(runResultDir(ctx.resultsDir, p, configHash(runConfig(ctx, p))), 'record.json');
+    const hash = configHash(runConfig(ctx, p));
+    const recordFile = path.join(p.warmup === true ? warmupResultDir(ctx.resultsDir, ctx.invocation, p, hash) : runResultDir(ctx.resultsDir, p, hash), 'record.json');
     let record: RunRecord;
     try {
       record = RunRecordSchema.parse(JSON.parse(await readFile(recordFile, 'utf8')));

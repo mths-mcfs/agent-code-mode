@@ -1,8 +1,11 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeContext } from '../testing/context.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter, type StaticHostAdapterOptions } from '../testing/static-host-adapter.js';
-import { Dispatcher } from './dispatcher.js';
+import { Dispatcher, summarize } from './dispatcher.js';
 import type { BashResult, CallReply, Decision, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, Transaction } from './types.js';
 import { ToolError } from './errors.js';
 
@@ -513,5 +516,41 @@ describe('Dispatcher search lowering', () => {
     const { reply, tools } = await run(new RewritingHook(() => ({ command: 'list-files', parse: () => ({ files: [], truncated: false, filtered: 0 }) })));
     expect(reply).toMatchObject({ ok: false, error: { code: 'denied', source: 'hook' } });
     expect(tools.commits).toEqual([]);
+  });
+});
+
+describe('result paths', () => {
+  // The in-memory runtime keeps posix paths (C:\\x becomes /C:/x), and the real one refuses glob on Windows (#28).
+  it.skipIf(process.platform === 'win32')('are relative to the cwd whether a path comes back in the cwd as given or through its real path', async () => {
+    const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-link-')));
+    try {
+      mkdirSync(path.join(base, 'real'));
+      symlinkSync(path.join(base, 'real'), path.join(base, 'link'));
+      const cwd = path.join(base, 'link');
+      const ctx = makeContext(cwd);
+      const tools = new MemoryToolRuntime({ root: cwd, files: { 'a.ts': 'x\n' } });
+      const adapter = new StaticHostAdapter();
+      const dispatcher = new Dispatcher({ adapter, tools, ctx, policy: await adapter.loadPolicy(ctx) });
+      expect(await dispatcher.dispatch('glob', { pattern: '*.ts' })).toMatchObject({ ok: true, value: { files: ['a.ts'] } });
+      expect(await dispatcher.dispatch('read', { path: 'a.ts' })).toMatchObject({ ok: true, value: { path: 'a.ts' } });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('summarize', () => {
+  const bash = (command: string): string => summarize({ id: 'c1', tool: 'bash', args: { command } }, '/ws');
+
+  it('puts a multi-line command on one line, the same way for every shape of whitespace', () => {
+    const regex = (s: string): string => `bash ${s.replace(/\s*\n\s*/g, ' ⏎ ')}`;
+    for (const command of ['a\nb', 'a  \n \n\t b  ', '\nx', 'x\n', ' \n ', 'a\r\nb', 'one line', '\n\n']) expect(bash(command), JSON.stringify(command)).toBe(regex(command));
+  });
+
+  it('takes linear time on a long run of whitespace', () => {
+    const started = performance.now();
+    bash(`${' '.repeat(1_000_000)}x`);
+    bash(`${' \n'.repeat(500_000)}x`);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });

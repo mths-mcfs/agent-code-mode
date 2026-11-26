@@ -1,11 +1,11 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { containmentUnavailableReason } from '../../src/tools/sandbox.js';
-import { Checks, checkNodeTests, runNodeTests } from '../tasks/checks.ts';
+import { Checks, checkNodeTests, runHiddenTests, runNodeTests } from '../tasks/checks.ts';
 
 const unavailable = process.platform === 'win32' ? 'no OS sandbox on Windows' : await containmentUnavailableReason();
 
@@ -25,6 +25,24 @@ afterEach(async () => {
 });
 
 describe('the verifiers\' node --test run', () => {
+  it('writes the hidden tests into a new hidden-tests directory, never through one the agent left', async () => {
+    const outside = path.join(root, 'outside');
+    await mkdir(outside);
+    const hidden = { 'h.test.js': "require('node:test').test('hidden', () => {});\n" };
+    // A hidden-tests link to a directory outside the workspace.
+    await symlink(outside, path.join(ws, 'hidden-tests'), process.platform === 'win32' ? 'junction' : 'dir');
+    const viaDir = await runHiddenTests(ws, hidden);
+    expect(await readdir(outside)).toEqual([]);
+    // A real hidden-tests directory whose test file links to a file outside it.
+    await rm(path.join(ws, 'hidden-tests'));
+    await mkdir(path.join(ws, 'hidden-tests'));
+    await writeFile(path.join(outside, 'target'), 'kept\n');
+    await symlink(path.join(outside, 'target'), path.join(ws, 'hidden-tests', 'h.test.js')).catch(() => {});
+    const viaFile = await runHiddenTests(ws, hidden);
+    expect(await readFile(path.join(outside, 'target'), 'utf8')).toBe('kept\n');
+    if (unavailable === null) for (const r of [viaDir, viaFile]) expect(r, r.output).toMatchObject({ ok: true, pass: 1, fail: 0 });
+  });
+
   it('fails the check, without throwing, when the workspace is missing', async () => {
     const checks = new Checks();
     await checkNodeTests(checks, path.join(ws, 'missing'));

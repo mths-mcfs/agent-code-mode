@@ -250,9 +250,9 @@ describe('output limits', () => {
     const line = 'é'.repeat(50_000);
     writeFileSync(ws('lines.txt'), `${line}\n${line}\n${line}\n`);
     await expect(runtimeCall({ id: 'read-1', tool: 'read', args: { path: 'lines.txt' } }))
-      .resolves.toMatchObject({ content: `${line}\n${line}`, totalLines: 3, truncated: true });
+      .resolves.toMatchObject({ content: `${line}\n${line}\n`, totalLines: 3, truncated: true });
     await expect(runtimeCall({ id: 'read-2', tool: 'read', args: { path: 'lines.txt', offset: 3 } }))
-      .resolves.toMatchObject({ content: line, startLine: 3, totalLines: 3, truncated: false });
+      .resolves.toMatchObject({ content: `${line}\n`, startLine: 3, totalLines: 3, truncated: false });
   });
 
   it.skipIf(ROOTED_OPS_REFUSED)('sets the grep truncation flag only when a further match exists', async () => {
