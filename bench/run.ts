@@ -456,14 +456,14 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     exitCode: output.exitCode,
     timedOut: output.timedOut,
     wallMs: output.wallMs,
-    parsed: parsed === null ? null : { ...parsed, finalAnswer: sanitize(parsed.finalAnswer, sctx) },
-    parseError,
+    parsed: parsed === null ? null : JSON.parse(sanitize(JSON.stringify(parsed), sctx)),
+    parseError: parseError === null ? null : sanitize(parseError, sctx),
     costUsd,
     costSource,
     verify: { pass: verify.pass, details: verify.details.map((d) => sanitize(d, sctx)) },
     fallback,
     valid: invalidReasons.length === 0,
-    invalidReasons,
+    invalidReasons: invalidReasons.map((r) => sanitize(r, sctx)),
     files,
   });
   await markRunDone(outDir, record);
@@ -630,6 +630,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       process.stdout.write(`skip ${runId(p)} (already recorded with config ${hash})\n`);
       continue;
     }
+    // A forced rerun drops the old record first, so a run that fails now cannot pass on the old one.
+    await rm(recordFile, { force: true });
     try {
       const record = await executeRun(ctx, p);
       const tools = record.parsed?.availableTools;

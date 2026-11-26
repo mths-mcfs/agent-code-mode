@@ -47,6 +47,14 @@ describe('exit code', () => {
     expect(r.errors).toMatch(/claude-T1-A-r1: no usable record/);
   }, 120_000);
 
+  it('is 1 when a forced rerun fails over a good record', async () => {
+    expect((await quiet(() => main(args))).value).toBe(0);
+    vi.spyOn(TASKS.T1, 'solution').mockRejectedValue(new Error('solution crashed'));
+    const r = await quiet(() => main([...args, '--force']));
+    expect(r.value).toBe(1);
+    expect(r.errors).toMatch(/claude-T1-A-r1: no usable record/);
+  }, 120_000);
+
   it('is 1 when a recorded run it resumes is invalid', async () => {
     expect((await quiet(() => main(args))).value).toBe(0);
     const file = await recordFile();
