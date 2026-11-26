@@ -58,11 +58,11 @@ export function macPerlInvocation(pid: number): { file: string; args: string[]; 
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
 
-function decode(bytes: Uint8Array, what: string): string {
+function utf8(bytes: Uint8Array): string | undefined {
   try {
     return strictUtf8.decode(bytes);
   } catch {
-    throw new Error(`${what} is not valid UTF-8`);
+    return undefined;
   }
 }
 
@@ -75,15 +75,18 @@ function splitProcargs(args: Buffer): { argv: string[]; environ: Buffer } {
   if (args.length < 4) throw new Error('the argument area is shorter than its header');
   const argc = args.readInt32LE(0);
   const pathEnd = args.indexOf(0, 4);
-  if (argc < 0 || pathEnd === -1) throw new Error('the argument area is not in the expected layout');
   const start = 4 + Math.ceil((pathEnd - 4 + 1) / 8) * 8;
-  if (start > args.length || args.subarray(pathEnd, start).some((b) => b !== 0)) throw new Error('the argument area is not in the expected layout');
+  if (argc < 0 || pathEnd === -1 || start > args.length || args.subarray(pathEnd, start).some((b) => b !== 0)) {
+    throw new Error('the argument area is not in the expected layout');
+  }
   const argv: string[] = [];
   let at = start;
   for (let i = 0; i < argc; i++) {
     const end = args.indexOf(0, at);
     if (end === -1) throw new Error(`the argument area ends inside argument ${i}`);
-    argv.push(decode(args.subarray(at, end), `argument ${i}`));
+    const arg = utf8(args.subarray(at, end));
+    if (arg === undefined) throw new Error(`argument ${i} is not valid UTF-8`);
+    argv.push(arg);
     at = end + 1;
   }
   return { argv, environ: args.subarray(at) };
@@ -107,39 +110,22 @@ export function parseMacProcess(pid: number, out: Buffer): MacProcess {
   if (at !== out.length) throw new Error('the output has trailing bytes');
   if (bsd.result !== BSDINFO_SIZE || bsd.bytes.readUInt32LE(12) !== pid) throw new Error('its parent process id cannot be read');
   const { argv, environ } = splitProcargs(args.bytes);
-  let cwd: string | undefined;
-  if (vnode.result === VNODEPATHINFO_SIZE) {
-    const raw = vnode.bytes.subarray(CWD_OFFSET, CWD_OFFSET + MAXPATHLEN);
-    const end = raw.indexOf(0);
-    const text = end === -1 ? undefined : strictUtf8Or(raw.subarray(0, end));
-    if (text?.startsWith('/')) cwd = text;
-  }
-  return { argv, environ, ppid: bsd.bytes.readUInt32LE(16), ...(cwd === undefined ? {} : { cwd }) };
+  const path = vnode.bytes.subarray(CWD_OFFSET, CWD_OFFSET + MAXPATHLEN);
+  const end = path.indexOf(0);
+  const cwd = vnode.result === VNODEPATHINFO_SIZE && end !== -1 ? utf8(path.subarray(0, end)) : undefined;
+  return { argv, environ, ppid: bsd.bytes.readUInt32LE(16), ...(cwd?.startsWith('/') ? { cwd } : {}) };
 }
 
-function strictUtf8Or(bytes: Uint8Array): string | undefined {
-  try {
-    return strictUtf8.decode(bytes);
-  } catch {
-    return undefined;
-  }
-}
-
-function failure(pid: number, err: unknown, stderr?: Buffer | string): Error {
-  const detail = stderr?.toString().trim() || (err instanceof Error ? err.message : String(err));
+function failure(pid: number, err: unknown, stderr?: Buffer): Error {
+  const output = stderr ?? (err instanceof Error && 'stderr' in err && Buffer.isBuffer(err.stderr) ? err.stderr : undefined);
+  const detail = output?.toString().trim() || (err instanceof Error ? err.message : String(err));
   return new Error(`process ${pid} cannot be read on macOS: ${detail}`);
 }
 
 function prepare(pid: number): ReturnType<typeof macPerlInvocation> {
   const run = macPerlInvocation(pid);
-  let st: Stats;
   try {
-    st = lstatSync(run.file);
-  } catch (err) {
-    throw failure(pid, err);
-  }
-  try {
-    checkSystemPerl(st);
+    checkSystemPerl(lstatSync(run.file));
   } catch (err) {
     throw failure(pid, err);
   }
@@ -150,28 +136,16 @@ const LIMITS = { timeout: 5_000, maxBuffer: 4 * 1024 * 1024 } as const;
 
 export function readMacProcessSync(pid: number): MacProcess {
   const run = prepare(pid);
-  let out: Buffer;
   try {
-    out = execFileSync(run.file, run.args, { cwd: run.cwd, env: run.env, stdio: ['ignore', 'pipe', 'pipe'], ...LIMITS });
-  } catch (err) {
-    throw failure(pid, err, err instanceof Error && 'stderr' in err && (Buffer.isBuffer(err.stderr) || typeof err.stderr === 'string') ? err.stderr : undefined);
-  }
-  try {
-    return parseMacProcess(pid, out);
+    return parseMacProcess(pid, execFileSync(run.file, run.args, { cwd: run.cwd, env: run.env, stdio: ['ignore', 'pipe', 'pipe'], ...LIMITS }));
   } catch (err) {
     throw failure(pid, err);
   }
 }
 
-export function readMacProcess(pid: number): Promise<MacProcess> {
+export async function readMacProcess(pid: number): Promise<MacProcess> {
+  const run = prepare(pid);
   return new Promise((resolve, reject) => {
-    let run: ReturnType<typeof macPerlInvocation>;
-    try {
-      run = prepare(pid);
-    } catch (err) {
-      reject(err instanceof Error ? err : failure(pid, err));
-      return;
-    }
     execFile(run.file, run.args, { cwd: run.cwd, env: run.env, encoding: 'buffer', ...LIMITS }, (err, stdout, stderr) => {
       if (err) return reject(failure(pid, err, stderr));
       try {
