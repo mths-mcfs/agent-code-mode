@@ -7,9 +7,16 @@ import type { VerifyContext, VerifyResult } from '../types.ts';
 export const T10_FILES = path.join(import.meta.dirname, 'files');
 const HIDDEN = Object.fromEntries(filesFrom(path.join(import.meta.dirname, 'hidden')));
 
+/** Where a `/` starts a regex literal rather than a division: after an operator, a bracket or a keyword. */
+function regexMayStart(source: string, at: number): boolean {
+  const before = source.slice(0, at).trimEnd();
+  if (before === '' || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before)) return true;
+  return /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|new|delete|void|throw|instanceof|yield|await)$/.test(before);
+}
+
 /**
- * `source` with the text of comments, strings and template literals blanked to spaces, the code inside
- * `${...}` kept. Same length, so an index into it is an index into `source`.
+ * `source` with the text of comments, strings, regex literals and template literals blanked to spaces,
+ * the code inside `${...}` kept. Same length, so an index into it is an index into `source`.
  */
 function codeOnly(source: string): string {
   const out = source.split('');
@@ -25,6 +32,17 @@ function codeOnly(source: string): string {
       const stop = end < i + 2 ? source.length : end;
       blank(i, stop);
       i = stop;
+    } else if (ch === '/' && regexMayStart(source, i)) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < source.length && source[j] !== '\n' && (inClass || source[j] !== '/')) {
+        if (source[j] === '\\') j++;
+        else if (source[j] === '[') inClass = true;
+        else if (source[j] === ']') inClass = false;
+        j++;
+      }
+      blank(i + 1, j);
+      i = j + 1;
     } else if (ch === "'" || ch === '"') {
       let j = i + 1;
       while (j < source.length && source[j] !== ch && source[j] !== '\n') j += source[j] === '\\' ? 2 : 1;
@@ -60,21 +78,12 @@ export function formatPriceCalls(source: string): string[][] {
   for (let m = re.exec(code); m !== null; m = re.exec(code)) {
     // A declaration (`function formatPrice(`) is not a call.
     if (/(?:function|as)\s+$/.test(code.slice(0, m.index))) continue;
+    // Commas and brackets are read in `code`, where strings, comments and regexes are blank; the text comes from `source`.
     const args: string[] = [];
     let depth = 0;
-    let quote: string | null = null;
     let cur = '';
     for (let i = m.index + m[0].length; i < source.length; i++) {
-      const ch = source[i] as string;
-      if (quote !== null) {
-        cur += ch;
-        if (ch === '\\') {
-          cur += source[i + 1] ?? '';
-          i++;
-        } else if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+      const ch = code[i] as string;
       if (ch === '(' || ch === '{' || ch === '[') depth++;
       if (ch === ')' || ch === '}' || ch === ']') {
         if (depth === 0) {
@@ -88,7 +97,7 @@ export function formatPriceCalls(source: string): string[][] {
         cur = '';
         continue;
       }
-      cur += ch;
+      cur += source[i] as string;
     }
     calls.push(args);
   }

@@ -21,7 +21,7 @@ import { TASKS } from './tasks/index.ts';
 import { TASK_IDS, type TaskId } from './tasks/types.ts';
 
 /**
- * Workspaces live outside the checkout (default `<os tmpdir>/acm-bench`): an agent that walks up from its
+ * Workspaces live outside the checkout (default `$XDG_CACHE_HOME/agent-code-mode-bench`): an agent that walks up from its
  * workspace must not reach bench/tasks, where the hidden tests and reference solutions are.
  */
 
@@ -52,6 +52,8 @@ const OptionsSchema = z.object({
   out: z.string().optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   dryRun: z.boolean().default(false),
+  /** Keep each dry run's workspace (a real run always keeps it). */
+  keepWork: z.boolean().default(false),
   force: z.boolean().default(false),
   /** Baseline agent-code-mode build: a git ref of this repo, built in a temporary directory... */
   acmRef: z.string().min(1).optional(),
@@ -60,9 +62,14 @@ const OptionsSchema = z.object({
 }).refine((o) => o.acmRef === undefined || o.acmDist === undefined, { message: '--acm-ref and --acm-dist are mutually exclusive' });
 export type Options = z.infer<typeof OptionsSchema>;
 
-/** Default work dir: outside the checkout, so no run workspace has the repo (and bench/tasks) above it. */
-export function defaultWorkDir(): string {
-  return path.join(os.tmpdir(), 'acm-bench');
+/**
+ * Default work dir: outside the checkout, so no run workspace has the repo (and bench/tasks) above it, and on
+ * disk rather than in the temp directory, which is often a tmpfs with few inodes.
+ */
+export function defaultWorkDir(env: Readonly<Record<string, string | undefined>> = process.env): string {
+  const xdg = env['XDG_CACHE_HOME'];
+  const cache = xdg !== undefined && path.isAbsolute(xdg) ? xdg : path.join(os.homedir(), '.cache');
+  return path.join(cache, 'agent-code-mode-bench');
 }
 
 /** `p` with symlinks resolved as far as it exists (the rest appended), so a link into the repo is caught. */
@@ -120,6 +127,7 @@ export function parseOptions(argv: readonly string[]): Options {
       out: { type: 'string' },
       date: { type: 'string' },
       'dry-run': { type: 'boolean' },
+      'keep-work': { type: 'boolean' },
       force: { type: 'boolean' },
       'acm-ref': { type: 'string' },
       'acm-dist': { type: 'string' },
@@ -143,6 +151,7 @@ export function parseOptions(argv: readonly string[]): Options {
     out: values.out,
     date: values.date,
     dryRun: values['dry-run'],
+    keepWork: values['keep-work'],
     force: values.force,
     acmRef: values['acm-ref'],
     acmDist: values['acm-dist'],
@@ -579,10 +588,19 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
 }
 
 export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord> {
+  const runWork = path.join(ctx.opts.workDir, 'runs', ctx.date, `${runId(p)}-${Date.now()}`);
+  try {
+    return await executeRunIn(ctx, p, runWork);
+  } finally {
+    // A dry run's workspace is a copy of the reference solution; keeping thousands of them fills the temp volume.
+    if (ctx.opts.dryRun && !ctx.opts.keepWork) await rm(runWork, { recursive: true, force: true });
+  }
+}
+
+async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promise<RunRecord> {
   const task = TASKS[p.task];
   const id = runId(p);
   const startedAt = new Date().toISOString();
-  const runWork = path.join(ctx.opts.workDir, 'runs', ctx.date, `${id}-${Date.now()}`);
   const ws = path.join(runWork, 'ws');
   // Claude runs with cwd = ws (its MCP roots, so arm B's server, are ws); Codex with cwd = ws and `-C ws`
   // (arm C's MCP server inherits that cwd). Nothing the host is pointed at may be in the checkout.

@@ -17,6 +17,20 @@ describe('hidden-test tasks', () => {
     expect(result.pass, result.details.join('\n')).toBe(true);
   });
 
+  it('T15 rejects a caller whose only call through the alias name is a method of another object', async () => {
+    const { ws, verify } = await solvedT15();
+    const file = path.join(ws.dir, 'src', 'services', 'orders', 'lookup.js');
+    const text = await readFile(file, 'utf8');
+    const rewritten = text
+      .replace("import { HttpError, request } from '../../lib/http.js';", "import { HttpError, request as send } from '../../lib/http.js';\nimport * as http from '../../lib/http.js';\nconst transport = { send: http.request };")
+      .replaceAll('await request(', 'await transport.send(');
+    expect(rewritten).toContain('await transport.send(');
+    await writeFile(file, rewritten);
+    const result = await verify();
+    expect(result.pass).toBe(false);
+    expect(result.details.join('\n')).toMatch(/FAIL hidden tests pass .*calls request itself/);
+  });
+
   it('T15 rejects a shim: the old helper kept as a wrapper over request', async () => {
     const { ws, verify } = await solvedT15();
     await writeFile(

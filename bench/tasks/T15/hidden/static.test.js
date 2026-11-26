@@ -41,7 +41,8 @@ function callsRequest(text) {
   const named = /\bimport\s*\{([^}]*)\}\s*from\s*['"]\.\.\/\.\.\/lib\/http\.js['"]/.exec(text)?.[1] ?? '';
   const alias = /\brequest\s+as\s+([A-Za-z_$][\w$]*)/.exec(named)?.[1];
   const names = ['request', ...(alias === undefined ? [] : [alias.replace(/\$/g, '\\$')])];
-  return new RegExp(`(?<![\\w$])(?:${names.join('|')})\\s*\\(`).test(text);
+  // `transport.send(` is a method of another object, not a call of the imported binding.
+  return new RegExp(`(?<![\\w$.])(?:${names.join('|')})\\s*\\(`).test(text);
 }
 
 test('static: src/lib/legacy-http.js is deleted', () => {

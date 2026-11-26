@@ -12,17 +12,20 @@ const Call = z.object({ tool: z.string(), decision: z.string().optional(), summa
  * the summary of each call, then a `…[N more …]` marker when not all of them fit.
  */
 const Group = z.object({ tool: z.string(), reason: z.string().optional(), count: z.number().int().positive(), calls: z.array(z.string()) }).passthrough();
-const denialLine = (c: z.infer<typeof Call>): string => `${c.tool} ${c.summary ?? ''}: ${c.reason ?? 'denied'}`.slice(0, 500);
+/** The group shape of the first compact responses (old PR #8): the summary of the first call only. */
+const FirstGroup = z.object({ tool: z.string(), reason: z.string().optional(), count: z.number().int().positive(), first: z.string() }).passthrough();
+const denialLine = (c: z.infer<typeof Call>): string => `${c.tool} ${c.summary ?? ''}: ${c.reason ?? 'denied'}`;
+const firstGroupLine = (g: z.infer<typeof FirstGroup>): string => `${g.tool} ${g.first}: ${g.reason ?? 'denied'} (${g.count} calls)`;
 function groupLines(g: z.infer<typeof Group>): string[] {
   const listed = g.calls.filter((s) => !s.startsWith('…['));
   const lines = listed.map((summary) => denialLine({ tool: g.tool, summary, ...(g.reason === undefined ? {} : { reason: g.reason }) }));
   const more = g.count - listed.length;
-  return more > 0 ? [...lines, `${g.tool} …: ${g.reason ?? 'denied'} (${more} more calls)`.slice(0, 500)] : lines;
+  return more > 0 ? [...lines, `${g.tool} …: ${g.reason ?? 'denied'} (${more} more calls)`] : lines;
 }
 const RunResultText = z.object({
   calls: z.union([
     z.array(Call),
-    z.object({ total: z.number().int().nonnegative(), byTool: z.record(z.string(), z.number().int().nonnegative()), denied: z.array(z.union([Group.transform(groupLines), Call.transform((c) => [denialLine(c)]), z.string().transform((): string[] => [])])).optional() }).passthrough(),
+    z.object({ total: z.number().int().nonnegative(), byTool: z.record(z.string(), z.number().int().nonnegative()), denied: z.array(z.union([Group.transform(groupLines), FirstGroup.transform((g) => [firstGroupLine(g)]), Call.transform((c) => [denialLine(c)]), z.string().transform((): string[] => [])])).optional() }).passthrough(),
   ]),
 }).passthrough();
 

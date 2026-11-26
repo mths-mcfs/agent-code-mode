@@ -17,6 +17,8 @@ function ancestors(dir: string): string[] {
 describe('workspace isolation from the checkout', () => {
   it('defaults the work dir to outside the repository', () => {
     expect(insideRepo(defaultWorkDir())).toBe(false);
+    expect(defaultWorkDir({ XDG_CACHE_HOME: '/var/cache/x' })).toBe(path.join('/var/cache/x', 'agent-code-mode-bench'));
+    expect(defaultWorkDir({})).toBe(path.join(os.homedir(), '.cache', 'agent-code-mode-bench'));
     expect(parseOptions([]).workDir).toBe(defaultWorkDir());
     expect(insideRepo(path.join(REPO_ROOT, 'bench', '.work'))).toBe(true);
     expect(insideRepo(REPO_ROOT)).toBe(true);
@@ -57,7 +59,7 @@ describe('workspace isolation from the checkout', () => {
     const work = await mkdtemp(path.join(os.tmpdir(), 'acm-iso-ws-'));
     const out = path.join(work, 'results');
     try {
-      const dry = await quiet(() => main(['--dry-run', '--tasks', 'T9,T10', '--runs', '1', '--seed', '2', '--work-dir', work, '--out', out, '--date', '2026-01-06']));
+      const dry = await quiet(() => main(['--dry-run', '--keep-work', '--tasks', 'T9,T10', '--runs', '1', '--seed', '2', '--work-dir', work, '--out', out, '--date', '2026-01-06']));
       expect(dry.value, dry.errors).toBe(0);
       const wss = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => path.basename(f) === 'ws').map((f) => path.join(work, 'runs', f));
       expect(wss.length).toBe(2 * 3 + 2 * 3 + 6); // matrix + warmups

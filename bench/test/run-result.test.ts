@@ -48,6 +48,15 @@ describe('runInnerCalls on the server response', () => {
     expect(denials.filter((l) => !l.includes(' more calls)')).length + more).toBe(60);
   });
 
+  it('keeps a long grouped path whole, and reads the first group shape too', () => {
+    const long = `write src/${'p'.repeat(540)}.js`;
+    const denied: CallLogEntry[] = Array.from({ length: 60 }, (_, i) => ({ id: `c${i}`, tool: 'write', summary: i === 0 ? long : `write f${i}`, decision: 'denied', reason: 'hook: protected file', durationMs: 1 }));
+    const text = formatRunResult({ ...base, calls: denied }, { successCap: 4000 }).content.map((c) => c.text).join('');
+    expect(runInnerCalls(text)?.denials[0]).toBe(`write ${long}: hook: protected file`);
+    const old = JSON.stringify({ ok: true, calls: { total: 3, byTool: { write: 3 }, denied: [{ tool: 'write', reason: 'hook: protected file', count: 3, first: 'write .claude/settings.json' }] } });
+    expect(runInnerCalls(old)?.denials).toEqual(['write write .claude/settings.json: hook: protected file (3 calls)']);
+  });
+
   it('is null for text that is not a run result', () => {
     expect(runInnerCalls('not json')).toBeNull();
     expect(runInnerCalls('{"ok":true}')).toBeNull();

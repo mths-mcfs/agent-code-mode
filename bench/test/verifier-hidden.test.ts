@@ -55,6 +55,13 @@ describe('hidden-test tasks', () => {
     expect(formatPriceCalls(source)).toEqual([['100', "'EUR'", 'false'], ['3', "{ currency: 'EUR' }"]]);
   });
 
+  it('T10 reads past a regex literal that holds a quote, and splits arguments outside comments only', () => {
+    expect(formatPriceCalls(`export const re = /"/; export const b = formatPrice(5, 'USD');`)).toEqual([['5', "'USD'"]]);
+    expect(formatPriceCalls("export const re = /['`]/g, c = formatPrice(7, 'USD');")).toEqual([['7', "'USD'"]]);
+    expect(formatPriceCalls("export const c = formatPrice(6 /* a, b */, 'USD');")).toEqual([['6 /* a, b */', "'USD'"]]);
+    expect(formatPriceCalls('export const d = 10 / 2 / formatPrice(8);')).toEqual([['8']]);
+  });
+
   it('T11 fails an implementation that leaves the zero-weight shares empty', async () => {
     const ws = await workspace('T11');
     await TASKS.T11.solution(ws.dir, ws.fixture.facts);
