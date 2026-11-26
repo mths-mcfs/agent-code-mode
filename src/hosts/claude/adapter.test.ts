@@ -723,7 +723,8 @@ describe('policy snapshot', () => {
       ]),
     );
     expect(watched).not.toContain(path.join(s.home, '.claude', '**'));
-    expect(watched).not.toContain(path.join(s.home, '.claude.json'));
+    // Project trust is read from it.
+    expect(watched).toContain(path.join(s.home, '.claude.json'));
     expect(watched).not.toContain(path.join(s.base, 'state', '**'));
     expect(s.policy.isRoutineWatchedChange).toBeTypeOf('function');
   });

@@ -650,8 +650,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     ];
     const canonical = await Promise.all(lexicalProtected.map(canonicalPatterns));
     const protectedPaths = [...new Set([...lexicalProtected, ...canonical.flat()])];
-    // Watched around bash: the files above that Claude Code and this adapter read as policy. Not the rest of the user
-    // config directory (transcripts, sessions, caches) nor ~/.claude.json, which Claude Code rewrites all the time.
+    // Watched around bash: the files above that Claude Code and this adapter read as policy, project trust included, and
+    // not the rest of the user config directory (transcripts, sessions, caches).
     const watchedPaths = [
       ...new Set([
         ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
@@ -671,6 +671,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         ...(managedDir === undefined ? [] : [path.join(managedDir, '**')]),
         ...docs.flatMap((d) => (d.file === undefined ? [] : [d.file])),
         path.join(contextDir(stateDir), '**'),
+        path.join(home, '.claude.json'),
+        path.join(configDir, '.claude.json'),
       ]),
     ];
 
