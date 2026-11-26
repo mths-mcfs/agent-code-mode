@@ -30,15 +30,16 @@ export interface FormatOptions {
 
 /** JSON text of `value`; values JSON cannot represent become strings instead of throwing. */
 export function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
+  // Only the objects on the path to the current value: a shared object that is not its own ancestor is kept.
+  const ancestors: object[] = [];
   try {
     return (
-      JSON.stringify(value, (_key, v: unknown) => {
+      JSON.stringify(value, function (this: unknown, _key, v: unknown) {
         if (typeof v === 'bigint') return v.toString();
-        if (v !== null && typeof v === 'object') {
-          if (seen.has(v)) return '[circular]';
-          seen.add(v);
-        }
+        if (v === null || typeof v !== 'object') return v;
+        while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop();
+        if (ancestors.includes(v)) return '[circular]';
+        ancestors.push(v);
         return v;
       }) ?? 'null'
     );
@@ -248,8 +249,11 @@ function capped(view: View, compact: CompactCalls, cap: number, isError: boolean
 
   const withCalls = (calls: CompactCalls, lists: number, textMax: number): View => {
     const clipped = textMax === Infinity ? base : clipStrings(base, textMax);
+    // File names are keys, which clipping leaves whole: a clipped envelope keeps only the totals.
+    const stat = clipped.diffStat && textMax !== Infinity ? { files: {}, moreFiles: Object.keys(clipped.diffStat.files).length + (clipped.diffStat.moreFiles ?? 0), total: clipped.diffStat.total } : clipped.diffStat;
     return {
       ...clipped,
+      ...(stat ? { diffStat: stat } : {}),
       calls,
       ...(clipped.changedFiles ? { changedFiles: cutList(clipped.changedFiles, lists, where) } : {}),
       ...(clipped.warnings ? { warnings: cutList(clipped.warnings, lists, where) } : {}),
@@ -267,7 +271,14 @@ function capped(view: View, compact: CompactCalls, cap: number, isError: boolean
     ...[100, 10, 1].map((per) => () => withCalls(groupedCalls(200, per, Infinity), 0, 200)),
     ...[1000, 100, 10, 1, 0].map((k) => () => withCalls(groupedCalls(200, 1, k), 0, 200)),
   ];
-  let env: View = { ok: view.ok, calls: { total: compact.total, byTool: {} }, ...(view.overflow ? { overflow: view.overflow } : {}), truncated: true };
+  const counted = (list: CompactCalls['denied'], what: string): string[] | undefined => (list === undefined ? undefined : [`…[${list.length} ${what} calls${where}]`]);
+  let env: View = {
+    ok: view.ok,
+    ...(view.error === undefined ? {} : { error: clipStrings(view.error, 200) }),
+    calls: { total: compact.total, byTool: {}, ...(compact.denied ? { denied: counted(compact.denied, 'denied') } : {}), ...(compact.errors ? { errors: counted(compact.errors, 'failed') } : {}) },
+    ...(view.overflow ? { overflow: view.overflow } : {}),
+    truncated: true,
+  };
   for (const step of ladder) {
     const candidate = step();
     if (safeStringify(candidate).length <= envelopeMax) {

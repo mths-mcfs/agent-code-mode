@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ERROR_CAP_CHARS, SUCCESS_CAP_CHARS } from '../../src/core/output.js';
 import { DEFAULT_STOP_GRACE_MS } from '../../src/core/run.js';
-import { BASH_SANDBOX_AVAILABLE, claudeServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
+import { BASH_SANDBOX_AVAILABLE, callAt, claudeServer, makeLab, posix, snapshot, type Lab, type Server } from './harness.js';
 
 let lab: Lab | undefined;
 let server: Server | undefined;
@@ -114,6 +114,13 @@ describe('cancellation', () => {
 });
 
 describe('oversized outputs are capped', () => {
+  it('a verbose call log over the cap comes back as counts, and callAt says so instead of finding nothing', async () => {
+    const { server } = await start({ 'a.txt': 'a\n' });
+    const out = await server.run(`for (let i = 0; i < 2000; i++) await read({ path: 'a.txt' }); return 1;`);
+    expect(out).toMatchObject({ ok: true, truncated: true });
+    expect(() => callAt(out, 1)).toThrow(/counts/);
+  });
+
   it('a huge return value is refused or capped below the host limit', async () => {
     const { server } = await start({});
     const text = await server.runText(`return 'x'.repeat(5_000_000);`);

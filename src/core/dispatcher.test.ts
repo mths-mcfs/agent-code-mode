@@ -520,7 +520,8 @@ describe('Dispatcher search lowering', () => {
 });
 
 describe('result paths', () => {
-  it('are relative to the cwd whether a path comes back in the cwd as given or through its real path', async () => {
+  // The in-memory runtime keeps posix paths (C:\\x becomes /C:/x), and the real one refuses glob on Windows (#28).
+  it.skipIf(process.platform === 'win32')('are relative to the cwd whether a path comes back in the cwd as given or through its real path', async () => {
     const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-link-')));
     try {
       mkdirSync(path.join(base, 'real'));

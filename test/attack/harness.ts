@@ -32,7 +32,7 @@ export const RunOutputSchema = z.looseObject({
   calls: z
     .union([
       z.array(z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() })),
-      z.looseObject({ total: z.number() }).transform(() => []),
+      z.looseObject({ total: z.number() }).transform(() => null),
     ])
     .optional(),
   changedFiles: z.array(z.string()).optional(),
@@ -220,5 +220,6 @@ export async function codexServer(
 }
 
 export function callAt(out: RunOutput, n: number): { decision: string; reason?: string | undefined } | undefined {
+  if (out.calls === null) throw new Error('calls came back as counts (the response passed its cap): assert on the result instead');
   return out.calls?.find((c) => c.id === `c${n}`);
 }

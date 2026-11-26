@@ -134,6 +134,18 @@ describe('formatRunResult', () => {
     expect(marker).toContain(`${5_000 - shown} more reasons (${5_000 - shown} calls)`);
   });
 
+  it('keeps the error and the denied count when even a clipped envelope does not fit', () => {
+    const diff = Array.from({ length: 12 }, (_, i) => fileDiff(`${'d'.repeat(1_100)}/f${i}.ts`, 2)).join('');
+    const out = formatRunResult(
+      { ...base, ok: false, error: { kind: 'denied', name: 'PermissionDenied', message: 'transaction aborted: c3 was denied' }, calls: [call(1, 'allowed', undefined, 'write'), call(2, 'denied', 'rule: no')], diff },
+      { overflow: new OverflowStore() },
+    );
+    expect(size(out)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
+    const body = json(out);
+    expect(body).toMatchObject({ ok: false, error: { message: 'transaction aborted: c3 was denied' } });
+    expect(JSON.stringify(body['calls'])).toContain('rule: no');
+  });
+
   it('names no overflow when nothing could keep the result', () => {
     const body = json(formatRunResult({ ...base, result: 'x'.repeat(100_000) }));
     expect(body).toMatchObject({ truncated: true });
@@ -143,6 +155,15 @@ describe('formatRunResult', () => {
   it('stays under the cap with output that JSON escaping makes longer', () => {
     const out = formatRunResult({ ...base, logs: Array.from({ length: 2_000 }, () => '\u0001"\\'.repeat(20)) }, { overflow: new OverflowStore() });
     expect(size(out)).toBeLessThanOrEqual(SUCCESS_CAP_CHARS);
+  });
+});
+
+describe('safeStringify', () => {
+  it('keeps an object shared by two fields and marks only a real cycle', () => {
+    const item = { n: 1 };
+    const loop: Record<string, unknown> = { a: 1 };
+    loop['self'] = loop;
+    expect(JSON.parse(safeStringify({ result: [item, item], loop }))).toEqual({ result: [{ n: 1 }, { n: 1 }], loop: { a: 1, self: '[circular]' } });
   });
 });
 
