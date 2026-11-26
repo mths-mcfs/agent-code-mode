@@ -1,0 +1,31 @@
+import { describe, expect, it } from 'vitest';
+import { TASKS } from '../tasks/index.ts';
+import { TASK_IDS } from '../tasks/types.ts';
+import { verifierWorkspaces } from './verifier-workspaces.ts';
+
+const { workspace } = await verifierWorkspaces();
+
+describe.each(TASK_IDS)('verifier %s', (id) => {
+  const task = TASKS[id];
+
+  it('fails on the untouched fixture', async () => {
+    const ws = await workspace(id);
+    const result = await task.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.pass).toBe(false);
+    expect(result.details.some((d) => d.startsWith('FAIL'))).toBe(true);
+  });
+
+  it('passes on the reference solution', async () => {
+    const ws = await workspace(id);
+    const answer = await task.solution(ws.dir, ws.fixture.facts);
+    const result = await task.verify({ workspace: ws.dir, answer, facts: ws.fixture.facts, initial: ws.initial });
+    expect(result.details.filter((d) => d.startsWith('FAIL'))).toEqual([]);
+    expect(result.pass).toBe(true);
+  });
+});
+
+it('names the failing test when node --test fails', async () => {
+  const ws = await workspace('T2');
+  const result = await TASKS.T2.verify({ workspace: ws.dir, answer: '', facts: ws.fixture.facts, initial: ws.initial });
+  expect(result.details.find((d) => d.includes('node --test'))).toMatch(/^FAIL node --test passes \(pass 12, fail 1\): .*truncate keeps the result within max/);
+});

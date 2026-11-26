@@ -21,10 +21,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p bench/tsconfig.json && tsc -p test/tsconfig.json",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test && npm run build",
-    "bench": "node -e \"console.log('bench: not implemented yet')\""
+    "bench": "node bench/run.ts",
+    "bench:report": "node bench/report.ts"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.81",
