@@ -4,6 +4,7 @@ import { formatIssues } from '../../core/schemas.js';
 import type { Decision, McpPolicy, McpServerSpec, PreparedMcpCall } from '../../core/types.js';
 import { mcpNameProblem, shownName } from '../../mcp/names.js';
 import { configSecrets } from '../../mcp/secrets.js';
+import { startsThisServer } from '../../mcp/self.js';
 import { getPath, isTable, type ApprovalPolicy, type TomlTable } from './config.js';
 
 /**
@@ -19,11 +20,9 @@ import { getPath, isTable, type ApprovalPolicy, type TomlTable } from './config.
 export const CODEX_MCP_STARTUP_TIMEOUT_SEC = 10;
 export const CODEX_MCP_TOOL_TIMEOUT_SEC = 60;
 
-/** Variables Codex passes from its own environment to every stdio server. */
-const DEFAULT_ENV_VARS =
-  process.platform === 'win32'
-    ? ['PATH', 'PATHEXT', 'SHELL', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'USERNAME', 'USERDOMAIN', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'TMPDIR', 'POWERSHELL', 'PWSH']
-    : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'USER', '__CF_USER_TEXT_ENCODING', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ'];
+/** Variables Codex 0.169 passes from its own environment to every stdio server (`DEFAULT_ENV_VARS`, `WINDOWS_CORE_ENV_VARS` on Windows, which has no HOME). */
+const WINDOWS_ENV_VARS = ['PATH', 'PATHEXT', 'SHELL', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'USERNAME', 'USERDOMAIN', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'TMPDIR', 'POWERSHELL', 'PWSH'];
+const UNIX_ENV_VARS = ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'USER', '__CF_USER_TEXT_ENCODING', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ'];
 /** Certificate variables Codex passes too when set, as absolute paths (Codex 0.169 `CUSTOM_CA_ENV_KEYS`). */
 const CA_ENV_VARS = ['CODEX_CA_CERTIFICATE', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS', 'GIT_SSL_CAINFO', 'CARGO_HTTP_CAINFO', 'PIP_CERT', 'BUNDLE_SSL_CA_CERT', 'npm_config_cafile', 'NPM_CONFIG_CAFILE'];
 /** Codex strips its own credentials from a server's environment; an entry that sets one is left out rather than guessed at. */
@@ -59,6 +58,8 @@ export function discoverCodexMcp(
   env: Readonly<Record<string, string | undefined>>,
   origin: string,
   allowlist?: { readonly file: string; readonly servers: TomlTable },
+  approvalPolicy: ApprovalPolicy = 'on-request',
+  platform: NodeJS.Platform = process.platform,
 ): { mcp: McpPolicy; rules: Readonly<Record<string, CodexMcpRules>> } {
   const notes: string[] = [];
   const servers: McpServerSpec[] = [];
@@ -86,6 +87,10 @@ export function discoverCodexMcp(
       continue;
     }
     const e = parsed.data;
+    if (startsThisServer(e.command, e.args ?? [], e.cwd === undefined ? cwd : path.resolve(cwd, e.cwd))) {
+      notes.push(`${where}: it is agent-code-mode itself`);
+      continue;
+    }
     if (allowlist !== undefined && !allowedByRequirements(allowlist.servers[name], e.command)) {
       notes.push(`${where}: not allowed by mcp_servers of ${allowlist.file}`);
       continue;
@@ -102,7 +107,7 @@ export function discoverCodexMcp(
       continue;
     }
     const passed = [
-      ...[...DEFAULT_ENV_VARS, ...envVars].flatMap((k) => {
+      ...[...(platform === 'win32' ? WINDOWS_ENV_VARS : UNIX_ENV_VARS), ...envVars].flatMap((k) => {
         const v = env[k];
         return v === undefined ? [] : [[k, v] as const];
       }),
@@ -123,11 +128,17 @@ export function discoverCodexMcp(
       toolTimeoutMs: (e.tool_timeout_sec ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
       origin,
       secrets: configSecrets({ ...e.env, ...Object.fromEntries(passed.filter(([k]) => envVars.includes(k))) }, e.args ?? []),
-      autostart: Object.entries(approval).some(([tool, mode]) => mode === 'approve' && !disabledTools.includes(tool) && (enabledTools === undefined || enabledTools.includes(tool))),
+      autostart: false,
     });
     rules[name] = { ...(enabledTools === undefined ? {} : { enabledTools }), disabledTools, approval };
   }
-  return { mcp: { servers, notes }, rules };
+  // The decision that authorizes a call also decides the start: a server starts when one of its listed tools would run.
+  const startable = servers.map((s) => ({ ...s, autostart: Object.keys(rules[s.name]?.approval ?? {}).some((tool) => codexMcpDecision(probe(s.name, tool), rules, approvalPolicy).kind === 'allow') }));
+  return { mcp: { servers: startable, notes }, rules };
+}
+
+function probe(server: string, tool: string): PreparedMcpCall {
+  return { id: 'start', tool: 'mcp', args: { server, tool, input: {} }, effect: { server, tool, qualifiedName: `mcp__${server}__${tool}`, input: {}, timeoutMs: 0 } };
 }
 
 /**

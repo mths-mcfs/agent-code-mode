@@ -12,12 +12,12 @@ function mcp(server: string, tool: string): PreparedMcpCall {
 
 describe('Codex MCP servers', () => {
   it('starts a server as Codex does: its command, the default variables, env_vars and env, and its timeouts', () => {
-    const { mcp: policy } = discoverCodexMcp(
-      { mcp_servers: { a: { command: 'node', args: ['s.js'], env_vars: ['TOKEN'], env: { MODE: 'x' }, cwd: 'sub', startup_timeout_sec: 3, tool_timeout_sec: 9 } } },
-      cwd,
-      env,
-      'config.toml',
-    );
+    const entry = { mcp_servers: { a: { command: 'node', args: ['s.js'], env_vars: ['TOKEN'], env: { MODE: 'x' }, cwd: 'sub', startup_timeout_sec: 3, tool_timeout_sec: 9 } } };
+    const withHome = { ...env, HOME: '/home/u', USERPROFILE: 'C:\\Users\\u' };
+    // Codex 0.169 passes HOME on Unix only; on Windows its core list has USERPROFILE instead.
+    expect(discoverCodexMcp(entry, cwd, withHome, 'config.toml', undefined, 'on-request', 'linux').mcp.servers[0]?.env).toEqual({ HOME: '/home/u', PATH: '/usr/bin', TOKEN: 'tok-1', MODE: 'x' });
+    expect(discoverCodexMcp(entry, cwd, withHome, 'config.toml', undefined, 'on-request', 'win32').mcp.servers[0]?.env).toEqual({ USERPROFILE: 'C:\\Users\\u', PATH: '/usr/bin', TOKEN: 'tok-1', MODE: 'x' });
+    const { mcp: policy } = discoverCodexMcp(entry, cwd, env, 'config.toml', undefined, 'on-request', 'linux');
     expect(policy.servers).toEqual([
       { name: 'a', command: 'node', args: ['s.js'], env: { PATH: '/usr/bin', TOKEN: 'tok-1', MODE: 'x' }, cwd: path.join(cwd, 'sub'), startupTimeoutMs: 3_000, toolTimeoutMs: 9_000, origin: 'config.toml', autostart: false, secrets: ['tok-1'] },
     ]);
@@ -96,6 +96,11 @@ describe('Codex MCP servers', () => {
     );
     expect(policy.servers.map((s) => s.name)).toEqual(['a']);
     expect(policy.servers[0]?.env['SSL_CERT_FILE']).toBe(path.join(cwd, 'certs', 'ca.pem'));
+  });
+
+  it('leaves out an entry that would start agent-code-mode itself', () => {
+    const { mcp: policy } = discoverCodexMcp({ mcp_servers: { 'agent-code-mode': { command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'codex'] }, ok: { command: 'node' } } }, cwd, env, 'config.toml');
+    expect(policy.servers.map((s) => s.name)).toEqual(['ok']);
   });
 
   it('collects the config values that may be credentials', () => {

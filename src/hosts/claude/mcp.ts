@@ -5,6 +5,7 @@ import { errorMessage } from '../../core/errors.js';
 import type { McpPolicy, McpServerSpec } from '../../core/types.js';
 import { mcpNameProblem, shownName } from '../../mcp/names.js';
 import { configSecrets } from '../../mcp/secrets.js';
+import { startsThisServer } from '../../mcp/self.js';
 import type { ClaudeCliFlags } from './parent-args.js';
 import type { SettingsDoc } from './settings.js';
 
@@ -108,11 +109,13 @@ function toSpec(name: string, c: Candidate, input: ClaudeMcpInput): McpServerSpe
     const inherited = Object.fromEntries(Object.entries(input.env).filter((e): e is [string, string] => e[1] !== undefined));
     const rawArgs = parsed.data.args ?? [];
     const args = rawArgs.map(expand);
+    const command = expand(parsed.data.command);
+    if (startsThisServer(command, args, input.projectDir)) return `server ${shownName(name)} (${c.origin}): it is agent-code-mode itself`;
     const timeout = Number(input.env['MCP_TIMEOUT']);
     const toolTimeout = Number(input.env['MCP_TOOL_TIMEOUT']);
     return {
       name,
-      command: expand(parsed.data.command),
+      command,
       args,
       env: { ...inherited, ...own },
       cwd: input.projectDir,

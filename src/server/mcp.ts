@@ -12,6 +12,7 @@ import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
 import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
 import type { HostKind, McpServerSpec, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
+import { UPSTREAM_ENV } from '../mcp/self.js';
 import { McpUpstreams } from '../mcp/upstream.js';
 import { recoverStaleJournals, type RecoveredJournal } from '../tools/journal.js';
 import { detectHost } from './context.js';
@@ -232,7 +233,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
   });
   const upstreams = opts.upstreams ?? new McpUpstreams({ overflow, clientVersion: opts.version });
   const sessionHost = detectHost({ flag: opts.host, env, meta: undefined });
-  if (sessionHost !== 'generic') {
+  // A serve that is itself an upstream of another serve starts none: a config that names agent-code-mode would recurse.
+  if (sessionHost !== 'generic' && env[UPSTREAM_ENV] === undefined) {
     const discover = async (): Promise<readonly McpServerSpec[]> => {
       const runtime = runtimeFor(sessionHost);
       const policy = await runtime.adapter.loadPolicy(await runtime.contextProvider.resolve({ env, meta: undefined, roots: [], serverCwd }));

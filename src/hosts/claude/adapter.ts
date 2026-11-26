@@ -410,17 +410,16 @@ function describe(rule: Rule): string {
 }
 
 /**
- * Whether some tool of `server` can pass the static rules in this mode
- * without asking: only such a server starts with the session. A deny or ask
- * rule that covers the whole server (`mcp__srv`, `mcp__srv__*`, `mcp__*`,
- * `*`) leaves none.
+ * Whether some call to `server` would pass `mcpDecision` without asking:
+ * only such a server starts with the session. Each allow rule that names the
+ * server, and bypassPermissions, is tried with the tool name it matches.
  */
-function mcpMayAllow(server: string, mode: PermissionMode, modeUnknown: boolean, rules: ClaudePolicy['rules']): boolean {
-  if (mode === 'plan' || modeUnknown) return false;
-  const wholeServer = (r: Rule): boolean => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || matchesToolName(r.tool, `mcp__${server}__`));
-  if ([...rules.deny, ...rules.ask].some(wholeServer)) return false;
-  if (mode === 'bypassPermissions') return true;
-  return rules.allow.some((r) => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || r.tool.startsWith(`mcp__${server}__`)));
+function mcpMayAllow(server: string, policy: ClaudePolicy): boolean {
+  const tools = policy.rules.allow
+    .filter((r) => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || r.tool.startsWith(`mcp__${server}__`)))
+    .map((r) => (r.tool === `mcp__${server}` ? '' : r.tool.slice(`mcp__${server}__`.length).replaceAll('*', '')));
+  if (policy.mode === 'bypassPermissions') tools.push('');
+  return tools.some((tool) => mcpDecision({ id: 'start', tool: 'mcp', args: { server, tool, input: {} }, effect: { server, tool, qualifiedName: `mcp__${server}__${tool}`, input: {}, timeoutMs: 0 } }, policy).kind === 'allow');
 }
 
 /**
@@ -730,6 +729,26 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       ]),
     ];
 
+    const payload: ClaudePolicy = {
+      projectRoot,
+      cwd: sessionCwd,
+      home,
+      configDir,
+      mode,
+      rules,
+      workingDirs: [...workingDirs],
+      blockDirs: [...blockDirs],
+      modeUnknown,
+      preHooks: pre,
+      postHooks: post,
+      hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
+      bashUnsupported,
+      autoAllowSandboxedBash: firstSetting(docs, (s) => s.sandbox?.autoAllowBashIfSandboxed) === true,
+      sandboxLimitsWrites,
+      blockReadsOutside,
+      blockWritesOutside,
+};
+
     const mcp: McpPolicy =
       parent === undefined
         ? { servers: [], notes: ['the Claude Code process could not be read, so its MCP servers are unknown'] }
@@ -743,7 +762,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
             docs,
             projectTrusted: settings.projectTrusted,
             env,
-            mayAllow: (server) => mcpMayAllow(server, mode, modeUnknown, rules),
+            mayAllow: (server) => mcpMayAllow(server, payload),
           });
 
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
@@ -759,25 +778,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       additionalRoots: [...new Set(additionalDirs)],
       readFilter: (realAbsPath: string): boolean => !isReadRestricted(realAbsPath),
       mcp,
-      payload: {
-        projectRoot,
-        cwd: sessionCwd,
-        home,
-        configDir,
-        mode,
-        rules,
-        workingDirs: [...workingDirs],
-        blockDirs: [...blockDirs],
-        modeUnknown,
-        preHooks: pre,
-        postHooks: post,
-        hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
-        bashUnsupported,
-        autoAllowSandboxedBash: firstSetting(docs, (s) => s.sandbox?.autoAllowBashIfSandboxed) === true,
-        sandboxLimitsWrites,
-        blockReadsOutside,
-        blockWritesOutside,
-      },
+      payload,
     };
   }
 

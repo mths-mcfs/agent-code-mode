@@ -6,6 +6,7 @@ import { formatIssues } from '../core/schemas.js';
 import type { McpEffect, McpResult, McpRuntime, McpServerSpec } from '../core/types.js';
 import { shownName } from './names.js';
 import { redact, redactDeep } from './secrets.js';
+import { UPSTREAM_ENV } from './self.js';
 
 /** Largest result (characters of its JSON) handed back whole, as for bash output. */
 export const MCP_RESULT_MAX_CHARS = 1024 * 1024;
@@ -133,7 +134,7 @@ export class McpUpstreams implements McpRuntime {
   }
 
   async #start(spec: McpServerSpec): Promise<Connection> {
-    const transport = new StdioClientTransport({ command: spec.command, args: [...spec.args], env: { ...spec.env }, cwd: spec.cwd, stderr: 'ignore' });
+    const transport = new StdioClientTransport({ command: spec.command, args: [...spec.args], env: { ...spec.env, [UPSTREAM_ENV]: '1' }, cwd: spec.cwd, stderr: 'ignore' });
     const client = new Client({ name: 'agent-code-mode', version: this.#opts.clientVersion ?? '0.0.0' }, { capabilities: {} });
     const conn: Connection = { client, transport, tools: new Set(), closed: undefined };
     client.onclose = () => {

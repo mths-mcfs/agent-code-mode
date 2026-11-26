@@ -29,6 +29,7 @@ interface Options {
   readonly env?: Record<string, string>;
   readonly managed?: Record<string, string>;
   readonly noParent?: true;
+  readonly platform?: NodeJS.Platform;
 }
 
 async function load(o: Options = {}): Promise<{ adapter: ClaudeHostAdapter; policy: PolicySnapshot<ClaudePolicy>; project: string; ctx: ReturnType<typeof makeContext> }> {
@@ -53,6 +54,7 @@ async function load(o: Options = {}): Promise<{ adapter: ClaudeHostAdapter; poli
     managedDir: managed,
     stateDir: path.join(base, 'state'),
     readParent: async () => (o.noParent ? undefined : { argv: ['claude', ...(o.argv ?? [])], cwd: project }),
+    platform: o.platform ?? 'linux',
   });
   const ctx = makeContext(project, {
     host: 'claude',
@@ -159,6 +161,12 @@ describe('Claude MCP servers come from where Claude Code keeps them', () => {
     expect(policy.mcp?.unsupported).toMatch(/strictPluginOnlyCustomization/);
   });
 
+  it('leaves out an entry that would start agent-code-mode itself', async () => {
+    const { policy } = await load({ argv: ['--mcp-config', JSON.stringify({ mcpServers: { 'agent-code-mode': { command: 'npx', args: ['-y', 'agent-code-mode', 'serve'] }, other: server() } })] });
+    expect(names(policy)).toEqual(['other']);
+    expect(policy.mcp?.notes.join(' ')).toContain('it is agent-code-mode itself');
+  });
+
   it('refuses a name whose later definition is invalid, not only that definition', async () => {
     const { policy } = await load({ argv: ['--mcp-config', JSON.stringify({ mcpServers: { a: server() } })], userServers: { a: { type: 'http', url: 'https://x' } } });
     expect(names(policy)).toEqual([]);
@@ -227,11 +235,9 @@ describe('Claude MCP permission rules', () => {
       return adapter.authorize(mcp('srv', 'tool', { a: 1 }), ctx, policy, new AbortController().signal);
     };
     expect(await authorize(withHook('Bash', hook('exit2')))).toEqual({ kind: 'allow' });
-    if (process.platform === 'win32') {
-      // Command hooks are refused on Windows (the hook shell cannot be selected), so a matching one denies the call.
-      expect(await authorize(withHook('mcp__srv__tool', hook('exit2')))).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
-      return;
-    }
+    // Command hooks are refused on Windows (the hook shell cannot be selected), so a matching one denies the call there.
+    expect(await authorize({ ...withHook('mcp__srv__tool', hook('exit2')), platform: 'win32', mode: 'default' })).toMatchObject({ kind: 'deny', source: 'unsupported-config' });
+    if (process.platform === 'win32') return;
     expect(await authorize(withHook('mcp__srv__tool', hook('exit2')))).toMatchObject({ kind: 'deny', source: 'hook' });
     expect(await authorize(withHook('mcp__srv__.*', hook('deny')))).toMatchObject({ kind: 'deny' });
     expect(await authorize(withHook('mcp__srv__tool', hook('update', '{"a":2}')))).toMatchObject({ kind: 'allow', updatedArgs: { server: 'srv', tool: 'tool', args: { a: 2 } } });

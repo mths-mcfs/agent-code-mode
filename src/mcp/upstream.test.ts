@@ -56,7 +56,7 @@ describe('McpUpstreams', () => {
   it('starts the server with the session, keeps it for every call, and passes the configured environment', async () => {
     const { spec, pool, events } = setup({ FIXTURE_SECRET: 's3cret' });
     expect(await pool.call(spec, effect('echo', { a: 1 }), signal())).toEqual({ isError: false, structuredContent: { echoed: { a: 1 } } });
-    expect(await pool.call(spec, effect('env'), signal())).toEqual({ isError: false, text: 'set' });
+    expect(await pool.call(spec, effect('env'), signal())).toEqual({ isError: false, structuredContent: { upstream: '1' } });
     expect(events().filter((e) => e.event === 'start')).toHaveLength(1);
   });
 

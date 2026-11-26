@@ -24,7 +24,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (name === 'bad') return reply({ content: 'not a list' });
       if (name === 'leak') return reply({ content: [{ type: 'text', text: `secret=${process.env.FIXTURE_SECRET}` }], structuredContent: { [process.env.FIXTURE_SECRET]: process.env.FIXTURE_SECRET } });
       if (name === 'leakerr') return send({ id: msg.id, error: { code: -32603, message: `bad token ${process.env.FIXTURE_SECRET} ${'y'.repeat(5000)}` } });
-      if (name === 'env') return reply({ content: [{ type: 'text', text: process.env.FIXTURE_SECRET ? 'set' : 'unset' }] });
+      if (name === 'env') return reply({ content: [{ type: 'text', text: process.env.FIXTURE_SECRET ? 'set' : 'unset' }], structuredContent: { upstream: process.env.AGENT_CODE_MODE_UPSTREAM ?? null } });
       return undefined;
     }
     default:

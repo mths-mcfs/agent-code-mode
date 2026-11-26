@@ -262,6 +262,29 @@ async function connectReal(opts: { serverCwd: string; stateDir: string; roots?: 
 }
 
 describe('MCP server and the session\'s upstream servers', () => {
+  it('starts the session\'s servers, unless this serve is itself an upstream of another', async () => {
+    class Recording extends McpUpstreams {
+      readonly seen: (readonly McpServerSpec[])[] = [];
+      override start(specs: Promise<readonly McpServerSpec[]>): void {
+        void specs.then((list) => this.seen.push(list));
+        super.start(Promise.resolve([]));
+      }
+    }
+    const spec: McpServerSpec = { name: 'srv', command: 'node', args: [], env: {}, cwd: '/ws', startupTimeoutMs: 1_000, origin: 'test', autostart: true, secrets: [] };
+    const adapter = new StaticHostAdapter({ host: 'claude', mcp: { servers: [spec, { ...spec, name: 'idle', autostart: false }], notes: [] } });
+    const factory: RuntimeFactory = (host) => ({ host, contextProvider: new GenericContextProvider(), adapter, tools: new MemoryToolRuntime({ root: '/ws' }), sandbox: new FakeSandbox(), maxTimeoutMs: 10_000 });
+    const make = (env: Record<string, string>) => {
+      const upstreams = new Recording();
+      createMcpServer({ version: '0', host: 'claude', env, serverCwd: '/ws', stateDir: '/nonexistent-state', recoverJournals: false, createRuntime: factory, upstreams });
+      return upstreams;
+    };
+    const top = make({});
+    const nested = make({ AGENT_CODE_MODE_UPSTREAM: '1' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(top.seen.map((l) => l.map((s) => s.name))).toEqual([['srv']]);
+    expect(nested.seen).toEqual([]);
+  });
+
   it('runs no script before the session\'s upstream servers are spawned', async () => {
     const upstreams = new McpUpstreams();
     let release: (specs: readonly McpServerSpec[]) => void = () => undefined;
