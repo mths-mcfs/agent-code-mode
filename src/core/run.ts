@@ -4,6 +4,7 @@ import { releasingClaims } from './file-claims.js';
 import { DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS, type RunArgs } from './schemas.js';
 import type {
   CallLogEntry,
+  CallReply,
   HostAdapter,
   LogLevel,
   PolicyLoadError,
@@ -44,7 +45,10 @@ export interface RunDeps<P = unknown> {
   readonly rollbackTimeoutMs?: number;
   /** Monotonic clock in ms, for tests. */
   readonly now?: () => number;
+  readonly overflow?: { read(args: unknown): CallReply };
 }
+
+const NO_OVERFLOW: CallReply = { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
 
 type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
 
@@ -269,7 +273,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
           timeoutMs: Math.ceil(leftMs),
           memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
           signal: controller.signal,
-          onCall: (tool, args) => active.dispatch(tool, args),
+          onCall: (tool, args) => (tool === 'readOverflow' ? Promise.resolve(deps.overflow?.read(args) ?? NO_OVERFLOW) : active.dispatch(tool, args)),
           onLog: (level, text) => logs.add(level, text),
         });
       } catch (err) {

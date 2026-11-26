@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,7 +18,9 @@ import { NodeToolRuntime } from '../tools/runtime.js';
 import { ROOTED_OPS_REFUSED } from '../testing/platform.js';
 import { GenericContextProvider } from './context.js';
 import { GenericHostAdapter } from './generic-adapter.js';
-import { RUN_LOG_ENV, createMcpServer } from './mcp.js';
+import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
+import { QuickJsSandbox } from '../sandbox/quickjs-sandbox.js';
+import { HYBRID_GUIDANCE, RUN_DESCRIPTION, RUN_LOG_ENV, createMcpServer } from './mcp.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
 
 const root = os.tmpdir();
@@ -27,7 +29,7 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map((c) => c()));
 });
 
-async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; sandbox?: Sandbox } = {}) {
+async function connect(opts: { env?: Record<string, string>; host?: 'claude' | 'codex' | 'generic'; sandbox?: Sandbox; hybrid?: boolean } = {}) {
   const seen: SessionContext[] = [];
   const tools = new MemoryToolRuntime({ root, files: { 'notes.txt': 'hello\n' } });
   const adapter = new StaticHostAdapter({
@@ -54,6 +56,7 @@ async function connect(opts: { env?: Record<string, string>; host?: 'claude' | '
     createRuntime: runtime,
     recoverJournals: false,
     ...(opts.host ? { host: opts.host } : {}),
+    ...(opts.hybrid ? { hybrid: true } : {}),
   });
   const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
   client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: [{ uri: pathToFileURL(root).href }] }));
@@ -85,7 +88,24 @@ describe('MCP server', () => {
       _meta: { 'anthropic/alwaysLoad': true },
       inputSchema: { type: 'object', required: ['code'] },
     });
-    expect(client.getInstructions()).toContain('bash({command');
+    expect(tools[0]?.description).toBe(RUN_DESCRIPTION);
+    expect(tools[0]?.description).toContain('declare function readOverflow');
+    expect(tools[0]?.description).toContain(CODEX_SEARCH_NOTE);
+    expect(client.getInstructions()).toBe(CODEX_SEARCH_NOTE);
+  });
+
+  it('adds the hybrid guidance to the run description only with --hybrid', async () => {
+    const { client } = await connect({ hybrid: true });
+    const { tools } = await client.listTools();
+    expect(tools[0]?.description).toBe(`${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}`);
+  });
+
+  it('reads back with readOverflow what a response cut', async () => {
+    const { client } = await connect({ sandbox: new QuickJsSandbox() });
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return Array.from({ length: 20000 }, (_, i) => 'row ' + i);` } }))) as { overflow: { id: string; chars: number } };
+    const code = `let text = ''; for (;;) { const s = await readOverflow(${JSON.stringify(first.overflow.id)}, text.length); text += s.text; if (!s.truncated) break; } return JSON.parse(text).result.length;`;
+    const second = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code } })));
+    expect(second).toMatchObject({ ok: true, result: 20000 });
   });
 
   it('runs a script end to end: FakeSandbox → Dispatcher → StaticHostAdapter → MemoryToolRuntime, with one denied call', async () => {
@@ -100,17 +120,16 @@ describe('MCP server', () => {
     const body = JSON.parse(textOf(result)) as {
       ok: boolean;
       result: unknown[];
-      calls: { id: string; decision: string; reason?: string }[];
+      calls: unknown;
       changedFiles: string[];
       diff: string;
     };
     expect(body.ok).toBe(true);
-    expect(body.calls.map((c) => [c.id, c.decision])).toEqual([
-      ['c1', 'allowed'],
-      ['c2', 'denied'],
-      ['c3', 'allowed'],
-    ]);
-    expect(body.calls[1]?.reason).toBe('rule: rm is not allowed');
+    expect(body.calls).toEqual({
+      total: 3,
+      byTool: { write: 1, bash: 1, read: 1 },
+      denied: [{ id: 'c2', tool: 'bash', summary: 'bash rm -rf /', reason: 'rule: rm is not allowed' }],
+    });
     expect(body.result[1]).toMatchObject({ error: { name: 'PermissionDenied', source: 'rule' } });
     expect(body.result[2]).toMatchObject({ content: 'hello\n' });
     expect(body.changedFiles).toHaveLength(1);
@@ -168,8 +187,7 @@ describe('MCP server', () => {
     expect(text.length).toBeLessThanOrEqual(9_500);
     const body: unknown = JSON.parse(text);
     expect(body).toMatchObject({ truncated: true });
-    if (process.platform === 'win32') expect(body).not.toHaveProperty('overflowPath');
-    else expect(body).toHaveProperty('overflowPath', expect.any(String));
+    expect(body).toHaveProperty('overflow.id', expect.any(String));
 
     const invalid = await client.callTool({ name: 'run', arguments: { code: 'x', transaction: 'y'.repeat(100_000) } });
     expect(invalid.isError).toBe(true);
@@ -245,6 +263,17 @@ describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
     writeFileSync(manifest, readFileSync(manifest, 'utf8').replace(`"pid":${process.pid},`, `"pid":${dead},`));
   }
 
+  it('leaves the overflow files older versions wrote in the state directory, and writes none', async () => {
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const old = path.join(stateDir, 'run-1732500000000-0123456789ab.json');
+    writeFileSync(old, '{"ok":true}');
+    const client = await connectReal({ serverCwd: workspace, stateDir });
+    const body = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return 'x'.repeat(60000);` } })));
+    expect(body).toHaveProperty('overflow.id');
+    expect(readFileSync(old, 'utf8')).toBe('{"ok":true}');
+    expect(readdirSync(stateDir).filter((n) => n.startsWith('run-'))).toEqual([path.basename(old)]);
+  });
+
   it('runs JavaScript in the real sandbox and applies the generic policy: reads only', async () => {
     writeFileSync(path.join(workspace, 'a.txt'), 'hello\n');
     const client = await connectReal({ serverCwd: workspace, stateDir });
@@ -252,8 +281,8 @@ describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
 let w; try { await write({ path: 'b.txt', content: 'x' }); w = 'written'; } catch (e) { w = e.name; }
 return { content: r.content, w };`;
     const body = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code } })));
-    expect(body).toMatchObject({ ok: true, result: { content: 'hello', w: 'PermissionDenied' } });
-    expect(body.calls.map((c: { decision: string }) => c.decision)).toEqual(['allowed', 'denied']);
+    expect(body).toMatchObject({ ok: true, result: { content: 'hello\n', w: 'PermissionDenied' } });
+    expect(body.calls).toMatchObject({ total: 2, denied: [{ id: 'c2', tool: 'write' }] });
   });
 
   it('restores what a crashed run left in the server cwd at start, and reports it in the first run and the run log', async () => {
@@ -265,7 +294,7 @@ return { content: r.content, w };`;
     expect(first.result).toBe('original');
     expect(first.warnings.join('\n')).toContain(`restored: ${path.join(workspace, 'a.txt')}`);
     const second = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: 'return 1;' } })));
-    expect(second.warnings).toEqual([]);
+    expect(second).not.toHaveProperty('warnings');
     const lines = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(lines.map((l) => l.event)).toEqual(['recovery', 'run', 'run']);
     expect(lines[0]).toMatchObject({ trigger: 'startup', journals: [{ restored: [path.join(workspace, 'a.txt')], conflicts: [], leftoverTemps: [] }] });

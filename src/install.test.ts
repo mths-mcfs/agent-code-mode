@@ -47,13 +47,13 @@ describe('install', () => {
       hooks: { PreToolUse: [{ matcher: 'mcp__agent-code-mode__run', hooks: [{ type: 'command', command: 'npx -y agent-code-mode hook' }] }] },
     });
     const mcp: unknown = JSON.parse(readFileSync(path.join(project, '.mcp.json'), 'utf8'));
-    expect(mcp).toEqual({ mcpServers: { 'agent-code-mode': { type: 'stdio', command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'claude'] } } });
+    expect(mcp).toEqual({ mcpServers: { 'agent-code-mode': { type: 'stdio', command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'claude', '--hybrid'] } } });
     expect((await planInstall(opts({}))).changes).toEqual([]);
   });
 
   it('Claude user scope: prints the claude mcp add command and only touches the user settings', async () => {
     const plan = await planInstall(opts({ scope: 'user' }));
-    expect(plan.commands).toEqual(['claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude']);
+    expect(plan.commands).toEqual(['claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude --hybrid']);
     expect(plan.changes.map((c) => c.file)).toEqual([path.join(home, '.claude', 'settings.json')]);
   });
 

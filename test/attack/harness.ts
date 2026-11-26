@@ -124,7 +124,7 @@ async function serve(runtime: Runtime, lab: Lab, meta: () => Promise<Record<stri
   return {
     async run(code, opts = {}) {
       const text = await call(
-        { code, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
+        { code, verbose: true, ...(opts.transaction ? { transaction: true } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}) },
         opts.signal,
       );
       return RunOutputSchema.parse(JSON.parse(text));

@@ -18,6 +18,7 @@ import type {
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
+  ScriptValue,
   SearchLowering,
   SessionContext,
   ToolCall,
@@ -517,7 +518,7 @@ export class Dispatcher<P = unknown> {
     }
 
     this.#calls[slot] = { id: prepared.id, tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
-    return { ok: true, value };
+    return { ok: true, value: scriptValue(value, this.#realCwd) };
   }
 
   #toolFailure(err: unknown): Failure {
@@ -602,6 +603,16 @@ function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall
 export function displayPath(absPath: string, cwd: string): string {
   const rel = path.relative(cwd, absPath);
   return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
+}
+
+function scriptValue(result: ToolResult, cwd: string): ScriptValue {
+  if ('matches' in result) {
+    const rows = result.matches.map((m) => [displayPath(m.file, cwd), m.line, m.text] as const);
+    return { columns: ['file', 'line', 'text'], rows, count: rows.length, truncated: result.truncated, filtered: result.filtered };
+  }
+  if ('files' in result) return { ...result, files: result.files.map((f) => displayPath(f, cwd)) };
+  if ('path' in result) return { ...result, path: displayPath(result.path, cwd) };
+  return result;
 }
 
 /** Short description of a call for the call log. */

@@ -140,7 +140,7 @@ export interface BashResult {
 export interface ReadResult {
   /** Absolute real path that was read. */
   readonly path: string;
-  /** The returned lines, joined with `\n`. */
+  /** Exact text of the returned lines: each keeps its newline, except a last line the file leaves unterminated. */
   readonly content: string;
   /** 1-based line number of the first returned line. */
   readonly startLine: number;
@@ -209,6 +209,24 @@ export interface GlobResult {
   /** Matching files left out because the host's Read rules refuse them (`PolicySnapshot.readFilter`). */
   readonly filtered: number;
 }
+
+export interface ScriptGrepResult {
+  readonly columns: readonly ['file', 'line', 'text'];
+  readonly rows: readonly (readonly [file: string, line: number, text: string])[];
+  readonly count: number;
+  readonly truncated: boolean;
+  readonly filtered: number;
+}
+
+export interface OverflowSlice {
+  readonly text: string;
+  readonly offset: number;
+  readonly totalChars: number;
+  /** True when the kept result goes on after `text`. */
+  readonly truncated: boolean;
+}
+
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice;
 
 /** Maps each tool to its result type. */
 export interface ToolResultMap {
@@ -635,7 +653,7 @@ export type BindingError =
 
 /** Reply to one binding call. Never thrown: the dispatcher always resolves. */
 export type CallReply =
-  | { readonly ok: true; readonly value: ToolResult }
+  | { readonly ok: true; readonly value: ScriptValue }
   | { readonly ok: false; readonly error: BindingError };
 
 /** Options of `Sandbox.run`. */
@@ -727,6 +745,4 @@ export interface RunResult {
   readonly rolledBack?: RollbackReport;
   /** Notes the model must know, e.g. bash effects that were not rolled back. */
   readonly warnings: readonly string[];
-  /** Set by output shaping when the full result was written to a file. */
-  readonly overflowPath?: string;
 }

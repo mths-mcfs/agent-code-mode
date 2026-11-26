@@ -24,8 +24,10 @@ npx -y agent-code-mode install --host claude --scope project
 User scope prints the registration command and the companion hook for `~/.claude/settings.json`. It never edits `~/.claude.json`; run the command yourself:
 
 ```sh
-claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude
+claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude --hybrid
 ```
+
+Claude Code keeps its own file and shell tools next to `run`. `--hybrid` adds one line to the `run` description that says when to use each: a native tool for one read, edit or command, and `run` for three or more calls, a loop over files, or filtering a large output. Without `--hybrid`, the description is the same as before. Remove the flag from the server entry if you turn Claude Code's own tools off.
 
 ```json
 {
@@ -65,11 +67,11 @@ The script is the body of an async function. All bindings are async globals; `re
 
 ```js
 const hits = await grep({ pattern: 'TODO', glob: '*.ts' });
-for (const file of [...new Set(hits.matches.map((m) => m.file))]) {
+for (const file of [...new Set(hits.rows.map(([file]) => file))]) {
   await edit({ path: file, oldString: 'TODO', newString: 'DONE', replaceAll: true });
 }
 const test = await bash({ command: 'npm test --silent' });
-return { files: hits.matches.length, exitCode: test.exitCode };
+return { matches: hits.count, exitCode: test.exitCode };
 ```
 
 | Binding | Returns |
@@ -78,10 +80,20 @@ return { files: hits.matches.length, exitCode: test.exitCode };
 | `read({path, offset?, limit?})` | `{path, content, startLine, totalLines, truncated}` |
 | `write({path, content})` | `{path, created, diff}` |
 | `edit({path, oldString, newString, replaceAll?})` | `{path, replacements, matchStrategy, diff}` |
-| `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{matches: [{file, line, text}], truncated, filtered}` |
+| `grep({pattern, path?, glob?, ignoreCase?, maxResults?})` | `{columns: ['file', 'line', 'text'], rows: [[file, line, text]], count, truncated, filtered}` |
 | `glob({pattern, path?, maxResults?})` | `{files, truncated, filtered}` |
+| `readOverflow(id, offset?, limit?)` | `{text, offset, totalChars, truncated}`: a slice of a result that a response cut |
 
-`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `run` takes `{code, transaction?, timeoutMs?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied. The result holds the return value, logs, a call log, the changed files and a combined diff.
+`console.log/info/warn/error` go to `logs`. A denied call rejects with an `Error` named `PermissionDenied` (with `source` and `reason`); other failures reject with `ToolError` (with `code`). `read` returns the exact text of the lines, including each line's newline. Paths in results are relative to the working directory when they are inside it, and hooks and rules still see absolute paths. `run` takes `{code, transaction?, timeoutMs?, verbose?}`. With `transaction: true`, file changes are rolled back if the script throws, times out, is cancelled or any call is denied.
+
+The response is one JSON block, `{ok, result | error, logs, calls, changedFiles, diff | diffStat, warnings}`, with empty fields left out:
+
+- `calls` is `{total, byTool, denied, errors}`. Every denied and failed call is listed with its reason.
+- A diff over 1,500 characters becomes `diffStat`, the lines added and removed for up to 10 files plus the totals.
+- A multi-line string result longer than 200 characters comes as plain text in a second block.
+- A response stays under about 10,000 tokens (40,000 characters, 9,500 for an error). Past that, the result, the logs and the diff keep their start and end, `truncated: true` is set, and each cut is marked. Denied and failed calls that do not fit one by one are grouped by tool and reason, with exact counts.
+- Whenever a response leaves something out, the whole result stays in the server's memory for 30 minutes, and the response carries `overflow: {id, chars}`. A later script reads it back with `readOverflow(id)`. The id works only in the same server process, and nothing is written to disk.
+- `verbose: true` returns every call and the whole diff. Above the cap, the calls come back as counts again, and the full log is kept for `readOverflow`.
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` names the rung that matched.
 
@@ -117,7 +129,7 @@ What the server cannot see, so it cannot apply:
 - Agent SDK `canUseTool` callbacks;
 - Claude skill and agent frontmatter hooks, and `prompt`/`agent`/`mcp_tool` hook types (refused, not ignored).
 
-Output is capped below the hosts' MCP limits (30,000 characters, 9,500 for errors). A larger result is written to a file in the state directory and its path is returned.
+Responses are capped below the hosts' MCP limits (see Usage). Older versions wrote each cut result whole to the state directory (`$XDG_STATE_HOME/agent-code-mode`, default `~/.local/state/agent-code-mode`) as `run-<timestamp>-<hex>.json`. The server no longer writes or reads those files, and they are safe to delete by hand.
 
 Set `AGENT_CODE_MODE_LOG=<absolute file>` in the server's environment to append one JSON line per run (context sources and the call log) and per crash recovery. It is off by default.
 
@@ -136,9 +148,14 @@ test/e2e/codex.sh <dir>    # real codex exec run with the same hook (needs a log
 
 ```sh
 npm run bench -- --dry-run                                   # reference solutions and recorded transcripts, no model calls
-npm run bench -- --host claude --arms A,B --tasks T1,T5 --runs 3
+npm run bench -- --host claude --arms A,B,C --tasks T1,T5 --runs 3
+npm run bench -- --host claude --arms B,B0 --acm-ref <commit> # this checkout against another build
 npm run bench:report                                         # re-render the newest bench/results/<date>
 ```
+
+Arms: Claude A native tools, B `run` only, C both (the server started with `serve --hybrid`); Codex A native tools, B Codex's own code mode, C `run` only. `--acm-ref <commit>` (built from a `git archive` of that commit) or `--acm-dist <dir>` (an existing build) adds the baseline arm, Claude B0 or Codex C0, which runs that other build in the same matrix.
+
+Each round runs every arm of a host on one task back to back, and the arm order rotates every round. Before the matrix, every arm makes the same warm-up run, which is kept under `warmup/` and out of every number. The report gives pass@1, pass^k, cost per run and per solved task, and model requests counted from usage events. It compares every arm with arm A, and each baseline with its current arm, as mean differences with paired bootstrap 95% intervals over tasks. Tasks T9 to T15 are checked with hidden tests the agent never sees, and run workspaces live outside the checkout (default `<os tmpdir>/acm-bench`, and `--work-dir` refuses a directory inside it), so an agent cannot read them.
 
 The dry run exits non-zero when a planned run fails, is invalid or left no record. The task checks run the workspace's tests in the same OS sandbox as `bash` (writes only to the workspace, no network), so they need its dependencies (Bubblewrap and socat on Linux). On Windows they run unconfined.
 

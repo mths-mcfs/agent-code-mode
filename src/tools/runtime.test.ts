@@ -223,7 +223,7 @@ describe('protected paths', () => {
     expect(await code(prep('edit', { path: '.git/config', oldString: '[core]', newString: '[x]' }))).toBe('protected-path');
     expect(await code(prep('edit', { path: '.claude/settings.json', oldString: '{}', newString: '{"x":1}' }))).toBe('protected-path');
     const read = await run('read', { path: '.git/config' });
-    expect('content' in read && read.content).toBe('[core]');
+    expect('content' in read && read.content).toBe('[core]\n');
     expect(readFileSync(path.join(ws, '.git', 'config'), 'utf8')).toBe('[core]\n');
   });
 
@@ -329,9 +329,12 @@ describe('read', () => {
   it.skipIf(ROOTED_OPS_REFUSED)('returns a window of lines and the total', async () => {
     writeFileSync(path.join(ws, 'r.txt'), 'l1\nl2\nl3\nl4\n');
     const all = await run('read', { path: 'r.txt' });
-    expect(all).toEqual({ path: path.join(ws, 'r.txt'), content: 'l1\nl2\nl3\nl4', startLine: 1, totalLines: 4, truncated: false });
+    expect(all).toEqual({ path: path.join(ws, 'r.txt'), content: 'l1\nl2\nl3\nl4\n', startLine: 1, totalLines: 4, truncated: false });
     const part = await run('read', { path: 'r.txt', offset: 2, limit: 2 });
-    expect(part).toEqual({ path: path.join(ws, 'r.txt'), content: 'l2\nl3', startLine: 2, totalLines: 4, truncated: true });
+    expect(part).toEqual({ path: path.join(ws, 'r.txt'), content: 'l2\nl3\n', startLine: 2, totalLines: 4, truncated: true });
+    writeFileSync(path.join(ws, 'open.txt'), 'a\nb');
+    expect(await run('read', { path: 'open.txt' })).toMatchObject({ content: 'a\nb', totalLines: 2 });
+    expect(await run('read', { path: 'open.txt', limit: 1 })).toMatchObject({ content: 'a\n', truncated: true });
   });
 
   it.skipIf(ROOTED_OPS_REFUSED)('caps the bytes returned and refuses binary files', async () => {

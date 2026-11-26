@@ -132,7 +132,7 @@ describe.runIf(posix)('the example deny-rm hook blocks a call made inside run', 
       const back = (await read({ path: 'a.txt' })).content;
       const rm = await bash({ command: 'rm a.txt' }).then(() => 'ran', (e) => e.name + ': ' + e.message);
       return { back, rm };`);
-    expect(out.result).toMatchObject({ back: 'hello', rm: expect.stringMatching(/^PermissionDenied: .*rm is blocked by the example hook/) });
+    expect(out.result).toMatchObject({ back: 'hello\n', rm: expect.stringMatching(/^PermissionDenied: .*rm is blocked by the example hook/) });
     expect(existsSync(path.join(lab.ws, 'a.txt'))).toBe(true);
   });
 });
