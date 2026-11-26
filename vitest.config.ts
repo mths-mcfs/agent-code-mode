@@ -5,7 +5,8 @@ const attack = process.platform === 'win32' ? [] : ['test/attack/**/*.test.ts'];
 
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts', ...attack],
+    include: ['src/**/*.test.ts', 'bench/**/*.test.ts', ...attack],
+    exclude: ['**/node_modules/**', 'bench/.work/**'],
     testTimeout: 20_000,
   },
 });

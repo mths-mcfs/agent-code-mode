@@ -1,0 +1,3 @@
+{"kind":"call","type":"custom_tool_call","name":"exec","args":"const r = await tools.exec_command({cmd:\"cat config/app.json\", max_output_tokens:2000});\ntext(r.output);\n"}
+{"kind":"request","usage":{"input_tokens":17955,"cached_input_tokens":11392,"output_tokens":36,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":17991}}
+{"kind":"request","usage":{"input_tokens":18108,"cached_input_tokens":11392,"output_tokens":17,"cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":18125}}

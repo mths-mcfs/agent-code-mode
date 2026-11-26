@@ -130,6 +130,18 @@ test/e2e/claude.sh <dir>   # real claude -p run with the example deny-rm hook (n
 test/e2e/codex.sh <dir>    # real codex exec run with the same hook (needs a logged-in codex)
 ```
 
+## Benchmark
+
+`bench/` runs the same tasks with native tools, the host's own code mode and agent-code-mode, on both hosts. A real run uses your logged-in `claude` and `codex` and costs real tokens. It needs Node.js 22.18 or later. The agent-code-mode arms need `npm run build` and Linux: elsewhere the server cannot read the host's exact command line, so it denies every call.
+
+```sh
+npm run bench -- --dry-run                                   # reference solutions and recorded transcripts, no model calls
+npm run bench -- --host claude --arms A,B --tasks T1,T5 --runs 3
+npm run bench:report                                         # re-render the newest bench/results/<date>
+```
+
+The dry run exits non-zero when a planned run fails, is invalid or left no record.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE), which lists the third-party code this project adapts.
