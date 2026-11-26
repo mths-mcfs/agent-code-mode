@@ -90,6 +90,17 @@ describe.skipIf(ROOTED_OPS_REFUSED)('PolicySnapshot.readFilter and additionalRoo
     expect(glob.filtered).toBe(2);
   });
 
+  it('gives two pending preparations of the same search the stricter of their Read filters', async () => {
+    const { ws, ctx } = workspace();
+    const tools = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
+    const call: ToolCall = { id: 'c1', tool: 'grep', args: { pattern: 'token' } };
+    const filtered = await tools.prepare(call, ctx, { ...plain, readFilter: (p) => path.basename(p) !== '.env' });
+    await tools.prepare(call, ctx, plain);
+    const grep = (await tools.commit(filtered, new AbortController().signal)) as GrepResult;
+    expect(grep.matches.map((m) => path.relative(ws, m.file)).sort()).toEqual([path.join('src', 'a.ts'), path.join('src', 'b.secret')]);
+    expect(grep.filtered).toBe(1);
+  });
+
   it('reports filtered 0 without a filter', async () => {
     const { ctx } = workspace();
     const grep = value<GrepResult>(await dispatcherFor(ctx, plain).dispatch('grep', { pattern: 'token' }));

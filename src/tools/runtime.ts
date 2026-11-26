@@ -61,6 +61,10 @@ function readFilterOf(policy: PolicySnapshot): { readonly readFilter?: (realAbsP
   return policy.readFilter ? { readFilter: policy.readFilter } : {};
 }
 
+function bothAllow(a: (realAbsPath: string) => boolean, b: ((realAbsPath: string) => boolean) | undefined): (realAbsPath: string) => boolean {
+  return b === undefined ? a : (p) => a(p) && b(p);
+}
+
 function metaKey(prepared: PreparedCall): string {
   return sha256(JSON.stringify([prepared.id, prepared.tool, prepared.effect]));
 }
@@ -70,8 +74,10 @@ class MetaStore {
 
   put(prepared: PreparedCall, meta: CallMeta): void {
     const key = metaKey(prepared);
+    const earlier = this.#map.get(key);
     this.#map.delete(key);
-    this.#map.set(key, meta);
+    // Two runs can prepare the same call with different Read rules; whichever commits gets the stricter filter.
+    this.#map.set(key, earlier?.readFilter ? { ...meta, readFilter: bothAllow(earlier.readFilter, meta.readFilter) } : meta);
     while (this.#map.size > MAX_PENDING_META) {
       const oldest = this.#map.keys().next();
       if (oldest.done === true) break;

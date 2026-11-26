@@ -30,6 +30,7 @@ describe('install', () => {
     expect(parseInstallArgs([], { cwd: project, env: {}, home })).toBeInstanceOf(Error);
     expect(parseInstallArgs(['--host', 'cursor'], { cwd: project, env: {}, home })).toBeInstanceOf(Error);
     expect(parseInstallArgs(['--host', 'claude', '--force'], { cwd: project, env: {}, home })).toBeInstanceOf(Error);
+    expect(parseInstallArgs(['--host', 'claude', '--write=false'], { cwd: project, env: {}, home })).toBeInstanceOf(Error);
   });
 
   it('Claude project scope: prints and writes .mcp.json and the companion hook, keeping existing settings', async () => {
@@ -54,6 +55,15 @@ describe('install', () => {
     const plan = await planInstall(opts({ scope: 'user' }));
     expect(plan.commands).toEqual(['claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude']);
     expect(plan.changes.map((c) => c.file)).toEqual([path.join(home, '.claude', 'settings.json')]);
+  });
+
+  it('writes nothing when a file changed after the plan was made', async () => {
+    const plan = await planInstall(opts({}));
+    mkdirSync(path.join(project, '.claude'), { recursive: true });
+    writeFileSync(path.join(project, '.claude', 'settings.json'), '{"permissions":{}}');
+    await expect(applyPlan(plan)).rejects.toThrow(/changed after install planned/);
+    expect(readFileSync(path.join(project, '.claude', 'settings.json'), 'utf8')).toBe('{"permissions":{}}');
+    expect(() => readFileSync(path.join(project, '.mcp.json'))).toThrow();
   });
 
   it('refuses to rewrite a settings file it cannot parse', async () => {

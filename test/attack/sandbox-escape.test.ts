@@ -70,7 +70,7 @@ describe('sandbox escape attempts through run', () => {
     const clean = await server.run(`return { polluted: ({}).polluted, path: ({}).path };`);
     expect(clean.result).toEqual({});
     const after = snapshot(lab.base);
-    const changed = Object.keys(after).filter((k) => after[k] !== before[k] && !k.startsWith(lab.stateDir));
+    const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => after[k] !== before[k] && !k.startsWith(lab.stateDir));
     expect(changed.every((k) => k === path.join(lab.ws, 'own.txt'))).toBe(true);
     expect(after[path.join(lab.outside, 'secret.txt')]).toBe('file:outside secret\n');
   });

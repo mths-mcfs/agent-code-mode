@@ -228,6 +228,9 @@ export function planDiff(plan: InstallPlan): string {
 export async function applyPlan(plan: InstallPlan): Promise<void> {
   if (plan.refusals.length > 0) throw new Error(`refusing to write: ${plan.refusals.join('; ')}`);
   for (const change of plan.changes) {
+    if ((await readText(change.file)) !== change.before) throw new Error(`${change.file} changed after install planned the change; run install again`);
+  }
+  for (const change of plan.changes) {
     await mkdir(path.dirname(change.file), { recursive: true });
     await writeFile(change.file, change.after, 'utf8');
   }
@@ -259,9 +262,11 @@ export function parseInstallArgs(
         break;
       }
       case '--write':
+        if (inline !== undefined) return new Error('--write does not take a value');
         write = true;
         break;
       case '--local':
+        if (inline !== undefined) return new Error('--local does not take a value');
         local = true;
         break;
       default:

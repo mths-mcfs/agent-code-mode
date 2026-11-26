@@ -3,7 +3,12 @@
 A generic Code Mode for coding agents. The model writes one JavaScript script that makes many tool calls (`bash`, `read`, `write`, `edit`, `grep`, `glob`) in a single step. Every call inside the script still goes through your host's permission rules and PreToolUse hooks.
 It is an MCP stdio server with one tool, `run`, and works in Claude Code (interactive CLI, `claude -p`, Claude Agent SDK) and in OpenAI Codex CLI.
 
-Status: under construction, not published to npm yet. Until it is, build a checkout (`npm ci && npm run build`) and pass `--local` to `install`, which registers `node <checkout>/dist/cli.js` instead of `npx -y agent-code-mode`.
+Status: under construction, not published to npm yet. The `npx -y agent-code-mode` commands below work once it is. Until then, build a checkout and run its installer with `--local`, which registers `node <checkout>/dist/cli.js` instead of `npx`, in the server entry, the companion hook and the printed `claude mcp add` command alike:
+
+```sh
+npm ci && npm run build
+node dist/cli.js install --host claude --local    # or --host codex; add --scope project and --write as below
+```
 
 ## Install
 
