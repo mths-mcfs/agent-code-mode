@@ -31,6 +31,9 @@ export interface GroupSummary {
   readonly cacheReadTokens: Spread | null;
   readonly costUsd: Spread | null;
   readonly wallMs: Spread | null;
+  /** Calls to the task's MCP tools made as tool calls and from inside scripts (null without an MCP server). */
+  readonly mcpDirect: Spread | null;
+  readonly mcpScript: Spread | null;
   readonly runIds: readonly string[];
 }
 
@@ -150,6 +153,8 @@ export function summarize(all: readonly RunRecord[]): GroupSummary[] {
       cacheReadTokens: nums((r) => r.parsed?.usage?.cacheRead),
       costUsd: nums((r) => r.costUsd),
       wallMs: nums((r) => r.wallMs),
+      mcpDirect: nums((r) => r.parsed?.mcpCalls?.direct),
+      mcpScript: nums((r) => r.parsed?.mcpCalls?.script),
       runIds: runs.map((r) => r.id).sort(),
     });
   }
@@ -316,6 +321,13 @@ export function markdownTable(summary: Summary): string {
     lines.push(
       `| ${g.host} | ${g.task} | ${g.arm} ${g.armLabel} | ${g.configHash} | ${pct(g.passRate)} | ${pct(g.passAll)} | ${fmt(g.requests, int)} | ${fmt(g.turns, int)} | ${fmt(g.inputTokens, int)} | ${fmt(g.outputTokens, int)} | ${fmt(g.cacheCreationTokens, int)} | ${fmt(g.cacheReadTokens, int)} | ${fmt(g.costUsd, usd)} | ${usdOrDash(g.costPerSolvedUsd)} | ${fmt(g.wallMs, secs)} | ${pct(g.fallbackRate)} | ${g.validRuns}/${g.runs} |`,
     );
+  }
+  const mcp = summary.groups.filter((g) => g.mcpDirect !== null || g.mcpScript !== null);
+  if (mcp.length > 0) {
+    lines.push('', '### MCP calls', '', "Calls to the task's MCP tools per valid run: direct (tool calls the model made) and from scripts (`run`'s `mcpCall`, Code Mode REPL, Codex code mode).", '');
+    lines.push('| Host | Task | Arm | Config | Direct | Script | Valid/runs |');
+    lines.push('|---|---|---|---|---|---|---|');
+    for (const g of mcp) lines.push(`| ${g.host} | ${g.task} | ${g.arm} ${g.armLabel} | ${g.configHash} | ${fmt(g.mcpDirect, int)} | ${fmt(g.mcpScript, int)} | ${g.validRuns}/${g.runs} |`);
   }
   if (summary.arms.length > 0) {
     lines.push('', '### Arms over all tasks', '', 'Cohort: runs whose configs differ only in task and arm. Pass@1 and cost/run are means over tasks (each task weighs the same); pass^k uses one k per cohort, the fewest valid runs of any cell, never more than the runs made.', '');

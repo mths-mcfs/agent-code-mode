@@ -77,6 +77,11 @@ export const ParsedRunSchema = z.object({
   hostContext: z.object({ agents: z.array(z.string()), plugins: z.array(z.string()), memory: z.boolean() }).nullable().default(null),
   hostError: z.string().nullable(),
   evidence: z.record(z.string(), z.array(z.number().int().positive())),
+  /**
+   * Calls to a task's MCP tools: `direct` made by the model as tool calls, `script` from inside scripts
+   * (agent-code-mode `mcpCall`, Claude Code Mode REPL, Codex code mode `exec`). Null for tasks without one.
+   */
+  mcpCalls: z.object({ direct: z.number().int().nonnegative(), script: z.number().int().nonnegative() }).nullable().default(null),
 });
 export type ParsedRun = z.infer<typeof ParsedRunSchema>;
 
@@ -123,8 +128,11 @@ export interface ArmCheck {
   readonly reasons: readonly string[];
 }
 
-export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls): ArmCheck {
+/** Calls to the tools of `taskServer` (a task's MCP server) are checked by `checkMcpCalls`, not here. */
+export function checkArm(host: 'claude' | 'codex', arm: ArmId, observed: ToolCalls, taskServer?: string): ArmCheck {
   const reasons: string[] = [];
+  const taskCalls = taskServer === undefined ? 0 : mcpCallCounts({ toolCalls: observed, innerCalls: null }, taskServer).direct;
+  const calls: ToolCalls = { ...observed, other: Math.max(0, observed.other - taskCalls) };
   const total = calls.native + calls.run + calls.codeMode + calls.other;
   if (isHybridArm(host, arm)) {
     // The model picks per call: native only, run only and any mix are all the arm as labeled.
@@ -156,6 +164,33 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
   return { fallback: false, reasons };
 }
 
+/** A tool name of a task's MCP server as either host writes it: `mcp__<server>__<tool>`, or Codex `mcp__<server>__.<tool>`, `mcp__<server>.<tool>`. */
+export function taskToolName(name: string, server: string): string | null {
+  const m = /^(?:exec\.)?mcp__(.+?)(?:__\.|__|\.)([A-Za-z0-9_-]+)$/.exec(name);
+  return m !== null && m[1]?.replace(/-/g, '_') === server.replace(/-/g, '_') ? (m[2] ?? null) : null;
+}
+
+/** Calls to a task's MCP tools: made directly by the model, and made from inside scripts. */
+export function mcpCallCounts(parsed: Pick<ParsedRun, 'toolCalls' | 'innerCalls'>, server: string): { direct: number; script: number } {
+  const sum = (counts: Readonly<Record<string, number>>): number => Object.entries(counts).reduce((n, [tool, k]) => n + (taskToolName(tool, server) === null ? 0 : k), 0);
+  return { direct: sum(parsed.toolCalls.byName), script: parsed.innerCalls === null ? 0 : sum(parsed.innerCalls.byTool) };
+}
+
+/**
+ * Whether an arm reached a task's MCP server the way its label says. Native arms call it directly; arms whose
+ * tools are scripts (agent-code-mode `run`, Claude Code Mode, Codex code mode) call it from scripts, and a
+ * direct call there is a fallback (the host lists the tools in every arm: hiding them would mean a deny rule,
+ * which by parity also applies inside `run`). The hybrid arm may do either.
+ */
+export function checkMcpCalls(host: 'claude' | 'codex', arm: ArmId, counts: { direct: number; script: number }): ArmCheck {
+  if (isHybridArm(host, arm)) return { fallback: false, reasons: counts.direct + counts.script === 0 ? ['hybrid arm made no MCP call, direct or from a script'] : [] };
+  if (arm === 'A') {
+    const reasons = [...(counts.direct === 0 ? ['native arm made no direct MCP tool call'] : []), ...(counts.script > 0 ? [`native arm made ${counts.script} MCP call(s) from scripts`] : [])];
+    return { fallback: false, reasons };
+  }
+  const reasons = [...(counts.script === 0 ? ['script arm made no MCP call from a script'] : []), ...(counts.direct > 0 ? [`script arm made ${counts.direct} direct MCP tool call(s)`] : [])];
+  return { fallback: counts.direct > 0, reasons };
+}
 
 export const CLAUDE_ARM_SURFACE: Readonly<Record<ArmId, readonly string[]>> = {
   A: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
@@ -179,8 +214,16 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return x.length === y.length && x.every((v, i) => v === y[i]);
 }
 
-export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readonly string[]): string[] {
+/** `task`: a task's MCP server whose tools the arm must also list (Codex: directly or nested in `exec`). */
+export function checkSurface(host: 'claude' | 'codex', arm: ArmId, all: readonly string[], task?: { readonly server: string; readonly tools: readonly string[] }): string[] {
   const reasons: string[] = [];
+  const isTask = (t: string): boolean => task !== undefined && taskToolName(t, task.server) !== null;
+  if (task !== undefined) {
+    const seen = new Set(all.map((t) => taskToolName(t, task.server)));
+    const missing = task.tools.filter((t) => !seen.has(t));
+    if (missing.length > 0) reasons.push(`arm ${arm} does not list the task's MCP tools ${missing.join(', ')}`);
+  }
+  const tools = all.filter((t) => !isTask(t));
   if (host === 'claude') {
     const expected = CLAUDE_ARM_SURFACE[arm];
     if (!sameSet(tools.filter((t) => !CLAUDE_INTERACTIVE_HARNESS_TOOLS.includes(t)), expected)) reasons.push(`Claude arm ${arm} tools are [${[...tools].sort().join(', ')}], expected exactly [${[...expected].sort().join(', ')}]`);
