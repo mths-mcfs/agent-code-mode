@@ -65,6 +65,19 @@ describe.runIf(posix)('protected policy files changed by bash are reported', () 
     expect(out.protectedChanges?.at(-1)).toBe('…[5 more in readOverflow]');
   });
 
+  it('reports a write binding to a watched file that is not refused, under that call, and nothing for an ordinary write', async () => {
+    lab = makeLab({ '.claude/commands/c.md': 'a\n' });
+    server = await claudeServer(lab, claude);
+    const out = await server.run(
+      `await write({ path: 'notes.txt', content: 'x' }); await write({ path: '.claude/skills/x/SKILL.md', content: '---\\nname: x\\n---\\n' }); ${writer(lab, 1, path.join(lab.ws, 'a.txt'), 'x')} await edit({ path: '.claude/commands/c.md', oldString: 'a', newString: 'b' }); return 'end';`,
+    );
+    expect(out.ok).toBe(true);
+    expect(out.protectedChanges).toEqual([
+      { call: 'c2', command: 'write .claude/skills/x/SKILL.md', when: 'during', changed: ['.claude/skills/x/SKILL.md'] },
+      { call: 'c4', command: 'edit .claude/commands/c.md', when: 'during', changed: ['.claude/commands/c.md'] },
+    ]);
+  });
+
   it('reports in a transaction, which is not rolled back because of it', async () => {
     lab = makeLab();
     server = await claudeServer(lab, claude);

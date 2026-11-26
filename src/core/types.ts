@@ -499,8 +499,9 @@ export interface PolicySnapshot<P = unknown> {
   /**
    * Absolute path patterns (the `protectedPaths` syntax, each starting with a
    * literal directory) of the policy files the host and this adapter read.
-   * The dispatcher fingerprints them around every `bash` call and reports a
-   * change in `RunResult.protectedChanges`. It never blocks or restores.
+   * The dispatcher fingerprints them around every `bash` call, and around a
+   * `write` or `edit` that lands on one, and reports a change in
+   * `RunResult.protectedChanges`. It never blocks or restores.
    * Absent: nothing is watched.
    */
   readonly watchedPaths?: readonly string[];
@@ -781,12 +782,13 @@ export interface RunResult {
 }
 
 /**
- * Watched host policy files that changed while a bash call ran, or after it
- * ended (before the next bash call or the end of the run). Detected and
- * reported only: nothing was blocked or restored.
+ * Watched host policy files that changed while a call ran (a bash call, or a
+ * write or edit to a watched file), or after it ended (before the next such
+ * call or the end of the run). Detected and reported only: nothing was
+ * blocked or restored.
  */
 export interface ProtectedChange {
-  /** The bash call's id. */
+  /** The call's id. */
   readonly call: string;
   /** Its call-log summary. */
   readonly command: string;

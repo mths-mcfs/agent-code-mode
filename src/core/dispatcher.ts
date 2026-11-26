@@ -541,7 +541,7 @@ export class Dispatcher<P = unknown> {
       const error = new ToolError('tool-error', `${prepared.effect.absPath} is being changed by another transactional run that has not finished; retry once it ends`);
       return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error });
     }
-    const watched = prepared.tool === 'bash' && lowered === undefined;
+    const watched = prepared.tool === 'bash' ? lowered === undefined : (prepared.tool === 'write' || prepared.tool === 'edit') && this.#isWatched(prepared.effect.absPath, policy);
     if (watched) await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'during' });
     let result: ToolResult;
     try {
@@ -691,6 +691,14 @@ export class Dispatcher<P = unknown> {
     };
     this.#watchTail = this.#watchTail.then(run);
     return this.#watchTail;
+  }
+
+  /** Whether a write lands on a watched path: patterns name the session cwd as given, prepared paths are real. */
+  #isWatched(absPath: string, policy: PolicySnapshot<P>): boolean {
+    const patterns = policy.watchedPaths ?? [];
+    const rel = path.relative(this.#realCwd, absPath);
+    const asGiven = rel.startsWith('..') || path.isAbsolute(rel) ? absPath : path.join(this.#opts.ctx.cwd, rel);
+    return findMatchingPattern(absPath, patterns) !== undefined || findMatchingPattern(asGiven, patterns) !== undefined;
   }
 
   #reportProtected(window: WatchWindow, changed: readonly string[], unchecked?: string): void {
