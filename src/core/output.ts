@@ -96,10 +96,10 @@ function gitHeaderNewName(rest: string): string | undefined {
 }
 
 /** A path from a diff line: git ends a name holding a space with a tab, and quotes names with special bytes. */
-function diffName(raw: string): string {
+function diffName(raw: string, prefixed = true): string {
   const name = raw.endsWith('\t') ? raw.slice(0, -1) : raw;
   const unquoted = name.startsWith('"') && name.endsWith('"') && name.length >= 2 ? name.slice(1, -1).replace(/\\(["\\])/g, '$1') : name;
-  return unquoted.replace(/^[ab]\//, '');
+  return prefixed ? unquoted.replace(/^[ab]\//, '') : unquoted;
 }
 
 /**
@@ -136,7 +136,8 @@ export function diffStat(diff: string): DiffStat {
       const name = gitHeaderNewName(header);
       block = { header, ...(name === undefined ? {} : { name: diffName(name) }) };
     } else if (block && line.startsWith('rename to ')) {
-      block.name = diffName(line.slice(10));
+      // `rename to` names the path itself, with no a/ or b/ prefix.
+      block.name = diffName(line.slice(10), false);
     } else if (block && line.startsWith('index ')) {
       block.indexed = true;
     } else if (line.startsWith('--- ')) {

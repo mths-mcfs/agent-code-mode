@@ -199,6 +199,12 @@ describe('diffStat', () => {
       const diff = git('diff', '--cached', '-M', '--no-color');
       expect(diff).toContain('rename to dir b/file');
       expect(diffStat(diff).files).toEqual({ 'dir b/file': '+1 -1', 'dir b/same copy': '+0 -0' });
+      git('commit', '-qm', 'renames');
+      mkdirSync(path.join(dir, 'b'));
+      git('mv', 'dir b/file', 'b/x');
+      const pure = git('diff', '--cached', '-M', '--no-color');
+      expect(pure).toContain('rename to b/x');
+      expect(diffStat(pure).files).toEqual({ 'b/x': '+0 -0' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
