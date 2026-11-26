@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -12,7 +12,7 @@ import { claudeInteractiveArgs, claudeSemver, interactiveEnv, parseClaudeInterac
 import { driveInteractive, findSessionTranscript, INTERACTIVE_DRIVER, serverAlive, sweepStaleTmuxServers, tmuxVersion } from './lib/tmux.ts';
 import { catalogForArm, CODEX_FEATURES_OFF, EMPTY_MCP_SERVER, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
-import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
+import { costByModel, costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
 import { runProcess } from './lib/proc.ts';
 import { ARM_LABELS, BASELINE_ARMS, BENCH_ARMS, checkArm, checkSurface, CLAUDE_ARM_SURFACE, CODEX_COMMON_NON_FILE, hostArms, isAcmArm, RunRecordSchema, surfaceArm, type ArmId, type BenchArm, type ParsedRun, type RunRecord } from './lib/record.ts';
 import { Rng } from './lib/rng.ts';
@@ -309,6 +309,8 @@ export interface Context {
   readonly baseline: AcmBuild | null;
   /** Timestamp of this invocation, naming its warmup directory. */
   readonly invocation: string;
+  /** A Claude credentials file to copy into each run's temporary config dir was found when the invocation started. */
+  readonly claudeCredentials: boolean;
 }
 
 export interface AcmBuild {
@@ -459,14 +461,12 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
       maxTurns: ctx.opts.maxTurns,
       settings: claudeProjectSettings(task, fixture),
       mcp: claudeMcpConfig(arm, '<server>'),
-      isolation: claudeIsolationMethod(true),
     };
   } else if (p.host === 'claude') {
     def = {
       args: claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
       settings: claudeProjectSettings(task, fixture, companionHookFor(ctx, p.host, p.arm, '<server>')),
       mcp: claudeMcpConfig(arm, '<server>'),
-      isolation: claudeIsolationMethod(existsSync(path.join(sourceClaudeConfig(), '.credentials.json'))),
     };
   } else {
     const catalog = ctx.rawCatalog === null ? null : catalogForArm(arm, ctx.rawCatalog);
@@ -490,6 +490,9 @@ export function runConfig(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'a
     model: p.host === 'claude' ? ctx.opts.claudeModel : ctx.opts.codexModel,
     effort: p.host === 'claude' ? ctx.opts.claudeEffort : ctx.opts.codexEffort,
     maxTurns: p.host === 'claude' ? ctx.opts.maxTurns : null,
+    // What the machine gives every arm of a host alike: a cohort fact, never a difference between two cells.
+    isolation: p.host === 'claude' ? claudeIsolationMethod(ctx.claudeCredentials) : null,
+    codexCatalogSha256: p.host === 'codex' && ctx.rawCatalog !== null ? sha256(ctx.rawCatalog) : null,
     timeoutMin: ctx.opts.timeoutMin,
     seed: ctx.seed,
     fixtureSeed: ctx.opts.fixtureSeed,
@@ -593,7 +596,7 @@ async function runClaudeCodeMode(ctx: Context, p: PlannedRun, runWork: string, w
   }
 }
 
-export function codeModeReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null): string[] {
+export function codeModeReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort' | 'claudeModel'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null): string[] {
   const reasons: string[] = [];
   if (!opts.dryRun) {
     if (seen === null) return ['interactive session not observed'];
@@ -610,6 +613,10 @@ export function codeModeReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, 
     if (modes.length > 0) reasons.push(`permission mode ${modes.join(', ')} recorded, expected default`);
     const outside = Object.keys(facts.innerByTool).filter((t) => !CLAUDE_INNER_ALLOWED.includes(t));
     if (outside.length > 0) reasons.push(`REPL scripts called tools outside the arm A tools: ${outside.join(', ')}`);
+    // Claude Code's side calls on other models (the session title on Haiku) never reach the transcript, only its
+    // cost record: a response here on another model is the task's own loop running on a model the arm did not pin.
+    const others = Object.keys(facts.usageByModel).filter((m) => m !== opts.claudeModel);
+    if (!opts.dryRun && others.length > 0) reasons.push(`model responses ran on ${others.join(', ')}, expected only ${opts.claudeModel}`);
   }
   return reasons;
 }
@@ -631,7 +638,7 @@ async function runClaude(ctx: Context, p: PlannedRun, runWork: string, ws: strin
   const stdoutFile = path.join(runWork, 'stdout.jsonl');
   const stderrFile = path.join(runWork, 'stderr.txt');
   const configDir = path.join(runWork, 'claude-config');
-  const isolated = await exists(path.join(sourceClaudeConfig(), '.credentials.json'));
+  const isolated = ctx.claudeCredentials;
   const env: Record<string, string> = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' };
   try {
     if (isolated) {
@@ -693,7 +700,11 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     return await executeRunIn(ctx, p, runWork);
   } finally {
     // A dry run's workspace is a copy of the reference solution; keeping thousands of them fills the temp volume.
-    if (ctx.opts.dryRun && !ctx.opts.keepWork) await rm(runWork, { recursive: true, force: true });
+    if (ctx.opts.dryRun && !ctx.opts.keepWork) {
+      await rm(runWork, { recursive: true, force: true });
+      // The date and runs directories go too once empty; a later run makes them again.
+      for (const dir of [path.dirname(runWork), path.dirname(path.dirname(runWork))]) await rmdir(dir).catch(() => undefined);
+    }
   }
 }
 
@@ -735,6 +746,9 @@ async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promi
   if (parsed?.hostCostUsd != null) {
     costUsd = parsed.hostCostUsd;
     costSource = 'host';
+  } else if (facts !== null) {
+    costUsd = costByModel(ctx.pricing, facts.usageByModel);
+    costSource = costUsd === null ? 'none' : 'pricing.json';
   } else if (parsed?.usage) {
     costUsd = costFromUsage(ctx.pricing, model, parsed.usage);
     costSource = costUsd === null ? 'none' : 'pricing.json';
@@ -743,7 +757,9 @@ async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promi
   const invalidReasons: string[] = [];
   let fallback = false;
   if (output.timedOut) invalidReasons.push(`timed out after ${ctx.opts.timeoutMin} min`);
-  if (output.exitCode !== 0 && !output.timedOut) invalidReasons.push(`host exited with ${output.exitCode}`);
+  // Arm D's driver kills a session it gave up on: the reason is its stop, not an exit status.
+  const stoppedByDriver = output.interactive !== undefined && output.interactive.stop !== 'finished' && output.exitCode === null;
+  if (output.exitCode !== 0 && !output.timedOut && !stoppedByDriver) invalidReasons.push(output.exitCode === null ? 'host did not exit after the run' : `host exited with ${output.exitCode}`);
   if (parseError !== null) invalidReasons.push(`transcript not parsed: ${parseError}`);
   if (parsed !== null) {
     if (parsed.hostError !== null) invalidReasons.push(`host error: ${parsed.hostError}`);
@@ -914,6 +930,21 @@ export async function main(argv: readonly string[]): Promise<number> {
     process.stderr.write('nothing to run: no arm of the chosen hosts matches --arms\n');
     return 2;
   }
+  // Before any host call, so a run that cannot have arm D spends nothing on the other arms.
+  const codeModeArm = plan.some((p) => p.host === 'claude' && p.arm === 'D');
+  let tmux: string | null = null;
+  if (codeModeArm && !opts.dryRun) {
+    if (!(await exists(path.join(sourceClaudeConfig(), '.credentials.json')))) {
+      process.stderr.write(`arm D (Claude Code Mode) needs ${path.join(sourceClaudeConfig(), '.credentials.json')} to copy into a temporary config dir\n`);
+      return 2;
+    }
+    tmux = tmuxVersion();
+    if (tmux === null) {
+      process.stderr.write('arm D (Claude Code Mode) needs tmux on PATH\n');
+      return 2;
+    }
+    for (const stale of sweepStaleTmuxServers()) process.stderr.write(`killed a tmux server left by an interrupted run: ${stale}\n`);
+  }
   let baseline: AcmBuild | null = null;
   if (withBaseline && plan.some((p) => baselineArms.includes(p.arm))) {
     try {
@@ -956,20 +987,6 @@ export async function main(argv: readonly string[]): Promise<number> {
       return 2;
     }
   }
-  const codeModeArm = plan.some((p) => p.host === 'claude' && p.arm === 'D');
-  let tmux: string | null = null;
-  if (codeModeArm && !opts.dryRun) {
-    if (!(await exists(path.join(sourceClaudeConfig(), '.credentials.json')))) {
-      process.stderr.write(`arm D (Claude Code Mode) needs ${path.join(sourceClaudeConfig(), '.credentials.json')} to copy into a temporary config dir\n`);
-      return 2;
-    }
-    tmux = tmuxVersion();
-    if (tmux === null) {
-      process.stderr.write('arm D (Claude Code Mode) needs tmux on PATH\n');
-      return 2;
-    }
-    for (const stale of sweepStaleTmuxServers()) process.stderr.write(`killed a tmux server left by an interrupted run: ${stale}\n`);
-  }
   for (const h of hosts) {
     if (!opts.dryRun && versions[h] === null) {
       process.stderr.write(`${h} CLI not found on PATH\n`);
@@ -1008,7 +1025,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   });
 
   const invocation = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-  const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog, seed, versions, git, baseline, invocation };
+  const ctx: Context = { opts: { ...opts, workDir }, date, resultsDir, pricing: loadPricing(), serverEntry, rawCatalog, seed, versions, git, baseline, invocation, claudeCredentials };
   const pending: PlannedRun[] = [];
   for (const p of plan) {
     const hash = configHash(runConfig(ctx, p));

@@ -224,7 +224,10 @@ export async function driveInteractive(spec: InteractiveSpec): Promise<Interacti
       if (s.codeModeUnavailable !== null) problem = `Code Mode not available: ${s.codeModeUnavailable}`;
       else if (s.dialog !== null) problem = `unexpected dialog before the prompt: ${s.dialog}`;
       else if (paneDead(server).dead) problem = 'host exited before the prompt was shown';
-      else if (s.ready && s.codeModeOn !== null) {
+      else if (elapsed() > spec.timeoutMs && !(s.ready && s.codeModeOn !== null)) {
+        snap('not ready', screen);
+        return outcome('timeout', null, null, elapsed());
+      } else if (s.ready && s.codeModeOn !== null) {
         readyMs = elapsed();
         snap('ready', screen);
         break;

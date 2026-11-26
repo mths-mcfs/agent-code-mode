@@ -75,12 +75,13 @@ describe('exit code', () => {
     expect(r.errors).toMatch(/claude-T1-A-r1: dry run invalid: tool surface not observed/);
   }, 120_000);
 
-  it('is 2 before any host call when arm D has no credentials file to copy', async () => {
+  it('is 2, with that as the only error, before any host call when arm D has no credentials file to copy', async () => {
     vi.stubEnv('CLAUDE_CONFIG_DIR', work);
     try {
-      const r = await quiet(() => main(args.filter((a) => a !== '--dry-run').map((a) => (a === 'A' ? 'D' : a))));
+      // --host all: the Claude and Codex version and catalog calls come after this check.
+      const r = await quiet(() => main(args.filter((a) => a !== '--dry-run' && a !== 'claude' && a !== '--host').map((a) => (a === 'A' ? 'B,D' : a))));
       expect(r.value).toBe(2);
-      expect(r.errors).toMatch(/arm D \(Claude Code Mode\) needs .*\.credentials\.json/);
+      expect(r.errors.trim()).toMatch(/^arm D \(Claude Code Mode\) needs .*\.credentials\.json to copy into a temporary config dir$/);
     } finally {
       vi.unstubAllEnvs();
     }

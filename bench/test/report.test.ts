@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -221,6 +222,18 @@ describe('quality metrics', () => {
     expect(md).toContain('Warmup: 1 run(s), $5.0000');
     // The warmup record never enters a group.
     expect(summarize(records).some((g) => g.task === 'T1')).toBe(false);
+  });
+
+  it('never pools two configs in one cell, even when the cohort key misses their difference', () => {
+    // B ran twice per task with two arm definitions (as when the isolation method sat in the arm definition).
+    const run = (task: string, arm: 'B' | 'D', def: string, pass: boolean, cost: number) =>
+      record({ id: `claude-${task}-${arm}-${def}`, task, arm, pass, cost, configHash: createHash('sha256').update(`${task}${arm}${def}`).digest('hex').slice(0, 12), config: { model: 'm', task, arm, armDefinitionSha256: `${task}${arm}${def}` } });
+    const records = ['T9', 'T10'].flatMap((t) => [run(t, 'D', 'x', true, 2), run(t, 'B', 'x', true, 1), run(t, 'B', 'y', false, 9)]);
+    const arms = summarizeArms(records);
+    const main = arms.find((a) => a.arm === 'D')?.cohort;
+    expect(arms.filter((a) => a.cohort === main).map((a) => a.arm)).toEqual(['D']);
+    expect(arms.filter((a) => a.arm === 'B').map((a) => `${a.validRuns}/${a.runs} pass ${a.pass1}`).sort()).toEqual(['1/1 pass 0', '1/1 pass 0', '1/1 pass 1', '1/1 pass 1']);
+    expect(compareArms(records, 1, 200)).toEqual([]);
   });
 
   it('keeps B0 runs of two baseline builds apart, and compares B with each', () => {

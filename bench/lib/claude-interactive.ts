@@ -163,7 +163,11 @@ export function trimInteractiveTranscript(text: string): string {
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue;
     const value = parseJson(line);
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      // Kept as is, so the parser reports it instead of a trimmed transcript hiding it.
+      out.push(line);
+      continue;
+    }
     const entry: Record<string, unknown> = { ...value };
     if (typeof entry['type'] === 'string' && SENSITIVE_TYPES.has(entry['type'])) continue;
     const att = Attachment.safeParse(entry);
@@ -185,6 +189,8 @@ export interface InteractiveFacts {
   readonly permissionModes: readonly string[];
   readonly replMode: boolean;
   readonly innerByTool: Readonly<Record<string, number>>;
+  /** Usage of the model responses by the model that made them. */
+  readonly usageByModel: Readonly<Record<string, Usage>>;
   /** The last `cost-state` entry: every request of the session, side calls the transcript lacks included. */
   readonly sessionCost: { readonly totalUsd: number; readonly byModel: Readonly<Record<string, SessionModelCost>> } | null;
 }
@@ -197,7 +203,8 @@ export interface InteractiveProgress {
 
 interface Scan {
   promptSeen: boolean;
-  requests: Map<string, Usage | null>;
+  requests: Map<string, { usage: Usage | null; model: string }>;
+  unreadable: number[];
   lastRealId: string | null;
   lastRealStop: string | null;
   lastRealLine: number;
@@ -253,6 +260,7 @@ function scan(text: string): Scan {
   const s: Scan = {
     promptSeen: false,
     requests: new Map(),
+    unreadable: [],
     lastRealId: null,
     lastRealStop: null,
     lastRealLine: 0,
@@ -283,7 +291,13 @@ function scan(text: string): Scan {
     if (line.trim() === '') return;
     const n = i + 1;
     const event = parseJson(line);
+    const type = event !== null && typeof event === 'object' && 'type' in event ? event.type : undefined;
     const a = AssistantEntry.safeParse(event);
+    const u = UserEntry.safeParse(event);
+    if (event === undefined || (type === 'assistant' && !a.success) || (type === 'user' && !u.success)) {
+      s.unreadable.push(n);
+      return;
+    }
     if (a.success) {
       const m = a.data.message;
       const synthetic = m.model === SYNTHETIC_MODEL || a.data.isVirtual === true;
@@ -306,7 +320,7 @@ function scan(text: string): Scan {
       if (synthetic) return;
       if (!s.requests.has(m.id)) {
         const usage = ClaudeUsageEvent.safeParse(m.usage);
-        s.requests.set(m.id, usage.success ? claudeUsage(usage.data) : null);
+        s.requests.set(m.id, { usage: usage.success ? claudeUsage(usage.data) : null, model: m.model });
         push(s, 'requests', n);
       }
       s.model ??= m.model;
@@ -321,7 +335,6 @@ function scan(text: string): Scan {
       s.lastRealLine = n;
       return;
     }
-    const u = UserEntry.safeParse(event);
     if (u.success) {
       const content = u.data.message.content;
       if (typeof content === 'string') {
@@ -409,9 +422,13 @@ export function parseClaudeInteractiveTranscript(text: string): { parsed: Parsed
   const s = scan(text);
   if (s.requests.size === 0) throw new Error('no model response in the interactive Claude transcript');
   let usage: Usage | null = null;
-  for (const [id, u] of s.requests) {
-    if (u === null) throw new Error(`model response ${id} has no usage in the interactive Claude transcript`);
-    usage = usage === null ? u : addUsage(usage, u);
+  if (s.unreadable.length > 0) throw new Error(`interactive Claude transcript line(s) ${s.unreadable.join(', ')} are not readable entries`);
+  const usageByModel: Record<string, Usage> = {};
+  for (const [id, r] of s.requests) {
+    if (r.usage === null) throw new Error(`model response ${id} has no usage in the interactive Claude transcript`);
+    usage = usage === null ? r.usage : addUsage(usage, r.usage);
+    const prev = usageByModel[r.model];
+    usageByModel[r.model] = prev === undefined ? r.usage : addUsage(prev, r.usage);
   }
   const finished = finishedOf(s);
   const finalAnswer = finished && s.lastRealId !== null ? (s.textById.get(s.lastRealId) ?? []).join('') : '';
@@ -432,5 +449,5 @@ export function parseClaudeInteractiveTranscript(text: string): { parsed: Parsed
     hostError: s.interrupted ? 'turn interrupted' : finished ? null : 'turn did not finish',
     evidence: s.evidence,
   };
-  return { parsed, facts: { efforts: s.efforts, permissionModes: s.permissionModes, replMode: s.replMode, innerByTool: { ...s.innerByTool }, sessionCost: s.sessionCost } };
+  return { parsed, facts: { efforts: s.efforts, permissionModes: s.permissionModes, replMode: s.replMode, innerByTool: { ...s.innerByTool }, usageByModel, sessionCost: s.sessionCost } };
 }

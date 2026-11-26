@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { claudeInteractiveArgs, interactiveEnv, interactiveProgress, parseClaudeInteractiveTranscript, replScriptTools, seededClaudeJson, trimInteractiveTranscript } from '../lib/claude-interactive.ts';
-import { costFromUsage, loadPricing } from '../lib/pricing.ts';
+import { costByModel, costFromUsage, loadPricing } from '../lib/pricing.ts';
 import { checkArm, checkSurface } from '../lib/record.ts';
 import { classifyScreen, DENY_NOTE, driveInteractive, serverAlive, tmuxVersion } from '../lib/tmux.ts';
 import { codeModeReasons } from '../run.ts';
@@ -57,6 +57,29 @@ describe('interactive Claude transcript parser', () => {
     expect(p.usage).toMatchObject({ cacheCreation: 4104, cacheCreation1h: 3894, cacheCreation5m: 0 });
     // Only the 210 unsplit tokens fall back to the 5-minute price: 210 x (8 - 5) per million less.
     expect(costFromUsage(loadPricing(), 'claude-opus-5-5', p.usage ?? NO_USAGE)).toBeCloseTo(0.0533492 - (210 * 3) / 1_000_000, 9);
+  });
+
+  const withLine = (n: number, edit: (line: string) => string): string => read('claude-D.jsonl').split('\n').map((l, i) => (i === n - 1 ? edit(l) : l)).join('\n');
+
+  it('refuses a transcript with an unreadable line instead of dropping the response on it', () => {
+    // Line 30 is the response msg_fixture002; without its last brace it is not JSON.
+    const corrupt = withLine(30, (l) => l.slice(0, -1));
+    expect(() => parseClaudeInteractiveTranscript(corrupt)).toThrow(/line\(s\) 30 are not readable/);
+    expect(() => parseClaudeInteractiveTranscript(withLine(30, (l) => l.replace('"message":{', '"message":{"content":7,"x":{')))).toThrow(/line\(s\) 30/);
+    // The kept transcript keeps the line for the parser to refuse, and the driver's progress read still works.
+    expect(trimInteractiveTranscript(corrupt)).toContain(corrupt.split('\n')[29]);
+    expect(interactiveProgress(corrupt).promptSeen).toBe(true);
+  });
+
+  it('prices each response at its own model, and names a model the arm did not pin', () => {
+    const mixed = parseClaudeInteractiveTranscript(withLine(30, (l) => l.replace('"model":"claude-opus-5-5"', '"model":"claude-haiku-5-5"'))).facts;
+    expect(Object.keys(mixed.usageByModel).sort()).toEqual(['claude-haiku-5-5', 'claude-opus-5-5']);
+    expect(mixed.usageByModel['claude-haiku-5-5']).toMatchObject({ input: 2, output: 82, cacheCreation: 1986, cacheRead: 10384 });
+    expect(costByModel(loadPricing(), mixed.usageByModel)).toBeCloseTo(0.03427864, 9);
+    expect(costByModel(loadPricing(), parseClaudeInteractiveTranscript(read('claude-D.jsonl')).facts.usageByModel)).toBeCloseTo(0.0533492, 9);
+    expect(costByModel(loadPricing(), { 'no-such-model': NO_USAGE })).toBeNull();
+    const seen = { stop: 'finished', problem: null, codeModeLine: 'Code Mode (experimental) is on', plugins: [], serverGone: true };
+    expect(codeModeReasons({ dryRun: false, claudeEffort: 'medium', claudeModel: 'claude-opus-5-5' }, seen, mixed)).toEqual(['model responses ran on claude-haiku-5-5, expected only claude-opus-5-5']);
   });
 
   it('counts one request per message id, however many entries a response is written as', () => {
@@ -191,7 +214,7 @@ describe('screen reading', () => {
 describe('arm D validity', () => {
   const facts = parseClaudeInteractiveTranscript(read('claude-D.jsonl')).facts;
   const seen = { stop: 'finished', problem: null, codeModeLine: '⚠ Code Mode (experimental) is on', plugins: [], serverGone: true };
-  const opts = { dryRun: false, claudeEffort: 'medium' as const };
+  const opts = { dryRun: false, claudeEffort: 'medium' as const, claudeModel: 'claude-opus-5-5' };
   it('accepts what a valid Code Mode run shows', () => {
     expect(codeModeReasons(opts, seen, facts)).toEqual([]);
   });
@@ -217,12 +240,12 @@ describe.skipIf(tmuxVersion() === null)('tmux driver', () => {
   afterAll(async () => {
     await rm(dir, { recursive: true, force: true });
   });
-  const drive = (name: string, mode: string, maxTurns = 60) => {
+  const drive = (name: string, mode: string, maxTurns = 60, timeoutMs = 30_000) => {
     const transcript = path.join(dir, name, 'session.jsonl');
     const env = { ...interactiveEnv({ ...process.env, CLAUDECODE: '1', ANTHROPIC_API_KEY: 'k' }, path.join(dir, name)) };
     return {
       transcript,
-      run: driveInteractive({ cwd: dir, command: [process.execPath, host, transcript, path.join(F, 'claude-D.jsonl'), mode], env, prompt: 'Fix the bug.\nLine two.', transcriptFile: () => (existsSync(transcript) ? transcript : null), timeoutMs: 30_000, maxTurns, scratchDir: dir, readyTimeoutMs: 10_000, pollMs: 100 }),
+      run: driveInteractive({ cwd: dir, command: [process.execPath, host, transcript, path.join(F, 'claude-D.jsonl'), mode], env, prompt: 'Fix the bug.\nLine two.', transcriptFile: () => (existsSync(transcript) ? transcript : null), timeoutMs, maxTurns, scratchDir: dir, readyTimeoutMs: 10_000, pollMs: 100 }),
     };
   };
 
@@ -248,6 +271,14 @@ describe.skipIf(tmuxVersion() === null)('tmux driver', () => {
     expect(out).toMatchObject({ stop: 'finished', problem: null, exitCode: 0, permissionPrompts: 1 });
     const keys: string = JSON.parse(readFileSync(`${transcript}.keys`, 'utf8'));
     expect(keys.replace(/\x1bO/g, '\x1b[')).toBe(`\x1b[B\x1b[B\t${DENY_NOTE}\r`);
+    expect(serverAlive(out.server)).toBe(false);
+  }, 60_000);
+
+  it('counts a session that is never ready within the run timeout as timed out, not as not ready', async () => {
+    const started = performance.now();
+    const out = await drive('never-ready', 'never-ready', 60, 1500).run;
+    expect(out).toMatchObject({ stop: 'timeout', timedOut: true, problem: null, exitCode: null });
+    expect(performance.now() - started).toBeLessThan(8000);
     expect(serverAlive(out.server)).toBe(false);
   }, 60_000);
 

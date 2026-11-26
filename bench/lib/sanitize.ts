@@ -69,13 +69,14 @@ function urlDecode(text: string): string {
   });
 }
 
-// Session, thread, event and API ids (UUIDs, Anthropic `toolu_`, `req_` and `msg_` ids): the hosts' and the
-// API's logs tie them to the account that made the run.
-const ID_PATTERN = /\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:toolu|req|msg)_[A-Za-z0-9]{16,})\b/gi;
+// Session, thread, event and API ids (UUIDs, Anthropic `toolu_`, `req_` and `msg_` ids, and the `repl_` ids
+// Claude Code's Code Mode gives the calls a script makes): the hosts' and the API's logs tie them to the
+// account that made the run. A `repl_` id's length is unknown, so a shorter one counts too.
+const ID_PATTERN = /\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:toolu|req|msg)_[A-Za-z0-9]{16,}|repl_[A-Za-z0-9]{8,})\b/gi;
 const UUID_PLACEHOLDER = '00000000-0000-4000-8000-';
 
 function placeholderId(id: string, ids: Map<string, string>): string {
-  const prefix = /^(toolu|req|msg)_/i.exec(id)?.[0];
+  const prefix = /^(toolu|req|msg|repl)_/i.exec(id)?.[0];
   const isPlaceholder = prefix === undefined ? id.startsWith(UUID_PLACEHOLDER) : /^\d+$/.test(id.slice(prefix.length));
   if (isPlaceholder) return id;
   let mapped = ids.get(id);

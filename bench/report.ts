@@ -184,11 +184,19 @@ const armLabel = (host: RunRecord['host'], cell: string): string => ARM_LABELS[h
 
 type Cells = Map<string, Map<string, RunRecord[]>>; // cellArm -> task -> valid runs
 
+/**
+ * A cell (arm and task of a cohort) holds runs of one config only. When a cell's runs have two configs, a
+ * difference the cohort key misses, each config of that cell becomes a cohort of its own: listed, never pooled
+ * or compared.
+ */
 function cohorts(records: readonly RunRecord[]): Map<string, { host: RunRecord['host']; cells: Cells }> {
+  const usable = records.filter((r) => !r.warmup && r.valid);
+  const cellOf = (r: RunRecord): string => `${cohortKey(r)}|${cellArm(r)}|${r.task}`;
+  const configs = new Map<string, Set<string>>();
+  for (const r of usable) configs.set(cellOf(r), (configs.get(cellOf(r)) ?? new Set()).add(r.configHash));
   const out = new Map<string, { host: RunRecord['host']; cells: Cells }>();
-  for (const r of records) {
-    if (r.warmup || !r.valid) continue;
-    const key = cohortKey(r);
+  for (const r of usable) {
+    const key = (configs.get(cellOf(r))?.size ?? 1) > 1 ? `${cohortKey(r)}~${r.configHash}` : cohortKey(r);
     const c = out.get(key) ?? { host: r.host, cells: new Map() };
     const byTask = c.cells.get(cellArm(r)) ?? new Map<string, RunRecord[]>();
     byTask.set(r.task, [...(byTask.get(r.task) ?? []), r]);
@@ -217,7 +225,7 @@ export function summarizeArms(records: readonly RunRecord[]): ArmSummary[] {
         armLabel: armLabel(host, arm),
         tasks: tasks.length,
         validRuns: valid.length,
-        runs: all.filter((r) => cellArm(r) === arm && cohortKey(r) === cohort).length,
+        runs: all.filter((r) => cellArm(r) === arm && (cohortKey(r) === cohort || `${cohortKey(r)}~${r.configHash}` === cohort)).length,
         pass1: mean(tasks.map((runs) => passOf(runs) / runs.length)),
         passHatK: k >= 1 ? { k, value: mean(tasks.map((runs) => passHatK(passOf(runs), runs.length, k))) as number } : null,
         costPerRunUsd: costs.length === tasks.length ? mean(costs.map((c) => mean(c) as number)) : null,

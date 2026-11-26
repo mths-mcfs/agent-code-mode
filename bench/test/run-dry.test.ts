@@ -1,12 +1,14 @@
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 import { main } from '../run.ts';
 
 describe('dry run', () => {
   it('runs end to end, writes a summary and resumes without redoing runs', async () => {
     const work = await mkdtemp(path.join(os.tmpdir(), 'acm-dry-'));
+    onTestFinished(() => rm(work, { recursive: true, force: true }));
     const out = path.join(work, 'results');
     const args = ['--dry-run', '--tasks', 'T1,T8', '--runs', '1', '--seed', '3', '--work-dir', work, '--out', out, '--date', '2026-01-02'];
     const writes: string[] = [];
@@ -32,8 +34,6 @@ describe('dry run', () => {
     expect(summary.warmup.runs).toBe(7);
     expect(text).toMatch(/Warmup: 7 run\(s\)/);
     // Each dry run's workspace is removed once its record is written: none is left, auth files included.
-    const left = await readdir(path.join(work, 'runs'), { recursive: true }).catch(() => []);
-    expect(left.filter((f) => path.basename(f) !== '2026-01-02')).toEqual([]);
-    await rm(work, { recursive: true, force: true });
+    expect(existsSync(path.join(work, 'runs'))).toBe(false);
   }, 300_000); // End to end through main(): on Windows it competes for the CPU with the other test files.
 });

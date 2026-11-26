@@ -30,3 +30,14 @@ export function costFromUsage(pricing: Pricing, model: string, usage: Usage): nu
   const writes = write1h * (p.cacheWrite1h ?? 0) + Math.max(0, usage.cacheCreation - write1h) * write5m;
   return (usage.input * p.input + usage.cacheRead * p.cachedInput + writes + usage.output * p.output) / 1_000_000;
 }
+
+/** Each model's usage at that model's price. Null when any of them has no price. */
+export function costByModel(pricing: Pricing, usageByModel: Readonly<Record<string, Usage>>): number | null {
+  let total = 0;
+  for (const [model, usage] of Object.entries(usageByModel)) {
+    const cost = costFromUsage(pricing, model, usage);
+    if (cost === null) return null;
+    total += cost;
+  }
+  return total;
+}

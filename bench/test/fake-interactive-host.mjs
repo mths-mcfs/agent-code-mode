@@ -14,7 +14,9 @@ const answer = () => {
 };
 
 process.stdout.write('\x1b[?2004h');
-ready();
+if (mode === 'never-ready') draw(['Starting...']);
+else if (mode === 'dialog') draw([' Quick safety check: Is this a project you created or one you trust?', ' ❯ 1. Yes, I trust this folder', '   2. No, exit', ' Enter to confirm · Esc to cancel']);
+else ready();
 process.stdin.setRawMode(true);
 let state = 'ready';
 let input = '';
