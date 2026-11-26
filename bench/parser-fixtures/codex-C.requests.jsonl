@@ -1,5 +1,5 @@
-{"kind": "call", "type": "function_call", "name": "tool_search", "args": "{\"query\":\"agent-code-mode run\"}"}
-{"kind": "request", "usage": {"input_tokens": 17000, "cached_input_tokens": 11000, "output_tokens": 40, "cache_write_input_tokens": 0, "reasoning_output_tokens": 10}}
-{"kind": "call", "type": "function_call", "name": "run", "namespace": "mcp__agent-code-mode__", "args": "{\"code\":\"return JSON.parse(await read('config/app.json')).service.retryLimit;\"}"}
-{"kind": "request", "usage": {"input_tokens": 17400, "cached_input_tokens": 11000, "output_tokens": 60, "cache_write_input_tokens": 0, "reasoning_output_tokens": 20}}
-{"kind": "request", "usage": {"input_tokens": 17600, "cached_input_tokens": 11000, "output_tokens": 40, "cache_write_input_tokens": 0, "reasoning_output_tokens": 10}}
+{"kind":"call","type":"function_call","name":"tool_search","args":"{\"query\":\"agent-code-mode run\"}"}
+{"kind":"request","usage":{"input_tokens":17000,"cached_input_tokens":11000,"output_tokens":40,"cache_write_input_tokens":0,"reasoning_output_tokens":10}}
+{"kind":"call","type":"function_call","name":"run","namespace":"mcp__agent-code-mode__","args":"{\"code\":\"return JSON.parse(await read('config/app.json')).service.retryLimit;\"}"}
+{"kind":"request","usage":{"input_tokens":17400,"cached_input_tokens":11000,"output_tokens":60,"cache_write_input_tokens":0,"reasoning_output_tokens":20}}
+{"kind":"request","usage":{"input_tokens":17600,"cached_input_tokens":11000,"output_tokens":40,"cache_write_input_tokens":0,"reasoning_output_tokens":10}}

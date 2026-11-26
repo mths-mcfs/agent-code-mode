@@ -1,4 +1,4 @@
-{"type":"thread.started","thread_id":"01a1e1eb-01d4-7d42-87fa-4ffbf3a21327"}
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}
 {"type":"item.completed","item":{"id":"item_0","type":"error","message":"`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled."}}
 {"type":"item.completed","item":{"id":"item_1","type":"error","message":"`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` is enabled."}}
 {"type":"turn.started"}

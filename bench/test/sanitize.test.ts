@@ -10,6 +10,7 @@ const ctx: SanitizeContext = {
   home: '/home/alice',
   username: 'alice',
   hostname: 'alice-laptop',
+  ids: new Map(),
 };
 
 describe('sanitizer', () => {
@@ -48,9 +49,20 @@ describe('sanitizer', () => {
     expect(text).toContain('~/secret.txt');
   });
 
-  it('redacts Anthropic request and message ids', () => {
-    const line = JSON.stringify({ request_id: 'req_011Ch5ikt1Q6QyB57bU9XTo8', message: { id: 'msg_011Ch5iktDHiq1DkVevawhbd' } });
-    expect(JSON.parse(sanitize(line, ctx))).toEqual({ request_id: 'req_<redacted>', message: { id: 'msg_<redacted>' } });
+  it('maps session, thread, event and API ids to stable placeholders across the files of a run', () => {
+    const run = { ...ctx, ids: new Map<string, string>() };
+    const session = '12345678-1234-4123-8123-123456789012';
+    const transcript = [
+      JSON.stringify({ type: 'system', session_id: session, uuid: '87654321-4321-4321-8321-210987654321' }),
+      JSON.stringify({ type: 'assistant', message: { id: 'msg_FAKEfakeFAKEfake01', content: [{ type: 'tool_use', id: 'toolu_FAKEfakeFAKEfake01' }] }, request_id: 'req_FAKEfakeFAKEfake01', session_id: session }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_FAKEfakeFAKEfake01' }] }, session_id: session }),
+    ].join('\n');
+    const lines = sanitize(transcript, run).split('\n').map((l) => JSON.parse(l));
+    expect(lines[0]).toEqual({ type: 'system', session_id: '00000000-0000-4000-8000-000000000001', uuid: '00000000-0000-4000-8000-000000000002' });
+    expect(lines[1]).toEqual({ type: 'assistant', message: { id: 'msg_000000000000000000000001', content: [{ type: 'tool_use', id: 'toolu_000000000000000000000001' }] }, request_id: 'req_000000000000000000000001', session_id: '00000000-0000-4000-8000-000000000001' });
+    expect(lines[2].message.content[0].tool_use_id).toBe('toolu_000000000000000000000001');
+    expect(sanitize(`stderr: session ${session} ended`, run)).toBe('stderr: session 00000000-0000-4000-8000-000000000001 ended');
+    expect(sanitize(sanitize(transcript, run), { ...ctx, ids: new Map() })).toBe(sanitize(transcript, run));
   });
 
   it('keeps tool names, relative arguments and numbers', () => {

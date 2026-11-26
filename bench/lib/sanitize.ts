@@ -5,6 +5,8 @@ export interface SanitizeContext {
   readonly home: string;
   readonly username: string;
   readonly hostname: string;
+  /** Real id to placeholder, shared by every file of one run so that ids still match across files. */
+  readonly ids: Map<string, string>;
 }
 
 export function defaultSanitizeContext(paths: SanitizeContext['paths']): SanitizeContext {
@@ -14,7 +16,7 @@ export function defaultSanitizeContext(paths: SanitizeContext['paths']): Sanitiz
   } catch {
     username = process.env['USER'] ?? process.env['USERNAME'] ?? '';
   }
-  return { paths, home: os.homedir(), username, hostname: os.hostname() };
+  return { paths, home: os.homedir(), username, hostname: os.hostname(), ids: new Map() };
 }
 
 function escapeRegExp(text: string): string {
@@ -41,8 +43,6 @@ const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/(\\*"(?:api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|authorization|password|passwd|secret|client[_-]?secret|cookie|private[_-]?key)\\*"\s*:\s*(\\*)")(?:(?!\2").)*(\2")/gi, '$1<redacted>$3'],
   [/\b((?:[A-Z0-9]+_)*(?:API_?KEY|ACCESS_TOKEN|REFRESH_TOKEN|AUTH_TOKEN|SECRET|PASSWORD|AUTHORIZATION)|api_?key|access_token|refresh_token|auth_token|secret|password|authorization)(\s*[=:]\s*)(?!<redacted>)("?)[^\s"',;]+/gi, '$1$2$3<redacted>'],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
-  // Anthropic request and message ids: the API's logs tie them to the account that made the call.
-  [/\b(req|msg)_[A-Za-z0-9]{16,}/g, '$1_<redacted>'],
 ];
 
 const SECRET_KEYS = new Set([
@@ -66,6 +66,24 @@ function urlDecode(text: string): string {
   });
 }
 
+// Session, thread, event and API ids (UUIDs, Anthropic `toolu_`, `req_` and `msg_` ids): the hosts' and the
+// API's logs tie them to the account that made the run.
+const ID_PATTERN = /\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:toolu|req|msg)_[A-Za-z0-9]{16,})\b/gi;
+const UUID_PLACEHOLDER = '00000000-0000-4000-8000-';
+
+function placeholderId(id: string, ids: Map<string, string>): string {
+  const prefix = /^(toolu|req|msg)_/i.exec(id)?.[0];
+  const isPlaceholder = prefix === undefined ? id.startsWith(UUID_PLACEHOLDER) : /^\d+$/.test(id.slice(prefix.length));
+  if (isPlaceholder) return id;
+  let mapped = ids.get(id);
+  if (mapped === undefined) {
+    const n = [...ids.values()].filter((v) => (prefix === undefined ? v.startsWith(UUID_PLACEHOLDER) : v.startsWith(prefix))).length + 1;
+    mapped = prefix === undefined ? `${UUID_PLACEHOLDER}${String(n).padStart(12, '0')}` : `${prefix}${String(n).padStart(24, '0')}`;
+    ids.set(id, mapped);
+  }
+  return mapped;
+}
+
 function sanitizeText(text: string, ctx: SanitizeContext): string {
   let out = urlDecode(text);
   const labeled = [...ctx.paths, ...(ctx.home.length > 1 ? [{ path: ctx.home, label: '~' }] : [])]
@@ -73,6 +91,7 @@ function sanitizeText(text: string, ctx: SanitizeContext): string {
     .sort((a, b) => b.form.length - a.form.length);
   for (const { form, label } of labeled) out = out.split(form).join(label);
   for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
+  out = out.replace(ID_PATTERN, (id) => placeholderId(id, ctx.ids));
   out = out.replace(/\/(home|Users)\/[^/\s"'\\]+/g, '/$1/<user>');
   out = out.replace(/-(home|Users)-[^-\s"'/\\]+/g, '-$1-<user>');
   out = out.replace(/([A-Za-z]:(?:\\\\?|\/)Users(?:\\\\?|\/))[^\\/\s"']+/g, '$1<user>');

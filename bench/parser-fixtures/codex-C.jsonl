@@ -1,7 +1,7 @@
-{"type": "bench_note", "note": "Synthetic canned transcript (hand-written, not a model run) for --dry-run and parser tests."}
-{"type": "thread.started", "thread_id": "00000000-0000-4000-8000-000000000002"}
-{"type": "turn.started"}
-{"type": "item.started", "item": {"id": "item_0", "type": "mcp_tool_call", "server": "agent-code-mode", "tool": "run", "arguments": {"code": "return JSON.parse(await read('config/app.json')).service.retryLimit;"}, "status": "in_progress"}}
-{"type": "item.completed", "item": {"id": "item_0", "type": "mcp_tool_call", "server": "agent-code-mode", "tool": "run", "arguments": {"code": "return JSON.parse(await read('config/app.json')).service.retryLimit;"}, "result": {"content": [{"type": "text", "text": "{\"ok\": true, \"result\": 7, \"logs\": [], \"calls\": [{\"id\": \"c1\", \"tool\": \"read\", \"summary\": \"read config/app.json\", \"decision\": \"allowed\", \"durationMs\": 2}], \"changedFiles\": [], \"diff\": \"\", \"warnings\": []}"}]}, "status": "completed"}}
-{"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "ANSWER: 7"}}
-{"type": "turn.completed", "usage": {"input_tokens": 52000, "cached_input_tokens": 33000, "cache_write_input_tokens": 0, "output_tokens": 140, "reasoning_output_tokens": 40}}
+{"type":"bench_note","note":"Synthetic canned transcript (hand-written, not a model run) for --dry-run and parser tests."}
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000002"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"agent-code-mode","tool":"run","arguments":{"code":"return JSON.parse(await read('config/app.json')).service.retryLimit;"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"agent-code-mode","tool":"run","arguments":{"code":"return JSON.parse(await read('config/app.json')).service.retryLimit;"},"result":{"content":[{"type":"text","text":"{\"ok\":true,\"result\":7,\"logs\":[],\"calls\":[{\"id\":\"c1\",\"tool\":\"read\",\"summary\":\"read config/app.json\",\"decision\":\"allowed\",\"durationMs\":2}],\"changedFiles\":[],\"diff\":\"\",\"warnings\":[]}"}]},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ANSWER: 7"}}
+{"type":"turn.completed","usage":{"input_tokens":52000,"cached_input_tokens":33000,"cache_write_input_tokens":0,"output_tokens":140,"reasoning_output_tokens":40}}
