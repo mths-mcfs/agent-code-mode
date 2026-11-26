@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -110,7 +110,7 @@ describe('report', () => {
     }
   });
 
-  it('writes summary.json and a Markdown table', async () => {
+  it('writes summary.json and returns a Markdown table without writing it', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-report-'));
     try {
       for (const [i, turns] of [2, 3, 7].entries()) {
@@ -124,6 +124,7 @@ describe('report', () => {
       expect(markdown).toContain('| claude | T1 | A native tools | aaaaaaaaaaaa | 100% | 100% | 3 (2–7) | 3 (2–7) |');
       expect(markdown).toContain('"seed": 1');
       expect(JSON.parse(await readFile(path.join(dir, 'summary.json'), 'utf8')).groups).toHaveLength(1);
+      expect((await readdir(dir)).sort()).toEqual(['claude', 'env.json', 'summary.json']);
       expect(markdownTable({ ...summary, dryRun: true })).toContain('DRY RUN');
     } finally {
       await rm(dir, { recursive: true, force: true });

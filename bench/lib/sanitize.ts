@@ -52,6 +52,8 @@ const SECRET_KEYS = new Set([
   'apikey', 'xapikey', 'token', 'accesstoken', 'refreshtoken', 'idtoken', 'authtoken', 'sessiontoken', 'bearertoken',
   'authorization', 'auth', 'password', 'passwd', 'secret', 'clientsecret', 'cookie', 'setcookie', 'credential', 'credentials',
   'privatekey', 'accountid', 'creatoraccountid', 'creatoruserid', 'userid', 'email', 'useremail',
+  // The encrypted thinking of a Claude response: opaque to the bench, and nothing reads it.
+  'signature',
 ]);
 
 export function isSecretKey(key: string): boolean {
@@ -71,8 +73,8 @@ function urlDecode(text: string): string {
 
 // Session, thread, event and API ids (UUIDs, Anthropic `toolu_`, `req_` and `msg_` ids, and the `repl_` ids
 // Claude Code's Code Mode gives the calls a script makes): the hosts' and the API's logs tie them to the
-// account that made the run. A `repl_` id's length is unknown, so a shorter one counts too.
-const ID_PATTERN = /\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:toolu|req|msg)_[A-Za-z0-9]{16,}|repl_[A-Za-z0-9]{8,})\b/gi;
+// account that made the run. A `repl_` id is `repl_<UUID>` (Claude Code 2.1.332), matched whole.
+const ID_PATTERN = /\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:toolu|req|msg)_[A-Za-z0-9]{16,}|repl_(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9]{8,}))\b/gi;
 const UUID_PLACEHOLDER = '00000000-0000-4000-8000-';
 
 function placeholderId(id: string, ids: Map<string, string>): string {
@@ -90,7 +92,9 @@ function placeholderId(id: string, ids: Map<string, string>): string {
 
 function sanitizeText(text: string, ctx: SanitizeContext): string {
   let out = urlDecode(text);
-  const labeled = [...ctx.paths, ...(ctx.home.length > 1 ? [{ path: ctx.home, label: '~' }] : [])]
+  // A terminal UI shows a path under the home directory as `~/...`.
+  const underHome = ctx.home.length > 1 ? ctx.paths.filter((p) => p.path.startsWith(`${ctx.home}/`)).map((p) => ({ path: `~${p.path.slice(ctx.home.length)}`, label: p.label })) : [];
+  const labeled = [...ctx.paths, ...underHome, ...(ctx.home.length > 1 ? [{ path: ctx.home, label: '~' }] : [])]
     .flatMap((p) => pathForms(p.path).map((form) => ({ form, label: p.label })))
     .sort((a, b) => b.form.length - a.form.length);
   for (const { form, label } of labeled) out = out.split(form).join(label);

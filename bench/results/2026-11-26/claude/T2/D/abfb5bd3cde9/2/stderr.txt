@@ -1,0 +1,3 @@
+stop: finished
+ready after: 1639 ms
+permission prompts denied: 0

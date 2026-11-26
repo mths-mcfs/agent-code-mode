@@ -155,8 +155,8 @@ export function replScriptTools(description: string): string[] {
 }
 
 const SENSITIVE_TYPES = new Set(['api-request-blob', 'session-owner', 'file-history-snapshot']);
-const SENSITIVE_ATTACHMENTS = new Set(['session_context', 'credential_org', 'prompt_snapshot', 'remote_session_change', 'environment']);
-const SENSITIVE_KEYS = ['serverClassifierContext'];
+const SENSITIVE_ATTACHMENTS = new Set(['session_context', 'credential_org', 'prompt_snapshot', 'remote_session_change', 'environment', 'sandbox_instructions']);
+const SENSITIVE_KEYS = ['serverClassifierContext', 'shapeHash', 'tail'];
 
 export function trimInteractiveTranscript(text: string): string {
   const out: string[] = [];

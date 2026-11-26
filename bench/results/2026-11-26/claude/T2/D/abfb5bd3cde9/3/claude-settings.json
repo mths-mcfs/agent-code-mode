@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "mcp__agent-code-mode__run"
+    ]
+  },
+  "sandbox": {
+    "enabled": true
+  },
+  "autoMemoryEnabled": false
+}

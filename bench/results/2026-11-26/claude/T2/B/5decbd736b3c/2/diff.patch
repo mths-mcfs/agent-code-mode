@@ -1,0 +1,13 @@
+ M src/lib/strings.js
+
+diff --git a/src/lib/strings.js b/src/lib/strings.js
+index bb8d272..dbf2ee1 100644
+--- a/src/lib/strings.js
++++ b/src/lib/strings.js
+@@ -13,5 +13,5 @@ export function titleCase(text) {
+ 
+ export function truncate(text, max, ellipsis = '…') {
+   if (text.length <= max) return text;
+-  return text.slice(0, max) + ellipsis;
++  return text.slice(0, max - ellipsis.length) + ellipsis;
+ }
