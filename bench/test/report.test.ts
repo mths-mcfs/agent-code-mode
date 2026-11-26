@@ -236,6 +236,14 @@ describe('quality metrics', () => {
     expect(compareArms(records, 1, 200)).toEqual([]);
   });
 
+  it('counts each run in the one cohort it was assigned, when only one task of an arm has two configs', () => {
+    const run = (task: string, def: string, valid = true) =>
+      record({ id: `claude-${task}-B-${def}-${valid}`, task, arm: 'B', valid, configHash: createHash('sha256').update(`${task}${def}`).digest('hex').slice(0, 12), config: { model: 'm', task, arm: 'B', armDefinitionSha256: `${task}${def}` } });
+    const records = [run('T9', 'x'), run('T9', 'y'), run('T10', 'x'), run('T10', 'x', false)];
+    const rows = summarizeArms(records).map((a) => `${a.tasks} task(s) ${a.validRuns}/${a.runs}`).sort();
+    expect(rows).toEqual(['1 task(s) 1/1', '1 task(s) 1/1', '1 task(s) 1/2']);
+  });
+
   it('keeps B0 runs of two baseline builds apart, and compares B with each', () => {
     const run = (task: string, arm: 'B' | 'B0', acmBuild: string, pass: boolean, cost: number) =>
       record({ id: `claude-${task}-${arm}-${acmBuild}`, task, arm, pass, cost, configHash: acmBuild === 'checkout' ? 'cccccccccccc' : acmBuild.slice(-12), config: { model: 'm', task, arm, acmBuild } });

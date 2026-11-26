@@ -189,14 +189,19 @@ type Cells = Map<string, Map<string, RunRecord[]>>; // cellArm -> task -> valid 
  * difference the cohort key misses, each config of that cell becomes a cohort of its own: listed, never pooled
  * or compared.
  */
-function cohorts(records: readonly RunRecord[]): Map<string, { host: RunRecord['host']; cells: Cells }> {
-  const usable = records.filter((r) => !r.warmup && r.valid);
+function cohortOf(records: readonly RunRecord[]): (r: RunRecord) => string {
   const cellOf = (r: RunRecord): string => `${cohortKey(r)}|${cellArm(r)}|${r.task}`;
   const configs = new Map<string, Set<string>>();
-  for (const r of usable) configs.set(cellOf(r), (configs.get(cellOf(r)) ?? new Set()).add(r.configHash));
+  for (const r of records) if (!r.warmup && r.valid) configs.set(cellOf(r), (configs.get(cellOf(r)) ?? new Set()).add(r.configHash));
+  return (r) => ((configs.get(cellOf(r))?.size ?? 1) > 1 ? `${cohortKey(r)}~${r.configHash}` : cohortKey(r));
+}
+
+function cohorts(records: readonly RunRecord[]): Map<string, { host: RunRecord['host']; cells: Cells }> {
+  const assign = cohortOf(records);
   const out = new Map<string, { host: RunRecord['host']; cells: Cells }>();
-  for (const r of usable) {
-    const key = (configs.get(cellOf(r))?.size ?? 1) > 1 ? `${cohortKey(r)}~${r.configHash}` : cohortKey(r);
+  for (const r of records) {
+    if (r.warmup || !r.valid) continue;
+    const key = assign(r);
     const c = out.get(key) ?? { host: r.host, cells: new Map() };
     const byTask = c.cells.get(cellArm(r)) ?? new Map<string, RunRecord[]>();
     byTask.set(r.task, [...(byTask.get(r.task) ?? []), r]);
@@ -210,6 +215,7 @@ function cohorts(records: readonly RunRecord[]): Map<string, { host: RunRecord['
 export function summarizeArms(records: readonly RunRecord[]): ArmSummary[] {
   const out: ArmSummary[] = [];
   const all = records.filter((r) => !r.warmup);
+  const assign = cohortOf(records);
   for (const [cohort, { host, cells }] of cohorts(records)) {
     // One k for the whole cohort: the fewest valid runs of any cell, so no arm is scored on more runs than it has.
     const k = Math.min(...[...cells.values()].flatMap((t) => [...t.values()].map((runs) => runs.length)));
@@ -225,7 +231,7 @@ export function summarizeArms(records: readonly RunRecord[]): ArmSummary[] {
         armLabel: armLabel(host, arm),
         tasks: tasks.length,
         validRuns: valid.length,
-        runs: all.filter((r) => cellArm(r) === arm && (cohortKey(r) === cohort || `${cohortKey(r)}~${r.configHash}` === cohort)).length,
+        runs: all.filter((r) => cellArm(r) === arm && assign(r) === cohort).length,
         pass1: mean(tasks.map((runs) => passOf(runs) / runs.length)),
         passHatK: k >= 1 ? { k, value: mean(tasks.map((runs) => passHatK(passOf(runs), runs.length, k))) as number } : null,
         costPerRunUsd: costs.length === tasks.length ? mean(costs.map((c) => mean(c) as number)) : null,

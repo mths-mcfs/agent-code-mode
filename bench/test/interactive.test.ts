@@ -66,6 +66,9 @@ describe('interactive Claude transcript parser', () => {
     const corrupt = withLine(30, (l) => l.slice(0, -1));
     expect(() => parseClaudeInteractiveTranscript(corrupt)).toThrow(/line\(s\) 30 are not readable/);
     expect(() => parseClaudeInteractiveTranscript(withLine(30, (l) => l.replace('"message":{', '"message":{"content":7,"x":{')))).toThrow(/line\(s\) 30/);
+    for (const value of ['null', '"text"', '7', '[1,2]']) expect(() => parseClaudeInteractiveTranscript(withLine(30, () => value)), value).toThrow(/line\(s\) 30 are not readable/);
+    // An entry of a type the parser does not know stays fine.
+    expect(parseClaudeInteractiveTranscript(withLine(1, (l) => `{"type":"new-kind"}\n${l}`)).parsed.requests).toBe(4);
     // The kept transcript keeps the line for the parser to refuse, and the driver's progress read still works.
     expect(trimInteractiveTranscript(corrupt)).toContain(corrupt.split('\n')[29]);
     expect(interactiveProgress(corrupt).promptSeen).toBe(true);

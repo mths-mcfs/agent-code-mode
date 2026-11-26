@@ -291,10 +291,11 @@ function scan(text: string): Scan {
     if (line.trim() === '') return;
     const n = i + 1;
     const event = parseJson(line);
-    const type = event !== null && typeof event === 'object' && 'type' in event ? event.type : undefined;
+    const isEntry = event !== null && typeof event === 'object' && !Array.isArray(event);
+    const type = isEntry && 'type' in event ? event.type : undefined;
     const a = AssistantEntry.safeParse(event);
     const u = UserEntry.safeParse(event);
-    if (event === undefined || (type === 'assistant' && !a.success) || (type === 'user' && !u.success)) {
+    if (!isEntry || (type === 'assistant' && !a.success) || (type === 'user' && !u.success)) {
       s.unreadable.push(n);
       return;
     }
