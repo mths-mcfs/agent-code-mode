@@ -63,7 +63,7 @@ describe.skipIf(ROOTED_OPS_REFUSED)('PreparedCall.requestedPath', () => {
     value(await d.dispatch('read', { path: './sub/../sub/a.txt' }));
     value(await d.dispatch('grep', { pattern: 'hello' }));
     value(await d.dispatch('glob', { pattern: '*', path: 'sub' }));
-    expect(adapter.staticChecked.map((p) => p.requestedPath)).toEqual(['./sub/../sub/a.txt', undefined, 'sub']);
+    expect(adapter.staticChecked.map((p) => (p.tool === 'mcp' ? 'mcp' : p.requestedPath))).toEqual(['./sub/../sub/a.txt', undefined, 'sub']);
     expect(Object.isFrozen(adapter.staticChecked[0])).toBe(true);
   });
 });

@@ -176,7 +176,7 @@ export const RUN_INPUT_JSON_SCHEMA: {
     code: {
       type: 'string',
       description:
-        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, readOverflow; the return value is the result.',
+        'Body of an async JavaScript function. Use await with the bindings bash, read, write, edit, grep, glob, readOverflow, mcpCall; the return value is the result.',
     },
     verbose: {
       type: 'boolean',

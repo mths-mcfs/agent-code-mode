@@ -449,6 +449,7 @@ export function parseClaudeInteractiveTranscript(text: string): { parsed: Parsed
     hostContext: { agents: [...s.agents], plugins: [], memory: s.memory },
     hostError: s.interrupted ? 'turn interrupted' : finished ? null : 'turn did not finish',
     evidence: s.evidence,
+    mcpCalls: null,
   };
   return { parsed, facts: { efforts: s.efforts, permissionModes: s.permissionModes, replMode: s.replMode, innerByTool: { ...s.innerByTool }, usageByModel, sessionCost: s.sessionCost } };
 }

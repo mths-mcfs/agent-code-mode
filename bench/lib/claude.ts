@@ -44,10 +44,17 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   return args;
 }
 
-export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
-  if (arm === 'A' || arm === 'D') return { mcpServers: {} };
+export interface StdioServer {
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+}
+
+export function claudeMcpConfig(arm: ArmId, serverEntry: string, task?: StdioServer): unknown {
+  const servers: Record<string, unknown> = task === undefined ? {} : { [task.name]: { type: 'stdio', command: task.command, args: [...task.args] } };
+  if (arm === 'A' || arm === 'D') return { mcpServers: servers };
   const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : [])];
-  return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
+  return { mcpServers: { ...servers, 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
 }
 
 export const ClaudeUsageEvent = z.object({
@@ -234,5 +241,6 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     denials,
     hostError: r.is_error ? `${r.subtype}` : null,
     evidence,
+    mcpCalls: null,
   };
 }

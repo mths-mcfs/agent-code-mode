@@ -2,9 +2,11 @@
 import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { OverflowStore } from './core/overflow.js';
 import type { HostKind } from './core/types.js';
 import { runContextHook } from './hosts/claude/context-hook.js';
 import { applyPlan, parseInstallArgs, planDiff, planInstall } from './install.js';
+import { McpUpstreams } from './mcp/upstream.js';
 import { createMcpServer } from './server/mcp.js';
 
 const USAGE = `Usage: agent-code-mode <command>
@@ -71,7 +73,19 @@ export async function main(argv: readonly string[]): Promise<number> {
         process.stderr.write(`${serve.message}\n`);
         return 2;
       }
-      const server = createMcpServer({ version: readVersion(), ...serve });
+      const version = readVersion();
+      const overflow = new OverflowStore();
+      const upstreams = new McpUpstreams({ overflow, clientVersion: version });
+      const server = createMcpServer({ version, overflow, upstreams, ...serve });
+      // Live upstream server pipes would keep this process up after the client leaves: end them with the session.
+      process.stdin.once('end', () => void upstreams.close());
+      process.once('exit', () => upstreams.killAll());
+      for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
+        process.once(signal, () => {
+          upstreams.killAll();
+          process.exit(code);
+        });
+      }
       await server.connect(new StdioServerTransport());
       return -1; // keep running until stdin closes
     }

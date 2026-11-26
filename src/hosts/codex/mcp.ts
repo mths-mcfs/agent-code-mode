@@ -1,0 +1,172 @@
+import path from 'node:path';
+import { z } from 'zod';
+import { formatIssues } from '../../core/schemas.js';
+import type { Decision, McpPolicy, McpServerSpec, PreparedMcpCall } from '../../core/types.js';
+import { mcpNameProblem, shownName } from '../../mcp/names.js';
+import { configSecrets } from '../../mcp/secrets.js';
+import { startsThisServer } from '../../mcp/self.js';
+import { getPath, isTable, type ApprovalPolicy, type TomlTable } from './config.js';
+
+/**
+ * The stdio MCP servers of a Codex session (`[mcp_servers.<name>]` of the
+ * merged config) and how Codex approves their tools. A server with a key this
+ * server does not apply is left out with a note. Only an explicit
+ * `approval_mode = "approve"` runs a tool without asking: Codex decides the
+ * other modes from the tool's annotations and its approval policy, which is
+ * not reproduced, so those calls are refused.
+ */
+
+/** Codex's default `startup_timeout_sec` and `tool_timeout_sec`. */
+export const CODEX_MCP_STARTUP_TIMEOUT_SEC = 10;
+export const CODEX_MCP_TOOL_TIMEOUT_SEC = 60;
+
+/** Variables Codex 0.169 passes from its own environment to every stdio server (`DEFAULT_ENV_VARS`, `WINDOWS_CORE_ENV_VARS` on Windows, which has no HOME). */
+const WINDOWS_ENV_VARS = ['PATH', 'PATHEXT', 'SHELL', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'USERNAME', 'USERDOMAIN', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'TMPDIR', 'POWERSHELL', 'PWSH'];
+const UNIX_ENV_VARS = ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'USER', '__CF_USER_TEXT_ENCODING', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ'];
+/** Certificate variables Codex passes too when set, as absolute paths (Codex 0.169 `CUSTOM_CA_ENV_KEYS`). */
+const CA_ENV_VARS = ['CODEX_CA_CERTIFICATE', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS', 'GIT_SSL_CAINFO', 'CARGO_HTTP_CAINFO', 'PIP_CERT', 'BUNDLE_SSL_CA_CERT', 'npm_config_cafile', 'NPM_CONFIG_CAFILE'];
+/** Codex strips its own credentials from a server's environment; an entry that sets one is left out rather than guessed at. */
+const CODEX_OWN = /^(CODEX_|OPENAI_|NODE_REPL_AUTH_TOKEN$)/i;
+
+const Seconds = z.number().positive();
+const StdioEntry = z.strictObject({
+  command: z.string().min(1),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  env_vars: z.array(z.string()).optional(),
+  cwd: z.string().optional(),
+  enabled: z.boolean().optional(),
+  required: z.boolean().optional(),
+  enabled_tools: z.array(z.string()).optional(),
+  disabled_tools: z.array(z.string()).optional(),
+  startup_timeout_sec: Seconds.optional(),
+  startup_timeout_ms: Seconds.optional(),
+  tool_timeout_sec: Seconds.optional(),
+  tools: z.record(z.string(), z.looseObject({ approval_mode: z.string().optional() })).optional(),
+});
+
+export interface CodexMcpRules {
+  readonly enabledTools?: readonly string[];
+  readonly disabledTools: readonly string[];
+  /** `tools.<tool>.approval_mode`, as written. */
+  readonly approval: Readonly<Record<string, string>>;
+}
+
+export function discoverCodexMcp(
+  merged: TomlTable,
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>>,
+  origin: string,
+  allowlist?: { readonly file: string; readonly servers: TomlTable },
+  approvalPolicy: ApprovalPolicy = 'on-request',
+  platform: NodeJS.Platform = process.platform,
+): { mcp: McpPolicy; rules: Readonly<Record<string, CodexMcpRules>> } {
+  const notes: string[] = [];
+  const servers: McpServerSpec[] = [];
+  const rules: Record<string, CodexMcpRules> = {};
+  const table = getPath(merged, ['mcp_servers']);
+  for (const [name, entry] of Object.entries(isTable(table) ? table : {})) {
+    const where = `server ${shownName(name)} (${origin})`;
+    const problem = mcpNameProblem(name);
+    if (problem !== undefined) {
+      notes.push(`${where}: ${problem}`);
+      continue;
+    }
+    if (!isTable(entry)) {
+      notes.push(`${where}: not a table`);
+      continue;
+    }
+    if (entry['enabled'] === false) continue;
+    if (Object.hasOwn(entry, 'url')) {
+      notes.push(`${where}: only stdio servers are reachable from scripts`);
+      continue;
+    }
+    const parsed = StdioEntry.safeParse(entry);
+    if (!parsed.success) {
+      notes.push(`${where}: not a stdio entry this server runs exactly (${formatIssues(parsed.error)})`);
+      continue;
+    }
+    const e = parsed.data;
+    if (startsThisServer(e.command, e.args ?? [], e.cwd === undefined ? cwd : path.resolve(cwd, e.cwd))) {
+      notes.push(`${where}: it is agent-code-mode itself`);
+      continue;
+    }
+    if (allowlist !== undefined && !allowedByRequirements(allowlist.servers[name], e.command)) {
+      notes.push(`${where}: not allowed by mcp_servers of ${allowlist.file}`);
+      continue;
+    }
+    const envVars = e.env_vars ?? [];
+    const missing = envVars.find((v) => env[v] === undefined);
+    if (missing !== undefined) {
+      notes.push(`${where}: env_vars names ${missing}, which this server's environment does not have`);
+      continue;
+    }
+    const reserved = [...envVars, ...Object.keys(e.env ?? {})].find((k) => CODEX_OWN.test(k));
+    if (reserved !== undefined) {
+      notes.push(`${where}: sets ${reserved}, a variable Codex keeps out of server environments`);
+      continue;
+    }
+    const passed = [
+      ...[...(platform === 'win32' ? WINDOWS_ENV_VARS : UNIX_ENV_VARS), ...envVars].flatMap((k) => {
+        const v = env[k];
+        return v === undefined ? [] : [[k, v] as const];
+      }),
+      ...CA_ENV_VARS.flatMap((k) => {
+        const v = env[k];
+        return v === undefined || v === '' ? [] : [[k, path.resolve(cwd, v)] as const];
+      }),
+    ];
+    const approval = Object.fromEntries(Object.entries(e.tools ?? {}).flatMap(([tool, t]) => (t.approval_mode === undefined ? [] : [[tool, t.approval_mode] as const])));
+    const { enabled_tools: enabledTools, disabled_tools: disabledTools = [] } = e;
+    servers.push({
+      name,
+      command: e.command,
+      args: e.args ?? [],
+      env: { ...Object.fromEntries(passed), ...e.env },
+      cwd: e.cwd === undefined ? cwd : path.resolve(cwd, e.cwd),
+      startupTimeoutMs: e.startup_timeout_ms ?? (e.startup_timeout_sec ?? CODEX_MCP_STARTUP_TIMEOUT_SEC) * 1000,
+      toolTimeoutMs: (e.tool_timeout_sec ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
+      origin,
+      secrets: configSecrets({ ...Object.fromEntries(passed.filter(([k]) => envVars.includes(k))), ...e.env }, e.args ?? []),
+      autostart: false,
+    });
+    rules[name] = { ...(enabledTools === undefined ? {} : { enabledTools }), disabledTools, approval };
+  }
+  // The decision that authorizes a call also decides the start: a server starts when one of its listed tools would run.
+  const startable = servers.map((s) => ({ ...s, autostart: Object.keys(rules[s.name]?.approval ?? {}).some((tool) => codexMcpDecision(probe(s.name, tool), rules, approvalPolicy).kind === 'allow') }));
+  return { mcp: { servers: startable, notes }, rules };
+}
+
+function probe(server: string, tool: string): PreparedMcpCall {
+  return { id: 'start', tool: 'mcp', args: { server, tool, input: {} }, effect: { server, tool, qualifiedName: `mcp__${server}__${tool}`, input: {}, timeoutMs: 0 } };
+}
+
+/**
+ * Codex starts a server the requirements list only when its entry there names
+ * it by identity: `identity.command` equal to the configured command. The
+ * command and URL matcher forms are not evaluated, so they allow nothing here.
+ */
+function allowedByRequirements(requirement: unknown, command: string): boolean {
+  if (!isTable(requirement) || Object.keys(requirement).join() !== 'identity') return false;
+  const identity = requirement['identity'];
+  return isTable(identity) && Object.keys(identity).join() === 'command' && identity['command'] === command;
+}
+
+export function codexMcpDecision(prepared: PreparedMcpCall, rules: Readonly<Record<string, CodexMcpRules>>, approvalPolicy: ApprovalPolicy): Decision {
+  const { server, tool, qualifiedName } = prepared.effect;
+  const r = rules[server];
+  if (r === undefined) return { kind: 'deny', source: 'rule', reason: `Codex configures no MCP server ${shownName(server)}` };
+  if (r.disabledTools.includes(tool)) return { kind: 'deny', source: 'rule', reason: `${qualifiedName} is in disabled_tools of mcp_servers.${server}` };
+  if (r.enabledTools !== undefined && !r.enabledTools.includes(tool)) return { kind: 'deny', source: 'rule', reason: `${qualifiedName} is not in enabled_tools of mcp_servers.${server}` };
+  const mode = r.approval[tool];
+  if (mode === 'approve') return { kind: 'allow' };
+  if (mode === 'prompt') {
+    const reason = `mcp_servers.${server}.tools.${tool}.approval_mode is "prompt"`;
+    return approvalPolicy === 'never' ? { kind: 'deny', source: 'rule', reason: `${reason}; approval policy never rejects it` } : { kind: 'ask', reason };
+  }
+  return {
+    kind: 'deny',
+    source: 'unsupported-config',
+    reason: `Codex approves ${qualifiedName} from its annotations and approval policy, which agent-code-mode does not reproduce; set mcp_servers.${server}.tools.${tool}.approval_mode = "approve" to run it from scripts`,
+  };
+}

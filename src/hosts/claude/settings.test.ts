@@ -302,6 +302,10 @@ describe('parseClaudeFlags', () => {
         '/b',
         '--setting-sources',
         'user,project',
+        '--strict-mcp-config',
+        '--mcp-config',
+        '/m.json',
+        '{"mcpServers":{}}',
         'prompt text',
       ]),
     ).toEqual({
@@ -312,6 +316,8 @@ describe('parseClaudeFlags', () => {
       settingSources: ['user', 'project'],
       addDirs: ['/a', '/b'],
       agents: [],
+      mcpConfigs: ['/m.json', '{"mcpServers":{}}', 'prompt text'],
+      strictMcpConfig: true,
     });
     expect(parseClaudeFlags(['claude', '--dangerously-skip-permissions']).permissionMode).toBe('bypassPermissions');
     expect(parseClaudeFlags(['claude', '--permission-mode', 'plan', '--dangerously-skip-permissions']).permissionMode).toBe('plan');

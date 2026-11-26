@@ -78,6 +78,8 @@ export interface Requirements {
   readonly hooks?: TomlTable;
   /** Pinned feature flags (`[features]` of requirements.toml). */
   readonly features?: TomlTable;
+  /** `[mcp_servers]` of requirements.toml: the only MCP servers Codex may start, each by name and identity. */
+  readonly mcpServers?: TomlTable;
   readonly file: string;
 }
 
@@ -512,6 +514,7 @@ function loadRequirements(io: ConfigIo): Requirements | null {
   return {
     file,
     allowManagedHooksOnly: r.allow_managed_hooks_only ?? false,
+    ...(Object.hasOwn(table, 'mcp_servers') ? { mcpServers: isTable(table['mcp_servers']) ? table['mcp_servers'] : {} } : {}),
     ...(r.allowed_sandbox_modes ? { allowedSandboxModes: r.allowed_sandbox_modes.filter(isSandboxMode) } : {}),
     ...(r.allowed_approval_policies ? { allowedApprovalPolicies: r.allowed_approval_policies } : {}),
     ...(hooks ? { hooks } : {}),

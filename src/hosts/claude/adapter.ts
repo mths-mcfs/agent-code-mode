@@ -8,13 +8,17 @@ import type {
   BashContainment,
   Decision,
   HostAdapter,
+  HostCall,
+  HostResult,
+  McpPolicy,
   PolicyLoadError,
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
+  PreparedMcpCall,
   SessionContext,
-  ToolResult,
 } from '../../core/types.js';
+import { discoverClaudeMcp } from './mcp.js';
 import { BashAnalyzer, type BashAnalysis } from './bash.js';
 import { contextDir, routineContextChange } from './context.js';
 import {
@@ -101,7 +105,13 @@ export interface ClaudeHostAdapterOptions {
   readonly platform?: NodeJS.Platform;
 }
 
-const NO_FLAGS: ClaudeCliFlags = { settings: [], allowedTools: [], disallowedTools: [], addDirs: [], agents: [] };
+const NO_FLAGS: ClaudeCliFlags = { settings: [], allowedTools: [], disallowedTools: [], addDirs: [], agents: [], mcpConfigs: [], strictMcpConfig: false };
+
+/** Whether a rule names an upstream tool: `mcp__<server>` covers all its tools, otherwise the name or glob must match. */
+function governsMcp(rule: Rule, server: string, qualifiedName: string): boolean {
+  if (rule.matcher.type !== 'all') return false;
+  return rule.tool === `mcp__${server}` || matchesToolName(rule.tool, qualifiedName);
+}
 
 function governs(rule: Rule, tool: NativeToolName): boolean {
   if (matchesToolName(rule.tool, tool)) return true;
@@ -399,6 +409,40 @@ function describe(rule: Rule): string {
   return `${rule.kind} rule ${JSON.stringify(rule.raw)} from ${rule.source} settings`;
 }
 
+/**
+ * Whether some call to `server` would pass `mcpDecision` without asking:
+ * only such a server starts with the session. Each allow rule that names the
+ * server, and bypassPermissions, is tried with the tool name it matches.
+ */
+function mcpMayAllow(server: string, policy: ClaudePolicy): boolean {
+  const tools = policy.rules.allow
+    .filter((r) => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || r.tool.startsWith(`mcp__${server}__`)))
+    .map((r) => (r.tool === `mcp__${server}` ? '' : r.tool.slice(`mcp__${server}__`.length).replaceAll('*', '')));
+  if (policy.mode === 'bypassPermissions') tools.push('');
+  return tools.some((tool) => mcpDecision({ id: 'start', tool: 'mcp', args: { server, tool, input: {} }, effect: { server, tool, qualifiedName: `mcp__${server}__${tool}`, input: {}, timeoutMs: 0 } }, policy).kind === 'allow');
+}
+
+/**
+ * The static decision for an upstream tool, as Claude Code makes it: deny
+ * rules, then plan mode (no MCP tool runs before the plan is approved), then
+ * ask rules, then allow rules, then the mode: only bypassPermissions runs a
+ * tool no rule allows. Upstream annotations (`readOnlyHint`) never count.
+ */
+function mcpDecision(prepared: PreparedMcpCall, policy: ClaudePolicy): Decision {
+  const { server, qualifiedName } = prepared.effect;
+  const covers = (r: Rule): boolean => governsMcp(r, server, qualifiedName);
+  const denied = policy.rules.deny.find(covers);
+  if (denied) return { kind: 'deny', source: 'rule', reason: `denied by ${describe(denied)}` };
+  if (policy.modeUnknown) return { kind: 'deny', source: 'unsupported-config', reason: `the live Claude Code permission mode is unknown on Windows (no trusted session record), so ${qualifiedName} cannot be authorized` };
+  if (policy.mode === 'plan') return { kind: 'deny', source: 'rule', reason: `plan mode does not run ${qualifiedName}` };
+  const askOrDeny = (reason: string): Decision => (policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${reason}` } : { kind: 'ask', reason });
+  const asked = policy.rules.ask.find(covers);
+  if (asked) return askOrDeny(`${describe(asked)} matches`);
+  if (policy.rules.allow.some(covers)) return { kind: 'allow' };
+  if (policy.mode === 'bypassPermissions') return { kind: 'allow' };
+  return askOrDeny(`${qualifiedName} needs an allow rule (mcp__${server} or ${qualifiedName}) in ${policy.mode} mode`);
+}
+
 function foldHost(url: string): string {
   const m = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#]*)(.*)$/s.exec(url);
   if (!m) return url;
@@ -632,9 +676,12 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       };
     }
 
+    // The session's --mcp-config files hold server commands like .mcp.json does.
+    const mcpConfigFiles = flags.mcpConfigs.filter((v) => !v.trim().startsWith('{') && (path.isAbsolute(v) || parentCwd !== undefined)).map((v) => path.resolve(parentCwd ?? projectRoot, v));
     const lexicalProtected = [
       ...new Set([
-        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
+        ...mcpConfigFiles,
+        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd, ...(parentCwd === undefined ? [] : [parentCwd])].flatMap((root) => [
           path.join(root, '.claude', 'settings*.json'),
           path.join(root, '.claude', 'hooks', '**'),
           path.join(root, '.claude', 'agents', '**'),
@@ -654,7 +701,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     // not the rest of the user config directory (transcripts, sessions, caches).
     const watchedPaths = [
       ...new Set([
-        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
+        ...mcpConfigFiles,
+        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd, ...(parentCwd === undefined ? [] : [parentCwd])].flatMap((root) => [
           path.join(root, '.claude', 'settings*.json'),
           path.join(root, '.claude', 'hooks', '**'),
           path.join(root, '.claude', 'agents', '**'),
@@ -681,6 +729,42 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       ]),
     ];
 
+    const payload: ClaudePolicy = {
+      projectRoot,
+      cwd: sessionCwd,
+      home,
+      configDir,
+      mode,
+      rules,
+      workingDirs: [...workingDirs],
+      blockDirs: [...blockDirs],
+      modeUnknown,
+      preHooks: pre,
+      postHooks: post,
+      hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
+      bashUnsupported,
+      autoAllowSandboxedBash: firstSetting(docs, (s) => s.sandbox?.autoAllowBashIfSandboxed) === true,
+      sandboxLimitsWrites,
+      blockReadsOutside,
+      blockWritesOutside,
+};
+
+    const mcp: McpPolicy =
+      parent === undefined
+        ? { servers: [], notes: ['the Claude Code process could not be read, so its MCP servers are unknown'] }
+        : await discoverClaudeMcp({
+            flags,
+            projectDir: parentCwd ?? projectRoot,
+            parentCwd,
+            configDir,
+            home,
+            managedDir,
+            docs,
+            projectTrusted: settings.projectTrusted,
+            env,
+            mayAllow: (server) => mcpMayAllow(server, payload),
+          });
+
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
     const isReadRestricted = (absPath: string): boolean =>
       readRestrictions.some((r) => r.matcher.type === 'all' || (r.matcher.type === 'path' && matchesPath(absPath, r.matcher.patterns)));
@@ -693,25 +777,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       isRoutineWatchedChange: routineContextChange(contextDir(stateDir), platform),
       additionalRoots: [...new Set(additionalDirs)],
       readFilter: (realAbsPath: string): boolean => !isReadRestricted(realAbsPath),
-      payload: {
-        projectRoot,
-        cwd: sessionCwd,
-        home,
-        configDir,
-        mode,
-        rules,
-        workingDirs: [...workingDirs],
-        blockDirs: [...blockDirs],
-        modeUnknown,
-        preHooks: pre,
-        postHooks: post,
-        hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
-        bashUnsupported,
-        autoAllowSandboxedBash: firstSetting(docs, (s) => s.sandbox?.autoAllowBashIfSandboxed) === true,
-        sandboxLimitsWrites,
-        blockReadsOutside,
-        blockWritesOutside,
-      },
+      mcp,
+      payload,
     };
   }
 
@@ -738,7 +805,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     return undefined;
   }
 
-  checkStatic(prepared: PreparedCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
+  checkStatic(prepared: HostCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Decision {
+    if (prepared.tool === 'mcp') return mcpDecision(prepared, snapshot.payload);
     return this.#decide(this.#view(prepared, ctx, snapshot.payload), snapshot);
   }
 
@@ -859,8 +927,67 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     return { kind: 'ask', reason: `hook rewrite: ${reached.reason}` };
   }
 
-  async authorize(prepared: PreparedCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<Decision> {
+  /** PreToolUse/PostToolUse hooks for an upstream tool: the matcher against `mcp__<server>__<tool>`, then the `if` rule. */
+  #selectMcp(hooks: readonly CompiledHook[], prepared: PreparedMcpCall, policy: ClaudePolicy): CompiledHook[] {
+    const { server, qualifiedName } = prepared.effect;
+    return hooks.filter((hook) => {
+      if (!matcherMatches(hook.matcher, qualifiedName)) return false;
+      const condition = hook.handler.if;
+      if (condition === undefined) return true;
+      const rule = parseRule(condition, 'allow', 'project', { cwd: policy.cwd, sourceDir: policy.projectRoot, home: policy.home });
+      if (!rule || rule.matcher.type === 'never') return true;
+      return governsMcp(rule, server, qualifiedName);
+    });
+  }
+
+  #mcpInput(prepared: PreparedMcpCall, ctx: SessionContext, policy: ClaudePolicy, event: 'PreToolUse' | 'PostToolUse'): Record<string, unknown> {
+    return {
+      session_id: ctx.sessionId ?? null,
+      transcript_path: ctx.transcriptPath ?? null,
+      cwd: policy.cwd,
+      permission_mode: policy.mode,
+      hook_event_name: event,
+      tool_name: prepared.effect.qualifiedName,
+      tool_input: prepared.effect.input,
+      tool_use_id: `${ctx.toolUseId ?? 'unknown'}/${prepared.id}`,
+      ...(ctx.agentId === undefined ? {} : { agent_id: ctx.agentId }),
+      ...(ctx.agentType === undefined ? {} : { agent_type: ctx.agentType }),
+    };
+  }
+
+  async #authorizeMcp(prepared: PreparedMcpCall, ctx: SessionContext, policy: ClaudePolicy, signal: AbortSignal): Promise<Decision> {
+    const hooks = this.#selectMcp(policy.preHooks, prepared, policy);
+    const unsupported = hooks.find((h) => h.unsupported !== undefined);
+    if (unsupported) return { kind: 'deny', source: 'unsupported-config', reason: `${unsupported.origin}: ${unsupported.unsupported ?? 'unsupported hook'}` };
+    if (hooks.length === 0) return { kind: 'allow' };
+    const opts = { event: 'PreToolUse' as const, input: this.#mcpInput(prepared, ctx, policy, 'PreToolUse'), cwd: policy.cwd, env: policy.hookEnv, signal };
+    const blocking: Promise<HookOutcome>[] = [];
+    for (const hook of hooks) {
+      if (hook.handler.type === 'command' && (hook.handler.async === true || hook.handler.asyncRewake === true)) {
+        void runHook(hook, opts);
+        continue;
+      }
+      blocking.push(runHook(hook, opts));
+    }
+    const combined = combineOutcomes(await Promise.all(blocking));
+    switch (combined.kind) {
+      case 'deny':
+        return combined;
+      case 'ask':
+        return { kind: 'ask', reason: combined.reason };
+      case 'none':
+      case 'allow': {
+        const reason = combined.reason === undefined ? {} : { reason: combined.reason };
+        if (combined.updatedInput === undefined) return { kind: 'allow', ...reason };
+        const timeout = prepared.args.timeoutMs === undefined ? {} : { options: { timeoutMs: prepared.args.timeoutMs } };
+        return { kind: 'allow', updatedArgs: { server: prepared.effect.server, tool: prepared.effect.tool, args: combined.updatedInput, ...timeout }, ...reason };
+      }
+    }
+  }
+
+  async authorize(prepared: HostCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<Decision> {
     const policy = snapshot.payload;
+    if (prepared.tool === 'mcp') return this.#authorizeMcp(prepared, ctx, policy, signal);
     const view = this.#view(prepared, ctx, policy);
     const reached = await this.#exactRuleRealReach(view, snapshot);
     if (reached) return reached;
@@ -899,12 +1026,20 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     }
   }
 
-  async postToolUse(prepared: PreparedCall, result: ToolResult, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<void> {
+  async postToolUse(prepared: HostCall, result: HostResult, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<void> {
     const policy = snapshot.payload;
-    const view = this.#view(prepared, ctx, policy);
-    const hooks = this.#select(policy.postHooks, view, policy);
+    let hooks: CompiledHook[];
+    let input: Record<string, unknown>;
+    if (prepared.tool === 'mcp') {
+      hooks = this.#selectMcp(policy.postHooks, prepared, policy);
+      input = { ...this.#mcpInput(prepared, ctx, policy, 'PostToolUse'), tool_response: result };
+    } else {
+      if ('isError' in result) throw new Error(`PostToolUse: ${prepared.tool} got an MCP result`);
+      const view = this.#view(prepared, ctx, policy);
+      hooks = this.#select(policy.postHooks, view, policy);
+      input = { ...this.#input(view, ctx, policy, 'PostToolUse'), tool_response: nativeResponse(prepared, result) };
+    }
     if (hooks.length === 0) return;
-    const input = { ...this.#input(view, ctx, policy, 'PostToolUse'), tool_response: nativeResponse(prepared, result) };
     const opts = { event: 'PostToolUse' as const, input, cwd: policy.cwd, env: policy.hookEnv, signal };
     const notes: string[] = [];
     const outcomes = await Promise.all(

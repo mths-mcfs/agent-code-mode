@@ -24,7 +24,8 @@ export function hookCommand(protectedFile: string): string {
 }
 
 export function claudeProjectSettings(task: TaskDef, fixture: Fixture, companionHook?: string): unknown {
-  const settings: Record<string, unknown> = { permissions: { allow: CLAUDE_ALLOWED_TOOLS }, sandbox: { enabled: true, autoAllowBashIfSandboxed: true }, autoMemoryEnabled: false };
+  const allow = task.mcpServer === undefined ? CLAUDE_ALLOWED_TOOLS : [...CLAUDE_ALLOWED_TOOLS, `mcp__${task.mcpServer.name}`];
+  const settings: Record<string, unknown> = { permissions: { allow }, sandbox: { enabled: true, autoAllowBashIfSandboxed: true }, autoMemoryEnabled: false };
   const preToolUse: unknown[] = [];
   if (task.protectedHook) preToolUse.push({ matcher: CLAUDE_HOOK_MATCHER, hooks: [{ type: 'command', command: hookCommand(fixture.facts.protectedFile), timeout: 30 }] });
   if (companionHook !== undefined) preToolUse.push({ matcher: CLAUDE_RUN_TOOL, hooks: [{ type: 'command', command: companionHook }] });
@@ -77,7 +78,7 @@ export async function createWorkspace(dir: string, task: TaskDef, host: HostId, 
   await writeTree(dir, initial);
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['add', '-A']);
-  git(dir, ['commit', '-q', '--no-verify', '-m', `fixture ${fixtureSeed} for ${task.id}`]);
+  git(dir, ['commit', '-q', '--no-verify', '-m', `fixture for ${task.id}`]);
   return { dir, initial, fixture, baseCommit: git(dir, ['rev-parse', 'HEAD']).trim() };
 }
 

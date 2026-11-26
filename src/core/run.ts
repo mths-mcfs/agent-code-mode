@@ -7,6 +7,7 @@ import type {
   CallReply,
   HostAdapter,
   LogLevel,
+  McpRuntime,
   PolicyLoadError,
   PolicySnapshot,
   RollbackReport,
@@ -46,6 +47,8 @@ export interface RunDeps<P = unknown> {
   /** Monotonic clock in ms, for tests. */
   readonly now?: () => number;
   readonly overflow?: { read(args: unknown): CallReply };
+  /** Sends authorized `mcpCall`s to the host's upstream MCP servers. */
+  readonly mcp?: McpRuntime;
 }
 
 type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
@@ -258,6 +261,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       policy,
       checkDeadline,
       ...(overflow ? { readOverflow: (args: unknown) => overflow.read(args) } : {}),
+      ...(deps.mcp ? { mcp: deps.mcp } : {}),
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
     const active = dispatcher;
@@ -338,6 +342,9 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       rolledBack = rollback.report;
       if (active.bashCommits > 0) {
         warnings.push(`${active.bashCommits} bash call(s) ran in this transaction; bash effects are never rolled back.`);
+      }
+      if (active.mcpCallsSent > 0) {
+        warnings.push(`${active.mcpCallsSent} mcpCall(s) were sent to upstream MCP servers in this transaction; their effects are never rolled back.`);
       }
     }
 

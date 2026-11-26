@@ -17,6 +17,12 @@
  *                   re-prepared and re-checked statically (hooks are not re-run).
  *     4. commit   : `ToolRuntime.commit` executes exactly the prepared effect,
  *                   re-checking content hashes first.
+ *
+ * `mcpCall` (binding `mcp`) takes the same path with the upstream servers of
+ * the host's configuration (`PolicySnapshot.mcp`) in place of the tool
+ * runtime: prepared into a `PreparedMcpCall`, authorized by the same adapter
+ * methods, then sent by `McpRuntime.call` to a server started with the
+ * session. Nothing reaches the upstream server before the call is authorized.
  */
 
 /** Names of the bindings a script can call. */
@@ -226,7 +232,118 @@ export interface OverflowSlice {
   readonly truncated: boolean;
 }
 
-export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice;
+export type ScriptValue = Exclude<ToolResult, GrepResult> | ScriptGrepResult | OverflowSlice | McpResult;
+
+// ---------------------------------------------------------------------------
+// Upstream MCP tools: `mcpCall(server, tool, args?, options?)`.
+// ---------------------------------------------------------------------------
+
+/**
+ * One stdio MCP server of the host's configuration, as the host would start
+ * it. `env` is the whole environment of the process and holds the server's
+ * credentials: it is never logged or returned to a script.
+ */
+export interface McpServerSpec {
+  /** The configured name; its tools are `mcp__<name>__<tool>` to the host. */
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+  readonly cwd: string;
+  /** Wait for the process to start, initialize and list its tools. */
+  readonly startupTimeoutMs: number;
+  /** Longest call the host allows, when it sets one. */
+  readonly toolTimeoutMs?: number;
+  /** Where the host keeps it, e.g. `.mcp.json` or `config.toml`. */
+  readonly origin: string;
+  /**
+   * Some call to it can pass the host's rules without asking (an allow rule
+   * or permission mode names it under Claude, an `approve` tool under
+   * Codex): only such a server starts with the session.
+   */
+  readonly autostart: boolean;
+  /** Config values that may be credentials; removed from every error, result and log line about this server. */
+  readonly secrets: readonly string[];
+}
+
+/** The upstream servers a host session can reach. */
+export interface McpPolicy {
+  readonly servers: readonly McpServerSpec[];
+  /** Servers of the host config left out, with why (no values, no secrets). */
+  readonly notes: readonly string[];
+  /** Set when the host config restricts MCP in a way this server does not evaluate: every `mcpCall` is refused. */
+  readonly unsupported?: string;
+}
+
+/** Validated `mcpCall` arguments. */
+export interface McpArgs {
+  readonly server: string;
+  readonly tool: string;
+  /** The tool arguments, sent as given. */
+  readonly input: Readonly<Record<string, unknown>>;
+  readonly timeoutMs?: number;
+}
+
+/** A validated `mcpCall`. */
+export interface McpCall {
+  readonly id: string;
+  readonly tool: 'mcp';
+  readonly args: McpArgs;
+}
+
+/** Exactly what is sent upstream. An external effect: never rolled back. */
+export interface McpEffect {
+  readonly server: string;
+  readonly tool: string;
+  /** The host's name of the tool, `mcp__<server>__<tool>`. */
+  readonly qualifiedName: string;
+  readonly input: Readonly<Record<string, unknown>>;
+  /** Effective call timeout in milliseconds. */
+  readonly timeoutMs: number;
+}
+
+/** An `mcpCall` after preparation, deep-frozen by the dispatcher. */
+export interface PreparedMcpCall {
+  readonly id: string;
+  readonly tool: 'mcp';
+  readonly args: McpArgs;
+  readonly effect: McpEffect;
+}
+
+/**
+ * What `mcpCall` resolves to: the upstream `structuredContent` when there is
+ * one, else the text of its content blocks, plus `isError`. A result past the
+ * cap is cut: `text` holds its start and `overflow` names where
+ * `readOverflow` reads the rest, or `warning` says it could not be kept.
+ */
+export interface McpResult {
+  readonly isError: boolean;
+  readonly structuredContent?: unknown;
+  readonly text?: string;
+  readonly truncated?: true;
+  readonly overflow?: { readonly id: string; readonly chars: number };
+  readonly warning?: string;
+}
+
+/** Sends authorized `mcpCall`s to the servers started with the session. */
+export interface McpRuntime {
+  /**
+   * Sends the call to the running server of `spec`, after checking that it
+   * lists `effect.tool`, and shapes the result. Throws `ToolError` when that
+   * server was not started with the session or has exited, on a failure, a
+   * timeout (effect unknown, never retried) or a cancel. `onSent` runs once,
+   * when the request is written to the server.
+   */
+  call(spec: McpServerSpec, effect: McpEffect, signal: AbortSignal, onSent?: () => void): Promise<McpResult>;
+  /** Ends every server process. Idempotent. */
+  close(): Promise<void>;
+}
+
+/** What a host adapter authorizes: a prepared built-in call or a prepared `mcpCall`. */
+export type HostCall = PreparedCall | PreparedMcpCall;
+
+/** A committed call's result, as PostToolUse hooks see it. */
+export type HostResult = ToolResult | McpResult;
 
 /** Maps each tool to its result type. */
 export interface ToolResultMap {
@@ -507,6 +624,8 @@ export interface PolicySnapshot<P = unknown> {
   readonly watchedPaths?: readonly string[];
   /** Changes in the watched paths this host makes routinely, which are not reported. */
   readonly isRoutineWatchedChange?: (change: WatchedChange) => Promise<boolean>;
+  /** The host's upstream MCP servers. Absent: `mcpCall` reaches none. */
+  readonly mcp?: McpPolicy;
   readonly payload: P;
 }
 
@@ -567,7 +686,8 @@ export interface HookContextStore {
 
 /**
  * Host adapter: reproduces how the host authorizes a native tool call.
- * Implementations must be fail-closed: an error in a hook is a deny.
+ * Implementations must be fail-closed: an error in a hook is a deny, and an
+ * `mcpCall` the adapter cannot authorize as its host would is denied.
  */
 export interface HostAdapter<P = unknown> {
   readonly host: HostKind;
@@ -585,13 +705,13 @@ export interface HostAdapter<P = unknown> {
    * The host's static permission rules (deny → ask → allow) applied to the
    * prepared call. `allow` means "no rule denies or asks". Must not do I/O.
    */
-  checkStatic(prepared: PreparedCall, ctx: SessionContext, policy: PolicySnapshot<P>): Decision;
+  checkStatic(prepared: HostCall, ctx: SessionContext, policy: PolicySnapshot<P>): Decision;
   /**
    * Runs the host's PreToolUse hooks on the prepared call. Must honor
    * `signal` (kill running hooks). Only called after `checkStatic` allowed.
    */
   authorize(
-    prepared: PreparedCall,
+    prepared: HostCall,
     ctx: SessionContext,
     policy: PolicySnapshot<P>,
     signal: AbortSignal,
@@ -602,8 +722,8 @@ export interface HostAdapter<P = unknown> {
    * waiting when it aborts.
    */
   postToolUse?(
-    prepared: PreparedCall,
-    result: ToolResult,
+    prepared: HostCall,
+    result: HostResult,
     ctx: SessionContext,
     policy: PolicySnapshot<P>,
     signal: AbortSignal,

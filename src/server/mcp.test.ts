@@ -2,12 +2,13 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Sandbox, SessionContext } from '../core/types.js';
+import type { McpServerSpec, Sandbox, SessionContext } from '../core/types.js';
+import { McpUpstreams } from '../mcp/upstream.js';
 import { FakeSandbox } from '../testing/fake-sandbox.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter } from '../testing/static-host-adapter.js';
@@ -259,6 +260,92 @@ async function connectReal(opts: { serverCwd: string; stateDir: string; roots?: 
   });
   return client;
 }
+
+describe('MCP server and the session\'s upstream servers', () => {
+  it('starts the session\'s servers, unless this serve is itself an upstream of another', async () => {
+    class Recording extends McpUpstreams {
+      readonly seen: (readonly McpServerSpec[])[] = [];
+      override start(specs: Promise<readonly McpServerSpec[]>): void {
+        void specs.then((list) => this.seen.push(list));
+        super.start(Promise.resolve([]));
+      }
+    }
+    const spec: McpServerSpec = { name: 'srv', command: 'node', args: [], env: {}, cwd: '/ws', startupTimeoutMs: 1_000, origin: 'test', autostart: true, secrets: [] };
+    const adapter = new StaticHostAdapter({ host: 'claude', mcp: { servers: [spec, { ...spec, name: 'idle', autostart: false }], notes: [] } });
+    const factory: RuntimeFactory = (host) => ({ host, contextProvider: new GenericContextProvider(), adapter, tools: new MemoryToolRuntime({ root: '/ws' }), sandbox: new FakeSandbox(), maxTimeoutMs: 10_000 });
+    const make = (env: Record<string, string>) => {
+      const upstreams = new Recording();
+      createMcpServer({ version: '0', host: 'claude', env, serverCwd: '/ws', stateDir: '/nonexistent-state', recoverJournals: false, createRuntime: factory, upstreams });
+      return upstreams;
+    };
+    const top = make({});
+    const nested = make({ AGENT_CODE_MODE_UPSTREAM: '1' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(top.seen.map((l) => l.map((s) => s.name))).toEqual([['srv']]);
+    expect(nested.seen).toEqual([]);
+  });
+
+  it('runs no script before a slow server has initialized, so a script cannot change a file it still loads', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-ready-'));
+    const log = path.join(dir, 'log.jsonl');
+    const upstreams = new McpUpstreams();
+    const spec: McpServerSpec = {
+      name: 'slow',
+      command: process.execPath,
+      args: [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp', 'fixtures', 'upstream-server.mjs')],
+      env: { PATH: process.env['PATH'] ?? '', FIXTURE_LOG: log, FIXTURE_INIT_DELAY: '500' },
+      cwd: dir,
+      startupTimeoutMs: 10_000,
+      origin: 'test',
+      autostart: true,
+      secrets: [],
+    };
+    upstreams.start(Promise.resolve([spec]));
+    const adapter = new StaticHostAdapter();
+    const factory: RuntimeFactory = (host) => ({ host, contextProvider: new GenericContextProvider(), adapter, tools: new MemoryToolRuntime({ root: '/ws' }), sandbox: new FakeSandbox(), maxTimeoutMs: 10_000 });
+    const server = createMcpServer({ version: '0', env: {}, serverCwd: '/ws', stateDir: '/nonexistent-state', recoverJournals: false, createRuntime: factory, upstreams });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => {
+      await client.close();
+      await server.close();
+      await upstreams.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    await client.callTool({ name: 'run', arguments: { code: JSON.stringify([{ log: 'ran' }]) } });
+    expect(readFileSync(log, 'utf8')).toContain('"listed"');
+    // Shutdown waits for the server process itself, so nothing holds its working directory afterwards.
+    const pid = Number(/"pid":(\d+)/.exec(readFileSync(log, 'utf8'))?.[1]);
+    await upstreams.close();
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it('runs no script before the session\'s upstream servers are spawned', async () => {
+    const upstreams = new McpUpstreams();
+    let release: (specs: readonly McpServerSpec[]) => void = () => undefined;
+    upstreams.start(new Promise((resolve) => (release = resolve)));
+    const sandbox = new FakeSandbox();
+    const adapter = new StaticHostAdapter();
+    const factory: RuntimeFactory = (host) => ({ host, contextProvider: new GenericContextProvider(), adapter, tools: new MemoryToolRuntime({ root: '/ws' }), sandbox, maxTimeoutMs: 10_000 });
+    const server = createMcpServer({ version: '0', env: {}, serverCwd: '/ws', stateDir: '/nonexistent-state', recoverJournals: false, createRuntime: factory, upstreams });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => {
+      await client.close();
+      await server.close();
+    });
+    let done = false;
+    const pending = client.callTool({ name: 'run', arguments: { code: JSON.stringify([{ log: 'ran' }]) } }).then((r) => ((done = true), r));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(done).toBe(false);
+    release([]);
+    expect(JSON.stringify((await pending).content)).toContain('ran');
+  });
+});
 
 describe.skipIf(ROOTED_OPS_REFUSED)('MCP server with the real runtime', () => {
   let base: string;

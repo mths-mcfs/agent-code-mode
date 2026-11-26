@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { StdioServer } from './claude.ts';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
 import { runInnerCalls } from './run-result.ts';
 
@@ -26,6 +27,7 @@ export interface CodexHomeOptions {
   readonly serverEntry: string;
   readonly nodePath: string;
   readonly emptyServerEntry: string;
+  readonly task?: { readonly server: StdioServer; readonly tools: readonly string[] };
 }
 
 export const EMPTY_MCP_SERVER = new URL('./empty-mcp-server.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
@@ -71,6 +73,11 @@ export function codexConfigToml(o: CodexHomeOptions): string {
   } else {
     // Same MCP resource tools as arm C (Codex adds them whenever any MCP server is configured).
     tables.push(['mcp_servers.bench-empty', [`command = ${tomlString(o.nodePath)}`, `args = [${tomlString(o.emptyServerEntry)}]`]]);
+  }
+  if (o.task !== undefined) {
+    const name = o.task.server.name;
+    tables.push([`mcp_servers.${name}`, [`command = ${tomlString(o.task.server.command)}`, `args = [${o.task.server.args.map(tomlString).join(', ')}]`]]);
+    for (const tool of o.task.tools) tables.push([`mcp_servers.${name}.tools.${tool}`, ['approval_mode = "approve"']]);
   }
   return `${[...top, ...tables.flatMap(([name, body]) => ['', `[${name}]`, ...body])].join('\n')}\n`;
 }
@@ -241,12 +248,13 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
       return;
     }
     const type = item.data.item.type;
+    const mcp = McpItem.safeParse(item.data.item);
     if (type === 'command_execution' || type === 'file_change' || type === 'mcp_tool_call' || type === 'web_search') {
+      const key = mcp.success ? `mcp__${mcp.data.server}__${mcp.data.tool}` : type;
       innerItems += 1;
-      innerByType[type] = (innerByType[type] ?? 0) + 1;
+      innerByType[key] = (innerByType[key] ?? 0) + 1;
       evidence['innerItems']?.push(i + 1);
     }
-    const mcp = McpItem.safeParse(item.data.item);
     if (mcp.success) {
       const name = `mcp__${mcp.data.server}__${mcp.data.tool}`;
       const kind = mcp.data.server === CODEX_SERVER_NAME && mcp.data.tool === 'run' ? 'run' : 'other';
@@ -341,6 +349,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     denials,
     hostError,
     evidence,
+    mcpCalls: null,
   };
 }
 

@@ -11,7 +11,9 @@ import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
 import { stateDirPath } from '../core/state-dir.js';
 import { CODEX_SEARCH_NOTE } from '../hosts/codex/index.js';
-import type { HostKind, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
+import type { HostKind, McpServerSpec, PolicySnapshot, RunResult, SessionContext } from '../core/types.js';
+import { UPSTREAM_ENV } from '../mcp/self.js';
+import { McpUpstreams } from '../mcp/upstream.js';
 import { recoverStaleJournals, type RecoveredJournal } from '../tools/journal.js';
 import { detectHost } from './context.js';
 import { createRuntime, type Runtime, type RuntimeFactory } from './runtime.js';
@@ -33,6 +35,7 @@ edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStr
 grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {columns: [file, line, text], rows, count, truncated, filtered}
 glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
 readOverflow(id, offset?, limit?) -> {text, offset, totalChars, truncated}: a page of the result JSON a response cut (its overflow.id)
+mcpCall(server, tool, args?, {timeoutMs?}?) -> {isError, structuredContent?, text?, truncated?, overflow?}: a tool of an MCP server the host configures, authorized as mcp__<server>__<tool>; never rolled back
 The response counts calls per tool and lists the denied and failed ones (verbose: true lists all). A large diff comes as diffStat. transaction: true rolls back file changes if the script fails.
 ${CODEX_SEARCH_NOTE}`;
 
@@ -59,10 +62,17 @@ export interface McpServerOptions {
   readonly createRuntime?: RuntimeFactory;
   /** How long to wait for `roots/list`. */
   readonly rootsTimeoutMs?: number;
+  /** What responses cut, for `readOverflow`; created here when absent. */
+  readonly overflow?: OverflowStore;
+  /** The upstream MCP server processes (keeping cut results in `overflow`); created here when absent, and closed with the session. */
+  readonly upstreams?: McpUpstreams;
   readonly recoverJournals?: boolean;
 }
 
 export const RUN_LOG_ENV = 'AGENT_CODE_MODE_LOG';
+
+/** Longest wait for the host policy that names the session's upstream MCP servers. */
+export const MCP_DISCOVERY_TIMEOUT_MS = 10_000;
 
 export function recoveryProtectedPaths(stateDir: string, env: Readonly<Record<string, string | undefined>>, home: string = os.homedir()): string[] {
   const configDirs = [env['CODEX_HOME'], env['CLAUDE_CONFIG_DIR']].filter((d): d is string => d !== undefined && path.isAbsolute(d));
@@ -216,12 +226,32 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return [...new Set(await Promise.all(reported))].filter((l): l is RecoveryLog => l !== undefined);
   };
 
-  const overflow = new OverflowStore();
+  const overflow = opts.overflow ?? new OverflowStore();
   const server = new Server({ name: SERVER_NAME, version: opts.version }, {
     capabilities: { tools: {} },
     instructions: SERVER_INSTRUCTIONS,
   });
-  server.onclose = () => overflow.clear();
+  const upstreams = opts.upstreams ?? new McpUpstreams({ overflow, clientVersion: opts.version });
+  const sessionHost = detectHost({ flag: opts.host, env, meta: undefined });
+  // A serve that is itself an upstream of another serve starts none: a config that names agent-code-mode would recurse.
+  if (sessionHost !== 'generic' && env[UPSTREAM_ENV] === undefined) {
+    const discover = async (): Promise<readonly McpServerSpec[]> => {
+      const runtime = runtimeFor(sessionHost);
+      const policy = await runtime.adapter.loadPolicy(await runtime.contextProvider.resolve({ env, meta: undefined, roots: [], serverCwd }));
+      if ('error' in policy || policy.mcp === undefined || policy.mcp.unsupported !== undefined) return [];
+      return policy.mcp.servers.filter((s) => s.autostart);
+    };
+    // Bounded: a policy that cannot be read in time starts no server, and every mcpCall is refused.
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<readonly McpServerSpec[]>((resolve) => {
+      timer = setTimeout(() => resolve([]), MCP_DISCOVERY_TIMEOUT_MS);
+    });
+    upstreams.start(Promise.race([discover().catch(() => []), late]).finally(() => clearTimeout(timer)));
+  }
+  server.onclose = () => {
+    overflow.clear();
+    void upstreams.close();
+  };
 
   const listRoots = async (signal: AbortSignal): Promise<string[]> => {
     if (!server.getClientCapabilities()?.roots) return [];
@@ -251,6 +281,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
       if (extra.signal.aborted) return respond(errorResult('the run was cancelled before context resolution'));
       const ctx = await runtime.contextProvider.resolve({ env, meta, roots, serverCwd });
       const recovered = await recoverFor(ctx, runtime);
+      // No script runs before the session's servers have initialized, so none can change files they still load.
+      await upstreams.ready();
       const ran = await runScript(toRunRequest(args.value, runtime.maxTimeoutMs), {
         sandbox: runtime.sandbox,
         adapter: runtime.adapter,
@@ -259,6 +291,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
         signal: extra.signal,
         maxTimeoutMs: runtime.maxTimeoutMs,
         overflow,
+        mcp: upstreams,
       });
       const warnings = recovered.flatMap(recoveryWarnings);
       const result = warnings.length === 0 ? ran : { ...ran, warnings: [...warnings, ...ran.warnings] };

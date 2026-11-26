@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { Decision, HostAdapter, PolicySnapshot, PreparedCall, SessionContext } from '../core/types.js';
+import type { Decision, HostAdapter, HostCall, PolicySnapshot, SessionContext } from '../core/types.js';
 
 export const GENERIC_DENY_REASON =
   'no Claude Code or Codex host was detected (start the server with --host claude or --host codex), so its permission rules and hooks cannot be applied: only read, grep and glob inside the workspace are allowed';
@@ -21,8 +21,10 @@ export class GenericHostAdapter implements HostAdapter<null> {
     };
   }
 
-  checkStatic(prepared: PreparedCall): Decision {
+  checkStatic(prepared: HostCall): Decision {
     switch (prepared.tool) {
+      case 'mcp':
+        return { kind: 'deny', source: 'unsupported-config', reason: 'upstream MCP calls need the Claude Code or Codex host, whose MCP configuration and rules they follow' };
       case 'read':
       case 'grep':
       case 'glob':

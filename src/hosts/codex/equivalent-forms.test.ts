@@ -13,7 +13,7 @@ import { memoryIo } from './test-io.js';
 const RULES = parseRulesFile('prefix_rule(pattern=["rm"], decision="forbidden")\nprefix_rule(pattern=["git", "push"], decision="forbidden")\n', 'default.rules');
 
 function policy(approvalPolicy: CodexPolicy['approvalPolicy']): CodexPolicy {
-  return { sandboxMode: 'danger-full-access', approvalPolicy, writableRoots: [], rules: { rules: RULES }, hooks: [], hooksEnabled: true, permissionMode: 'default', codexHome: '/home/u/.codex', notes: [] };
+  return { sandboxMode: 'danger-full-access', approvalPolicy, writableRoots: [], rules: { rules: RULES }, hooks: [], hooksEnabled: true, permissionMode: 'default', codexHome: '/home/u/.codex', notes: [], mcpRules: {} };
 }
 const decide = (cmd: string, approval: CodexPolicy['approvalPolicy'] = 'on-request') => checkShellCommand(cmd, policy(approval), ['/bin/bash', '-c']);
 

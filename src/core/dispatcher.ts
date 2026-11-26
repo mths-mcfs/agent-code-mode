@@ -5,6 +5,8 @@ import { claimFile } from './file-claims.js';
 import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
 import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
+import { parseMcpCall, prepareMcpCall } from '../mcp/call.js';
+import { redactDeep } from '../mcp/secrets.js';
 import type {
   BashContainment,
   BashResult,
@@ -14,10 +16,17 @@ import type {
   Decision,
   DenySource,
   HostAdapter,
+  HostCall,
+  HostResult,
+  McpCall,
+  McpResult,
+  McpRuntime,
+  McpServerSpec,
   PolicyLoadError,
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
+  PreparedMcpCall,
   ProtectedChange,
   ScriptValue,
   SearchLowering,
@@ -55,6 +64,8 @@ export interface DispatcherOptions<P> {
   readonly watchTimeoutMs?: number;
   /** Serves `readOverflow` from this server's memory; it never reaches the host. */
   readonly readOverflow?: (args: unknown) => CallReply;
+  /** Sends authorized `mcpCall`s upstream. Absent: every `mcpCall` fails. */
+  readonly mcp?: McpRuntime;
 }
 
 const NO_OVERFLOW: CallReply = { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
@@ -185,8 +196,11 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typ
  * - write/edit on a protected path is refused even if the tool runtime missed
  *   it; a bash call whose containment differs from the policy is denied
  *   `containment-unavailable`.
- * - mutations (`bash`, `write`, `edit`) run one at a time, in call order;
- *   reads run concurrently.
+ * - mutations (`bash`, `write`, `edit`) and `mcpCall`s run one at a time, in
+ *   call order; reads run concurrently.
+ * - an `mcpCall` reaches only a server of `policy.mcp`, and nothing reaches
+ *   it before the call is authorized; a hook may rewrite its input, never
+ *   its server or tool.
  * - after `stop()` no call starts and no commit starts; a commit that was
  *   running when the run stopped is reported in `warnings`.
  */
@@ -208,6 +222,7 @@ export class Dispatcher<P = unknown> {
   readonly #warnings: string[] = [];
   #deniedCount = 0;
   #bashCommits = 0;
+  #mcpSent = 0;
   readonly #realCwd: string;
   readonly #protected: ProtectedChange[] = [];
   #watchMark: (WatchWindow & { readonly snapshot: WatchedSnapshot }) | undefined;
@@ -267,6 +282,11 @@ export class Dispatcher<P = unknown> {
   /** Number of `bash` calls that committed (their effects are never rolled back). */
   get bashCommits(): number {
     return this.#bashCommits;
+  }
+
+  /** Number of `mcpCall`s written to an upstream server, whatever their outcome (never rolled back). */
+  get mcpCallsSent(): number {
+    return this.#mcpSent;
   }
 
   get stopReason(): StopReason | undefined {
@@ -355,6 +375,7 @@ export class Dispatcher<P = unknown> {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, this.#stoppedFailure()));
     }
     if (tool === 'readOverflow') return Promise.resolve(this.#readOverflow(id, slot, args, started));
+    if (tool === 'mcp') return this.#handleMcp(id, slot, toolLabel, args, started);
     const parsed = parseToolCall(tool, args, id);
     if (parsed instanceof ToolError) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: parsed }));
@@ -377,6 +398,91 @@ export class Dispatcher<P = unknown> {
     const queued = this.#mutationTail.then(run);
     this.#mutationTail = queued.catch(() => undefined);
     return queued;
+  }
+
+  #handleMcp(id: string, slot: number, toolLabel: string, args: unknown, started: number): Promise<CallReply> {
+    const call = parseMcpCall(args, id);
+    if (call instanceof ToolError) return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: call }));
+    const label = mcpLabel(call);
+    // Until the server's secrets are known the summary carries no input: a call refused or stopped before then shows none.
+    const summary = `mcp ${call.args.server}.${call.args.tool} <input not shown>`;
+    this.#labels[slot] = { id, tool: label, summary };
+    const policy = this.#opts.policy;
+    if (isPolicyError(policy)) {
+      return Promise.resolve(this.#fail(slot, id, label, summary, started, { kind: 'deny', source: 'unsupported-config', reason: `host configuration could not be loaded: ${policy.error}` }));
+    }
+    const queued = this.#mutationTail.then(() => this.#mcpPipeline(slot, call, label, summary, policy, started));
+    this.#mutationTail = queued.catch(() => undefined);
+    return queued;
+  }
+
+  async #mcpPipeline(slot: number, call: McpCall, label: string, summary: string, policy: PolicySnapshot<P>, started: number): Promise<CallReply> {
+    const fail = (failure: Failure): CallReply => this.#fail(slot, call.id, label, summary, started, failure);
+    if (this.#hasStopped()) return fail(this.#stoppedFailure());
+    if (policy.mcp?.unsupported !== undefined) return fail({ kind: 'deny', source: 'unsupported-config', reason: policy.mcp.unsupported });
+    const first = prepareMcpCall(call, policy.mcp);
+    if (first instanceof ToolError) return fail({ kind: 'error', error: first });
+    let prepared = frozenCopy(first.prepared);
+    const spec = first.spec;
+    // A call's input can carry a value of the server's config (a hook may add one): the log never shows it.
+    summary = summarizeMcp(call, spec.secrets);
+    this.#labels[slot] = { id: call.id, tool: label, summary };
+
+    const staticFailure = this.#checkStatic(prepared, policy);
+    if (staticFailure) return fail(staticFailure);
+    const decision = await this.#authorize(prepared, policy);
+    if (decision === ABORTED || this.#hasStopped()) return fail(this.#stoppedFailure());
+    if (decision.kind === 'deny') return fail({ kind: 'deny', source: decision.source, reason: decision.reason });
+    if (decision.kind === 'ask') {
+      return fail({ kind: 'deny', source: 'ask-unavailable', reason: `host would ask the user and no interactive channel exists: ${decision.reason}` });
+    }
+    if (Object.hasOwn(decision, 'updatedArgs')) {
+      const reparsed = parseMcpCall(decision.updatedArgs, call.id);
+      if (reparsed instanceof ToolError) return fail({ kind: 'deny', source: 'hook', reason: `hook returned invalid updated input: ${reparsed.message}` });
+      if (reparsed.args.server !== call.args.server || reparsed.args.tool !== call.args.tool) {
+        return fail({ kind: 'deny', source: 'hook', reason: 'hook updated input names another MCP server or tool' });
+      }
+      const second = prepareMcpCall(reparsed, policy.mcp);
+      if (second instanceof ToolError) return fail({ kind: 'deny', source: 'hook', reason: `hook updated input was refused: ${second.message}` });
+      const recheck = this.#checkStatic(second.prepared, policy);
+      if (recheck) return fail(recheck);
+      prepared = frozenCopy(second.prepared);
+      summary = summarizeMcp(reparsed, spec.secrets);
+      this.#labels[slot] = { id: call.id, tool: label, summary };
+    }
+    if (this.#hasStopped()) return fail(this.#stoppedFailure());
+    return this.#commitMcp(slot, prepared, spec, label, summary, policy, started);
+  }
+
+  async #commitMcp(slot: number, prepared: PreparedMcpCall, spec: McpServerSpec, label: string, summary: string, policy: PolicySnapshot<P>, started: number): Promise<CallReply> {
+    const mcp = this.#opts.mcp;
+    if (mcp === undefined) return this.#fail(slot, prepared.id, label, summary, started, { kind: 'error', error: new ToolError('tool-error', 'mcpCall: this server has no upstream MCP runtime') });
+    const signal = this.#abort.signal;
+    await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'during' });
+    let result: McpResult;
+    try {
+      result = await mcp.call(spec, prepared.effect, signal, () => {
+        this.#mcpSent++;
+      });
+    } catch (err) {
+      return this.#fail(slot, prepared.id, label, summary, started, this.#toolFailure(err));
+    } finally {
+      await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'after' });
+    }
+    await this.#postToolUse(prepared, result, summary, policy);
+    this.#calls[slot] = { id: prepared.id, tool: label, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+    return { ok: true, value: result };
+  }
+
+  async #postToolUse(prepared: HostCall, result: HostResult, summary: string, policy: PolicySnapshot<P>): Promise<void> {
+    const post = this.#opts.adapter.postToolUse;
+    if (!post) return;
+    try {
+      const done = await raceAbort(Promise.resolve(post.call(this.#opts.adapter, prepared, result, this.#opts.ctx, policy, this.#abort.signal)), this.#abort.signal);
+      if (done === ABORTED) this.#warnings.push(`PostToolUse hooks for ${prepared.id} (${summary}) were abandoned when the run stopped.`);
+    } catch (err) {
+      this.#warnings.push(`PostToolUse hooks failed for ${prepared.id} (${summary}): ${errorMessage(err)}`);
+    }
   }
 
   async #pipeline(
@@ -490,7 +596,7 @@ export class Dispatcher<P = unknown> {
     return { prepared };
   }
 
-  #checkStatic(prepared: PreparedCall, policy: PolicySnapshot<P>): Failure | undefined {
+  #checkStatic(prepared: HostCall, policy: PolicySnapshot<P>): Failure | undefined {
     try {
       const parsed = DecisionSchema.safeParse(this.#opts.adapter.checkStatic(prepared, this.#opts.ctx, policy));
       if (!parsed.success) return { kind: 'deny', source: 'rule', reason: 'permission rule check returned an invalid decision' };
@@ -506,7 +612,7 @@ export class Dispatcher<P = unknown> {
     return undefined;
   }
 
-  async #authorize(prepared: PreparedCall, policy: PolicySnapshot<P>): Promise<Decision | typeof ABORTED> {
+  async #authorize(prepared: HostCall, policy: PolicySnapshot<P>): Promise<Decision | typeof ABORTED> {
     const signal = this.#abort.signal;
     let pending: Promise<unknown>;
     try {
@@ -583,15 +689,7 @@ export class Dispatcher<P = unknown> {
       }
     }
 
-    const post = this.#opts.adapter.postToolUse;
-    if (post) {
-      try {
-        const done = await raceAbort(Promise.resolve(post.call(this.#opts.adapter, prepared, result, this.#opts.ctx, policy, this.#abort.signal)), this.#abort.signal);
-        if (done === ABORTED) this.#warnings.push(`PostToolUse hooks for ${prepared.id} (${summary}) were abandoned when the run stopped.`);
-      } catch (err) {
-        this.#warnings.push(`PostToolUse hooks failed for ${prepared.id} (${summary}): ${errorMessage(err)}`);
-      }
-    }
+    await this.#postToolUse(prepared, result, summary, policy);
 
     this.#calls[slot] = { id: prepared.id, tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
     return { ok: true, value: scriptValue(value, [this.#realCwd, path.resolve(this.#opts.ctx.cwd)]) };
@@ -767,6 +865,15 @@ function scriptValue(result: ToolResult, cwds: readonly string[]): ScriptValue {
   if ('files' in result) return { ...result, files: result.files.map(rel) };
   if ('path' in result) return { ...result, path: rel(result.path) };
   return result;
+}
+
+function mcpLabel(call: McpCall): string {
+  return `mcp__${call.args.server}__${call.args.tool}`;
+}
+
+/** The input is redacted as values, before it is serialized: a secret with a quote or a newline is escaped in JSON and no longer matches as text. */
+function summarizeMcp(call: McpCall, secrets: readonly string[]): string {
+  return `mcp ${call.args.server}.${call.args.tool} ${clip(oneLine(JSON.stringify(redactDeep(call.args.input, secrets))), 160)}`;
 }
 
 /** Short description of a call for the call log. */
