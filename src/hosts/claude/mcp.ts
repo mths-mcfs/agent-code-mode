@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { errorMessage } from '../../core/errors.js';
 import type { McpPolicy, McpServerSpec } from '../../core/types.js';
 import { mcpNameProblem, shownName } from '../../mcp/names.js';
-import { configSecrets } from '../../mcp/secrets.js';
+import { configSecrets, type ExpandedValue } from '../../mcp/secrets.js';
 import { startsThisServer } from '../../mcp/self.js';
 import type { ClaudeCliFlags } from './parent-args.js';
 import type { SettingsDoc } from './settings.js';
@@ -79,12 +79,14 @@ async function readJson(file: string): Promise<unknown> {
 }
 
 /** `${VAR}` and `${VAR:-default}`, as Claude Code expands them in `.mcp.json`. */
-export function expandVars(value: string, env: Readonly<Record<string, string | undefined>>): string | { missing: string } {
+export function expandVars(value: string, env: Readonly<Record<string, string | undefined>>, used: ExpandedValue[] = []): string | { missing: string } {
   let missing: string | undefined;
   const out = value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_m, name: string, fallback: string | undefined) => {
-    const v = env[name];
-    if (v !== undefined) return v;
-    if (fallback !== undefined) return fallback;
+    const v = env[name] ?? fallback;
+    if (v !== undefined) {
+      used.push({ name, value: v });
+      return v;
+    }
     missing ??= name;
     return '';
   });
@@ -99,8 +101,10 @@ function toSpec(name: string, c: Candidate, input: ClaudeMcpInput): McpServerSpe
   }
   const parsed = Entry.safeParse(c.raw);
   if (!parsed.success) return `server ${shownName(name)} (${c.origin}): not a stdio entry this server runs exactly (command, args, env)`;
+  // Each value an expansion put in keeps its variable name: one from a credential-like name is a secret at any length.
+  const used: ExpandedValue[] = [];
   const expand = (v: string): string => {
-    const r = expandVars(v, input.env);
+    const r = expandVars(v, input.env, used);
     if (typeof r !== 'string') throw new Error(`\${${r.missing}} is not set`);
     return r;
   };
@@ -123,7 +127,7 @@ function toSpec(name: string, c: Candidate, input: ClaudeMcpInput): McpServerSpe
       ...(Number.isFinite(toolTimeout) && toolTimeout > 0 ? { toolTimeoutMs: toolTimeout } : {}),
       origin: c.origin,
       autostart: input.mayAllow(name),
-      secrets: configSecrets(own, args, args.filter((a, i) => a !== rawArgs[i])),
+      secrets: configSecrets(own, args, [...used, ...args.filter((a, i) => a !== rawArgs[i]).map((value) => ({ name: '', value }))]),
     };
   } catch (err) {
     return `server ${shownName(name)} (${c.origin}): ${errorMessage(err)}`;

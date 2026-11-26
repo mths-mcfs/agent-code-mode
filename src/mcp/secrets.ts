@@ -5,15 +5,22 @@ const SECRET_NAME = /(token|key|secret|passw|auth|credential|bearer|cookie|sessi
 const MIN_PLAIN_SECRET_CHARS = 8;
 export const REDACTED = '<redacted>';
 
+/** A value `${VAR}` expansion put into the config, with the variable it came from. */
+export interface ExpandedValue {
+  readonly name: string;
+  readonly value: string;
+}
+
 /**
- * Values to redact: every value of an env key or flag whose name looks like
- * a credential (`API_TOKEN`, `--api-key x`, `--token=x`), whatever its
- * length; and the other config env values and `${VAR}`-expanded arguments
- * of at least 8 characters.
+ * Values to redact: every value of an env key, flag or expanded variable
+ * whose name looks like a credential (`API_TOKEN`, `--api-key x`,
+ * `${API_TOKEN}`), whatever its length; and the other config env values and
+ * expanded values of at least 8 characters.
  */
-export function configSecrets(env: Readonly<Record<string, string>>, args: readonly string[], expandedArgs: readonly string[] = []): string[] {
+export function configSecrets(env: Readonly<Record<string, string>>, args: readonly string[], expanded: readonly ExpandedValue[] = []): string[] {
   const named: string[] = [];
-  const plain: string[] = [...expandedArgs];
+  const plain: string[] = [];
+  for (const { name, value } of expanded) (SECRET_NAME.test(name) ? named : plain).push(value);
   for (const [key, value] of Object.entries(env)) (SECRET_NAME.test(key) ? named : plain).push(value);
   args.forEach((arg, i) => {
     const eq = arg.indexOf('=');

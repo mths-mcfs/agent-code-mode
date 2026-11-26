@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import type { PolicySnapshot, PreparedMcpCall } from '../../core/types.js';
 import { makeContext } from '../../testing/index.js';
 import { ClaudeHostAdapter, type ClaudePolicy } from './adapter.js';
+import { McpUpstreams } from '../../mcp/upstream.js';
 import { expandVars } from './mcp.js';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'example-hook.mjs');
@@ -183,6 +184,28 @@ describe('Claude MCP servers come from where Claude Code keeps them', () => {
     const entry = { command: 'node', args: ['--token', 'tok-aaaa', '${KEY}', '--name', 'plain'], env: { API: 'api-bbbb' } };
     const { policy } = await load({ env: { PATH: '/usr/bin', KEY: 'key-cccc' }, argv: ['--mcp-config', JSON.stringify({ mcpServers: { a: entry } })] });
     expect([...(policy.mcp?.servers[0]?.secrets ?? [])].sort()).toEqual(['api-bbbb', 'key-cccc', 'tok-aaaa']);
+  });
+
+  it('redacts a short value expanded from a credential-like variable, which the server echoes in a result and an error', async () => {
+    const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'mcp', 'fixtures', 'upstream-server.mjs');
+    const entry = { command: process.execPath, args: [fixture, '--value', '${API_TOKEN}'] };
+    const { policy } = await load({ env: { PATH: process.env['PATH'] ?? '', API_TOKEN: 'ab12' }, argv: ['--mcp-config', JSON.stringify({ mcpServers: { a: entry } })] });
+    const spec = policy.mcp?.servers[0];
+    if (spec === undefined) throw new Error('no server');
+    expect(spec.secrets).toContain('ab12');
+    const pool = new McpUpstreams();
+    pool.start(Promise.resolve([spec]));
+    const effect = (tool: string) => ({ server: 'a', tool, qualifiedName: `mcp__a__${tool}`, input: {}, timeoutMs: 10_000 });
+    try {
+      const r = await pool.call(spec, effect('leak'), new AbortController().signal);
+      expect(JSON.stringify(r)).toContain('--value <redacted>');
+      expect(JSON.stringify(r)).not.toContain('ab12');
+      const err = await pool.call(spec, effect('leakerr'), new AbortController().signal).then(() => '', (e: unknown) => (e instanceof Error ? e.message : String(e)));
+      expect(err).toContain('--value <redacted>');
+      expect(err).not.toContain('ab12');
+    } finally {
+      await pool.close();
+    }
   });
 
   it('expands ${VAR} and ${VAR:-default} like Claude Code', () => {

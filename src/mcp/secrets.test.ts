@@ -6,8 +6,12 @@ describe('configSecrets', () => {
     expect(configSecrets({ API_TOKEN: 'ab', DB_PASSWORD: 'x1', SESSION: 'z' }, ['--api-key', 'k1', '--auth=q'])).toEqual(expect.arrayContaining(['ab', 'x1', 'z', 'k1', 'q']));
   });
 
+  it('takes a value expanded from a credential-like variable at any length', () => {
+    expect(configSecrets({}, [], [{ name: 'API_TOKEN', value: 'ab12' }, { name: 'REGION', value: 'eu' }])).toEqual(['ab12']);
+  });
+
   it('takes other values only from 8 characters, so ordinary output survives', () => {
-    expect(configSecrets({ FORMAT: 'json', PORT: '8080', ENDPOINT_ID: 'abcd-1234-efgh' }, ['--port', '8080'], ['short', 'expanded-value']).sort()).toEqual(['abcd-1234-efgh', 'expanded-value']);
+    expect(configSecrets({ FORMAT: 'json', PORT: '8080', ENDPOINT_ID: 'abcd-1234-efgh' }, ['--port', '8080'], [{ name: 'A', value: 'short' }, { name: 'B', value: 'expanded-value' }]).sort()).toEqual(['abcd-1234-efgh', 'expanded-value']);
   });
 });
 
