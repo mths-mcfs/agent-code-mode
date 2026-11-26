@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makeContext } from '../testing/context.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
@@ -513,5 +516,24 @@ describe('Dispatcher search lowering', () => {
     const { reply, tools } = await run(new RewritingHook(() => ({ command: 'list-files', parse: () => ({ files: [], truncated: false, filtered: 0 }) })));
     expect(reply).toMatchObject({ ok: false, error: { code: 'denied', source: 'hook' } });
     expect(tools.commits).toEqual([]);
+  });
+});
+
+describe('result paths', () => {
+  it('are relative to the cwd whether a path comes back in the cwd as given or through its real path', async () => {
+    const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'acm-link-')));
+    try {
+      mkdirSync(path.join(base, 'real'));
+      symlinkSync(path.join(base, 'real'), path.join(base, 'link'));
+      const cwd = path.join(base, 'link');
+      const ctx = makeContext(cwd);
+      const tools = new MemoryToolRuntime({ root: cwd, files: { 'a.ts': 'x\n' } });
+      const adapter = new StaticHostAdapter();
+      const dispatcher = new Dispatcher({ adapter, tools, ctx, policy: await adapter.loadPolicy(ctx) });
+      expect(await dispatcher.dispatch('glob', { pattern: '*.ts' })).toMatchObject({ ok: true, value: { files: ['a.ts'] } });
+      expect(await dispatcher.dispatch('read', { path: 'a.ts' })).toMatchObject({ ok: true, value: { path: 'a.ts' } });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

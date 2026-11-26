@@ -523,7 +523,7 @@ export class Dispatcher<P = unknown> {
     }
 
     this.#calls[slot] = { id: prepared.id, tool, summary, decision: 'allowed', durationMs: this.#elapsed(started) };
-    return { ok: true, value: scriptValue(value, this.#realCwd) };
+    return { ok: true, value: scriptValue(value, [this.#realCwd, path.resolve(this.#opts.ctx.cwd)]) };
   }
 
   #toolFailure(err: unknown): Failure {
@@ -619,13 +619,23 @@ export function displayPath(absPath: string, cwd: string): string {
   return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : absPath;
 }
 
-function scriptValue(result: ToolResult, cwd: string): ScriptValue {
+/** A path comes back in either form of the cwd: real (the tool runtime) or as given (a search lowered to a command). */
+function relative(p: string, cwds: readonly string[]): string {
+  for (const cwd of cwds) {
+    const shown = displayPath(p, cwd);
+    if (shown !== p) return shown;
+  }
+  return p;
+}
+
+function scriptValue(result: ToolResult, cwds: readonly string[]): ScriptValue {
+  const rel = (p: string): string => relative(p, cwds);
   if ('matches' in result) {
-    const rows = result.matches.map((m) => [displayPath(m.file, cwd), m.line, m.text] as const);
+    const rows = result.matches.map((m) => [rel(m.file), m.line, m.text] as const);
     return { columns: ['file', 'line', 'text'], rows, count: rows.length, truncated: result.truncated, filtered: result.filtered };
   }
-  if ('files' in result) return { ...result, files: result.files.map((f) => displayPath(f, cwd)) };
-  if ('path' in result) return { ...result, path: displayPath(result.path, cwd) };
+  if ('files' in result) return { ...result, files: result.files.map(rel) };
+  if ('path' in result) return { ...result, path: rel(result.path) };
   return result;
 }
 
