@@ -17,6 +17,7 @@ describe('startsThisServer', () => {
     ['/usr/local/bin/agent-code-mode.cmd', []],
     ['node', [entry, 'serve']],
     ['node', ['./cli.js']],
+    ['pnpm', ['dlx', 'agent-code-mode', 'serve']],
   ])('%s %j is this server', (command, args) => {
     expect(startsThisServer(command, args, dir, entry)).toBe(true);
   });
@@ -32,6 +33,8 @@ describe('startsThisServer', () => {
     ['npx', ['-y', '@example/agent-code-mode-tools']],
     ['uvx', ['mcp-server-fetch']],
     ['node', ['server.js', '--root', '/work/agent-code-mode']],
+    ['node', ['server.js', '--name', 'agent-code-mode']],
+    ['npx', ['-y', 'search-server', 'agent-code-mode']],
   ])('%s %j is another server', (command, args) => {
     expect(startsThisServer(command, args, dir, entry)).toBe(false);
   });

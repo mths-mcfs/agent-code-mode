@@ -14,16 +14,23 @@ function real(p: string): string {
   }
 }
 
+/** Subcommands a package runner takes before the package it runs (`pnpm dlx x`, `yarn exec x`). */
+const RUNNER_SUBCOMMANDS = new Set(['dlx', 'exec', 'x']);
+
 /**
- * Whether a server entry would start agent-code-mode itself: its command or
- * an argument is this package (`agent-code-mode`, `npx agent-code-mode@x`)
- * or resolves to this process's entry file. Starting it would recurse.
+ * Whether a server entry would start agent-code-mode itself, judged in
+ * program position only: the command is this package or resolves to this
+ * process's entry file, or the first operand of the command (`npx -y
+ * agent-code-mode`, `node ./dist/cli.js`) is. A later argument that merely
+ * names the package is data. Starting it would recurse; the
+ * `AGENT_CODE_MODE_UPSTREAM` marker stops any nesting this misses.
  */
 export function startsThisServer(command: string, args: readonly string[], cwd: string, selfEntry: string | undefined = process.argv[1]): boolean {
   const self = selfEntry === undefined ? undefined : real(selfEntry);
-  if (PACKAGE.test(path.basename(command).replace(/\.(cmd|exe|ps1)$/i, ''))) return true;
-  return [command, ...args].some((word) => {
-    if (PACKAGE.test(word)) return true;
-    return self !== undefined && (path.isAbsolute(word) || word.includes('/') || word.includes(path.sep)) && real(path.resolve(cwd, word)) === self;
-  });
+  const isSelf = (word: string): boolean =>
+    PACKAGE.test(word) ||
+    PACKAGE.test(path.basename(word).replace(/\.(cmd|exe|ps1)$/i, '')) ||
+    (self !== undefined && (path.isAbsolute(word) || word.includes('/') || word.includes(path.sep)) && real(path.resolve(cwd, word)) === self);
+  const operand = args.find((a, i) => !a.startsWith('-') && !(i === 0 && RUNNER_SUBCOMMANDS.has(a)));
+  return isSelf(command) || (operand !== undefined && isSelf(operand));
 }

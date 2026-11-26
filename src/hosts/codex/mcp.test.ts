@@ -99,8 +99,9 @@ describe('Codex MCP servers', () => {
   });
 
   it('leaves out an entry that would start agent-code-mode itself', () => {
-    const { mcp: policy } = discoverCodexMcp({ mcp_servers: { 'agent-code-mode': { command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'codex'] }, ok: { command: 'node' } } }, cwd, env, 'config.toml');
-    expect(policy.servers.map((s) => s.name)).toEqual(['ok']);
+    const servers = { 'agent-code-mode': { command: 'npx', args: ['-y', 'agent-code-mode', 'serve', '--host', 'codex'] }, ok: { command: 'node' }, search: { command: 'node', args: ['search.js', '--index', 'agent-code-mode'] } };
+    const { mcp: policy } = discoverCodexMcp({ mcp_servers: servers }, cwd, env, 'config.toml');
+    expect(policy.servers.map((s) => s.name)).toEqual(['ok', 'search']);
   });
 
   it('takes the secrets of the env the server gets: an explicit env value wins over env_vars', () => {
