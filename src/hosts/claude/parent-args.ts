@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { systemPowerShell } from '../../core/windows-powershell.js';
 
 /**
  * Best-effort read of the Claude Code process that started this server, to
@@ -146,31 +147,18 @@ const WINDOWS_PROCESS_SCRIPT =
   "Select-Object ProcessId,ParentProcessId,CommandLine,@{n='Created';e={$_.CreationDate.ToFileTimeUtc()}} | ConvertTo-Json -Compress";
 
 /**
- * How the process table is read: the system Windows PowerShell by absolute path, run in System32, with the
- * environment minus every PowerShell variable (`PS*`, `__PS*`: module paths and analysis cache, execution
- * policy) and the module path pinned to the system modules, so no workspace file, module or policy variable
- * steers it. The script calls cmdlets only, so PATH chooses nothing. No `-ExecutionPolicy` flag: an inline
- * `-Command` and signed system modules are not subject to it.
+ * How the process table is read: the system Windows PowerShell (`systemPowerShell`). The script calls
+ * cmdlets only, so PATH chooses nothing. No `-ExecutionPolicy` flag: an inline `-Command` and signed system
+ * modules are not subject to it.
  */
 export function windowsPowerShellInvocation(env: Readonly<Record<string, string | undefined>>): { file: string; args: string[]; cwd: string; env: Record<string, string> } {
-  const lookup = (name: string): string | undefined => {
-    const key = Object.keys(env).find((k) => k.toLowerCase() === name.toLowerCase());
-    return key === undefined ? undefined : env[key];
-  };
-  const systemRoot = lookup('SystemRoot');
-  if (systemRoot === undefined || !/^[A-Za-z]:\\/.test(systemRoot)) throw new Error('SystemRoot is missing or not an absolute path, so the Windows process table cannot be read');
-  const system32 = path.win32.join(systemRoot, 'System32');
-  const home = path.win32.join(system32, 'WindowsPowerShell', 'v1.0');
-  return {
-    file: path.win32.join(home, 'powershell.exe'),
-    args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_SCRIPT],
-    cwd: system32,
-    env: {
-      ...Object.fromEntries(Object.entries(env).flatMap(([name, value]) => (value === undefined || /^(__)?PS/i.test(name) || name.toLowerCase() === 'systemroot' ? [] : [[name, value]]))),
-      SystemRoot: systemRoot,
-      PSModulePath: path.win32.join(home, 'Modules'),
-    },
-  };
+  let run: ReturnType<typeof systemPowerShell>;
+  try {
+    run = systemPowerShell(env);
+  } catch (err) {
+    throw new Error(`${err instanceof Error ? err.message : String(err)}, so the Windows process table cannot be read`);
+  }
+  return { ...run, args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_SCRIPT] };
 }
 
 /**

@@ -1,59 +1,32 @@
 import { ToolError, errorMessage } from '../core/errors.js';
 import type { BashContainment } from '../core/types.js';
-import { bootstrapEnv, spawnAndWait } from './bash.js';
+import { SANDBOX_NEEDS_SENTINEL, bootstrapEnv, spawnAndWait } from './bash.js';
 
 /**
  * OS containment for `bash` through `@anthropic-ai/sandbox-runtime`
  * (bubblewrap on Linux, Seatbelt on macOS). The library keeps one global
- * configuration and one network proxy per process, so this module owns it:
- * it is initialized once, lazily, with no network allowed, and each command
- * passes its own filesystem rules.
+ * configuration and one network proxy per process, so this module owns it
+ * and serializes sandboxed commands in this process.
  *
  * Network: the library routes all traffic through its proxy and refuses an
- * allow-everything domain list, so "network on" is implemented with the
- * library's ask callback, which allows a host only while a network-enabled
- * command holds the sandbox. Sandboxed commands are therefore serialized in
- * this process, so a network-off command never runs while the gate is open.
- * On Linux the command has no network namespace of its own either way: with
- * network on, only clients that honor the proxy variables the library sets
- * (curl, git, npm, ...) reach the network; raw sockets never do.
+ * allow-everything domain list, so "network on" is the library's ask
+ * callback answering yes for every host. On Linux the command runs in its
+ * own network namespace (`--unshare-net`) either way, and reaches the proxy
+ * only through the library's Unix-socket bridge: with network on, only
+ * clients that honor the proxy variables the library sets (curl, git, npm,
+ * ...) reach the network; raw sockets never do.
  */
 
 type SandboxModule = typeof import('@anthropic-ai/sandbox-runtime');
 type Manager = SandboxModule['SandboxManager'];
 
-let loading: Promise<Manager> | undefined;
-let networkOpen = false;
 let tail: Promise<unknown> = Promise.resolve();
 let probed = false;
-/** Sandboxed commands queued or running. */
-let pending = 0;
-let idleTimer: NodeJS.Timeout | undefined;
-
-/**
- * How long the sandbox stays up after the last command. The library's
- * network bridge processes keep the event loop alive, so an idle sandbox is
- * reset; the timer is unref'd, so it never keeps a process alive by itself.
- */
-const IDLE_RESET_MS = 1000;
 
 function serialized<T>(run: () => Promise<T>): Promise<T> {
   const next = tail.then(run, run);
   tail = next.catch(() => undefined);
   return next;
-}
-
-function resetWhenIdle(): void {
-  idleTimer = setTimeout(() => {
-    idleTimer = undefined;
-    void serialized(async () => {
-      if (pending > 0 || loading === undefined) return;
-      const m = await loading.catch(() => undefined);
-      loading = undefined;
-      await m?.reset().catch(() => undefined);
-    });
-  }, IDLE_RESET_MS);
-  idleTimer.unref();
 }
 
 /** Why containment is unavailable on this machine, or null when it is available. */
@@ -93,9 +66,9 @@ const PROBE_TIMEOUT_MS = 15_000;
  */
 async function probe(m: Manager, shell: string, signal: AbortSignal): Promise<void> {
   try {
-    const wrapped = await m.wrapWithSandboxArgv('true', shell, { filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } });
+    const wrapped = asShellScript(await m.wrapWithSandboxArgv('true', shell, { filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } }));
     const env = bootstrapEnv({ ...process.env, ...wrapped.env });
-    const r = await spawnAndWait(wrapped.argv, env, process.cwd(), PROBE_TIMEOUT_MS, signal, 4096);
+    const r = await spawnAndWait(wrapped.shell, wrapped.script, env, process.cwd(), PROBE_TIMEOUT_MS, signal, 4096, { sentinel: SANDBOX_NEEDS_SENTINEL });
     if (r.exitCode === 0) return;
     const how = r.timedOut ? `no exit within ${PROBE_TIMEOUT_MS} ms` : `exit ${r.exitCode ?? r.signal}`;
     const first = r.stderr.trim().split('\n')[0] ?? '';
@@ -109,27 +82,20 @@ async function probe(m: Manager, shell: string, signal: AbortSignal): Promise<vo
   }
 }
 
-async function manager(): Promise<Manager> {
-  loading ??= (async () => {
-    const m = await loadManager();
-    await m.initialize(
-      { network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
-      async () => networkOpen,
-    );
-    return m;
-  })();
-  try {
-    return await loading;
-  } catch (err) {
-    loading = undefined;
-    throw err;
-  }
+/** A command wrapped for the sandbox: `<shell> -c <script>` with `env`. */
+export interface WrappedCommand {
+  readonly shell: string;
+  readonly script: string;
+  readonly env: NodeJS.ProcessEnv;
 }
 
-/** A command wrapped for the sandbox. */
-export interface WrappedCommand {
-  readonly argv: readonly string[];
-  readonly env: NodeJS.ProcessEnv;
+/** The library wraps a command as `[shell, '-c', script]` on Linux and macOS. */
+function asShellScript(raw: { argv: readonly string[]; env: NodeJS.ProcessEnv }): WrappedCommand {
+  const [shell, flag, script, ...extra] = raw.argv;
+  if (shell === undefined || flag !== '-c' || script === undefined || extra.length > 0) {
+    throw new Error(`unexpected sandbox command line shape: ${raw.argv.length} arguments`);
+  }
+  return { shell, script, env: raw.env };
 }
 
 /**
@@ -146,55 +112,53 @@ export function withSandbox<T>(
   signal: AbortSignal,
   fn: (wrapped: WrappedCommand) => Promise<T>,
 ): Promise<T> {
-  const run = async (): Promise<T> => {
+  return serialized(async () => {
     const reason = await containmentUnavailableReason();
     if (reason !== null) throw new ToolError('containment-unavailable', reason);
     if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-    let m: Manager;
+    const m = await loadManager();
     try {
-      m = await manager();
-      if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
-      if (!probed) {
-        await probe(m, shell, signal);
-        probed = true;
+      try {
+        await m.initialize(
+          { network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
+          async () => containment.network,
+        );
+        if (signal.aborted) throw new ToolError('cancelled', 'the run was stopped before bash started');
+        if (!probed) {
+          await probe(m, shell, signal);
+          probed = true;
+        }
+      } catch (err) {
+        if (err instanceof ToolError && err.code === 'cancelled') throw err;
+        throw new ToolError('containment-unavailable', `sandbox runtime failed to start: ${errorMessage(err)}`);
       }
-    } catch (err) {
-      if (err instanceof ToolError && err.code === 'cancelled') throw err;
-      throw new ToolError('containment-unavailable', `sandbox runtime failed to start: ${errorMessage(err)}`);
-    }
-    let wrapped: WrappedCommand;
-    try {
-      wrapped = await m.wrapWithSandboxArgv(
-        command,
-        shell,
-        {
-          filesystem: {
-            denyRead: [],
-            allowWrite: containment.readOnly ? [] : [...containment.writableRoots],
-            denyWrite: [...denyWrite],
+      let wrapped: WrappedCommand;
+      try {
+        wrapped = asShellScript(await m.wrapWithSandboxArgv(
+          command,
+          shell,
+          {
+            filesystem: {
+              denyRead: [],
+              allowWrite: containment.readOnly ? [] : [...containment.writableRoots],
+              denyWrite: [...denyWrite],
+            },
           },
-        },
-        undefined,
-        cwd,
-      );
-    } catch (err) {
-      throw new ToolError('containment-unavailable', `sandbox runtime could not wrap the command: ${errorMessage(err)}`);
-    }
-    networkOpen = containment.network;
-    try {
+          undefined,
+          cwd,
+        ));
+      } catch (err) {
+        throw new ToolError('containment-unavailable', `sandbox runtime could not wrap the command: ${errorMessage(err)}`);
+      }
       return await fn(wrapped);
     } finally {
-      networkOpen = false;
       try {
         m.cleanupAfterCommand();
       } catch {
         // Cleanup is best effort.
       }
+      // Closes this command's proxy and stops its network bridges.
+      await m.reset().catch(() => undefined);
     }
-  };
-  pending++;
-  clearTimeout(idleTimer);
-  return serialized(run).finally(() => {
-    if (--pending === 0) resetWhenIdle();
   });
 }
