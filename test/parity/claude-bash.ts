@@ -191,7 +191,6 @@ export async function adapterVerdicts(setup: Setup): Promise<Verdict[]> {
   }
 }
 
-// ---- The host: the installed Claude Code, run headless ----
 
 export const HOST_MODEL = 'claude-haiku-5-5';
 
@@ -352,7 +351,6 @@ export function scrub(text: string, world: World | undefined): string {
   return sanitize(unfilled, defaultSanitizeContext([]));
 }
 
-// ---- The matrix ----
 
 export interface Row {
   readonly setup: string;
