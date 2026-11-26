@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { defaultSanitizeContext, sanitize, type SanitizeContext } from '../lib/sanitize.ts';
@@ -69,6 +69,21 @@ describe('sanitizer', () => {
     expect(sanitize(sanitize(transcript, run), { ...ctx, ids: new Map() })).toBe(sanitize(transcript, run));
   });
 
+  it('maps a Code Mode repl_ id, which wraps a UUID, as one id', () => {
+    const run = { ...ctx, ids: new Map<string, string>() };
+    const line = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'repl_12345678-1234-4123-8123-123456789abc' }] } });
+    const out = sanitize(`${line}\n${line.replace('tool_use', 'tool_result')}`, run);
+    expect(out).not.toMatch(/1234-4123|123456789abc/);
+    expect(out.match(/repl_000000000000000000000001(?=")/g)).toHaveLength(2);
+  });
+
+  it('redacts thinking signatures and labels a path the way a terminal shows it under ~', () => {
+    const text = sanitize([JSON.stringify({ type: 'thinking', thinking: '', signature: 'CAQSkQUKEAgUGAI4AUIIdGhpbmtpbmcS' }), '  ~/work/bench/.work/runs/x/ws'].join('\n'), ctx);
+    expect(text).not.toContain('CAQSkQUK');
+    expect(text).toContain('"signature":"<redacted>"');
+    expect(text.split('\n')[1]).toBe('  <workspace>');
+  });
+
   it('redacts assignments and header lines of every name ending in TOKEN or KEY', () => {
     const text = sanitize(['token=tk-1', 'NPM_TOKEN=npm_FAKE0001', 'export HF_TOKEN="hf_FAKE0002"', 'GH_TOKEN: ghx-3', '> x-api-key: sk-FAKE-0004', 'api-key: k5', 'PRIVATE_KEY=pk6', 'OPENAI_API_KEY=abc7'].join('\n'), ctx);
     for (const leak of ['tk-1', 'npm_FAKE0001', 'hf_FAKE0002', 'ghx-3', 'sk-FAKE-0004', 'k5', 'pk6', 'abc7']) expect(text).not.toContain(leak);
@@ -104,8 +119,12 @@ describe('environment os label', () => {
   });
 });
 
-describe('committed parser fixtures', () => {
-  const dir = path.join(import.meta.dirname, '..', 'parser-fixtures');
+describe('committed bench files', () => {
+  const bench = path.join(import.meta.dirname, '..');
+  const files = ['parser-fixtures', 'results'].flatMap((dir) => {
+    const root = path.join(bench, dir);
+    return existsSync(root) ? readdirSync(root, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => path.relative(bench, path.join(e.parentPath, e.name))) : [];
+  });
   const value = (line: string): unknown => {
     try {
       return JSON.parse(line);
@@ -113,8 +132,10 @@ describe('committed parser fixtures', () => {
       return line;
     }
   };
-  it.each(readdirSync(dir))('%s is already sanitized: no real id, path, user or secret', (name) => {
-    const text = readFileSync(path.join(dir, name), 'utf8');
+  it.each(files)('%s is already sanitized: no real id, path, user or secret', (name) => {
+    const text = readFileSync(path.join(bench, name), 'utf8');
     expect(sanitize(text, defaultSanitizeContext([])).split('\n').map(value)).toEqual(text.split('\n').map(value));
+    // A fixed point can still hold part of a real UUID, as a repl_ id cut after its first group once did.
+    expect([...text.matchAll(/[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi)].map((m) => m[0]).filter((m) => !/^0000-4000-8000-\d{12}$/.test(m))).toEqual([]);
   });
 });

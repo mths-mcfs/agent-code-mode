@@ -137,12 +137,13 @@ describe('interactive Claude transcript parser', () => {
     const raw = `${lines(
       { type: 'api-request-blob', hash: 'x', message: { content: [{ type: 'text', text: 'system prompt' }] } },
       { type: 'session-owner', accountUuid: 'acc' },
+      { type: 'api-request', params: {}, shapeHash: 'f00dfeed'.repeat(8), tail: ['beefcafe'.repeat(8)] },
       { type: 'attachment', attachment: { type: 'session_context', context: { userEmail: 'someone@example.com' } } },
       { type: 'attachment', attachment: { type: 'environment', snapshot: { osVersion: 'Linux 1.2.3-distro' } } },
       { type: 'api-request-shape', shape: { system: [{ type: 'text', text: 'long system prompt' }], tools: [{ name: 'Poll', description: 'p' }] } },
     )}${text}`;
     const trimmed = trimInteractiveTranscript(raw);
-    expect(trimmed).not.toMatch(/system prompt|someone@example.com|acc"|distro/);
+    expect(trimmed).not.toMatch(/system prompt|someone@example.com|acc"|distro|f00dfeed|beefcafe/);
     expect(trimmed).toContain('{"type":"api-request-shape","shape":{"tools":[{"name":"Poll"}]}}');
     const a = parseClaudeInteractiveTranscript(text).parsed;
     const b = parseClaudeInteractiveTranscript(trimmed).parsed;
