@@ -228,7 +228,6 @@ export function createMcpServer(opts: McpServerOptions): Server {
     instructions: SERVER_INSTRUCTIONS,
   });
   const upstreams = opts.upstreams ?? new McpUpstreams({ overflow, clientVersion: opts.version });
-  // The host starts its MCP servers when the session starts, and so does this server, with the policy it has then.
   const sessionHost = detectHost({ flag: opts.host, env, meta: undefined });
   if (sessionHost !== 'generic') {
     upstreams.start(

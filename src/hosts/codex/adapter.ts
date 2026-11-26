@@ -45,7 +45,6 @@ export interface CodexPolicy {
   readonly permissionMode: string;
   readonly codexHome: string;
   readonly notes: readonly string[];
-  /** How Codex gates each configured MCP server's tools. */
   readonly mcpRules: Readonly<Record<string, CodexMcpRules>>;
 }
 
@@ -291,7 +290,6 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
     }
   }
 
-  /** PreToolUse hooks whose matcher names `mcp__<server>__<tool>`; a rewrite of an MCP call's input is refused. */
   async #authorizeMcp(prepared: PreparedMcpCall, ctx: SessionContext, p: CodexPolicy, signal: AbortSignal): Promise<Decision> {
     const names = [prepared.effect.qualifiedName];
     if (!p.hooks.some((h) => matcherMatches(h.matcher, names))) return { kind: 'allow' };

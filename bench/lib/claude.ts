@@ -44,17 +44,12 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   return args;
 }
 
-/** A task's MCP server as a stdio command. */
 export interface StdioServer {
   readonly name: string;
   readonly command: string;
   readonly args: readonly string[];
 }
 
-/**
- * A task's MCP server goes into every arm, next to agent-code-mode where the arm has it: agent-code-mode reads
- * the same `--mcp-config` from its parent's argv, so `mcpCall` reaches the server without a serve flag.
- */
 export function claudeMcpConfig(arm: ArmId, serverEntry: string, task?: StdioServer): unknown {
   const servers: Record<string, unknown> = task === undefined ? {} : { [task.name]: { type: 'stdio', command: task.command, args: [...task.args] } };
   if (arm === 'A' || arm === 'D') return { mcpServers: servers };
@@ -246,7 +241,6 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     denials,
     hostError: r.is_error ? `${r.subtype}` : null,
     evidence,
-    // Set by the runner, which knows the task's MCP server.
     mcpCalls: null,
   };
 }

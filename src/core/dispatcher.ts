@@ -409,7 +409,6 @@ export class Dispatcher<P = unknown> {
     if (isPolicyError(policy)) {
       return Promise.resolve(this.#fail(slot, id, label, summary, started, { kind: 'deny', source: 'unsupported-config', reason: `host configuration could not be loaded: ${policy.error}` }));
     }
-    // An upstream call is an external effect, like bash: queued with the mutations, in call order.
     const queued = this.#mutationTail.then(() => this.#mcpPipeline(slot, call, label, summary, policy, started));
     this.#mutationTail = queued.catch(() => undefined);
     return queued;
@@ -452,7 +451,6 @@ export class Dispatcher<P = unknown> {
     const mcp = this.#opts.mcp;
     if (mcp === undefined) return this.#fail(slot, prepared.id, label, summary, started, { kind: 'error', error: new ToolError('tool-error', 'mcpCall: this server has no upstream MCP runtime') });
     const signal = this.#abort.signal;
-    // An upstream server can change files too: its calls get the same watch window as bash.
     await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'during' });
     let result: McpResult;
     try {
@@ -862,7 +860,6 @@ function scriptValue(result: ToolResult, cwds: readonly string[]): ScriptValue {
   return result;
 }
 
-/** The call-log tool name of an `mcpCall`: the host's name of the tool. */
 function mcpLabel(call: McpCall): string {
   return `mcp__${call.args.server}__${call.args.tool}`;
 }

@@ -78,7 +78,6 @@ export async function createWorkspace(dir: string, task: TaskDef, host: HostId, 
   await writeTree(dir, initial);
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['add', '-A']);
-  // No seed in the message: from inside the workspace it would say which data T16's generator makes.
   git(dir, ['commit', '-q', '--no-verify', '-m', `fixture for ${task.id}`]);
   return { dir, initial, fixture, baseCommit: git(dir, ['rev-parse', 'HEAD']).trim() };
 }

@@ -128,7 +128,6 @@ export interface ArmCheck {
   readonly reasons: readonly string[];
 }
 
-/** Calls to the tools of `taskServer` (a task's MCP server) are checked by `checkMcpCalls`, not here. */
 export function checkArm(host: 'claude' | 'codex', arm: ArmId, observed: ToolCalls, taskServer?: string): ArmCheck {
   const reasons: string[] = [];
   const taskCalls = taskServer === undefined ? 0 : mcpCallCounts({ toolCalls: observed, innerCalls: null }, taskServer).direct;
@@ -170,18 +169,11 @@ export function taskToolName(name: string, server: string): string | null {
   return m !== null && m[1]?.replace(/-/g, '_') === server.replace(/-/g, '_') ? (m[2] ?? null) : null;
 }
 
-/** Calls to a task's MCP tools: made directly by the model, and made from inside scripts. */
 export function mcpCallCounts(parsed: Pick<ParsedRun, 'toolCalls' | 'innerCalls'>, server: string): { direct: number; script: number } {
   const sum = (counts: Readonly<Record<string, number>>): number => Object.entries(counts).reduce((n, [tool, k]) => n + (taskToolName(tool, server) === null ? 0 : k), 0);
   return { direct: sum(parsed.toolCalls.byName), script: parsed.innerCalls === null ? 0 : sum(parsed.innerCalls.byTool) };
 }
 
-/**
- * Whether an arm reached a task's MCP server the way its label says. Native arms call it directly; arms whose
- * tools are scripts (agent-code-mode `run`, Claude Code Mode, Codex code mode) call it from scripts, and a
- * direct call there is a fallback (the host lists the tools in every arm: hiding them would mean a deny rule,
- * which by parity also applies inside `run`). The hybrid arm may do either.
- */
 export function checkMcpCalls(host: 'claude' | 'codex', arm: ArmId, counts: { direct: number; script: number }): ArmCheck {
   if (isHybridArm(host, arm)) return { fallback: false, reasons: counts.direct + counts.script === 0 ? ['hybrid arm made no MCP call, direct or from a script'] : [] };
   if (arm === 'A') {
@@ -214,7 +206,6 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return x.length === y.length && x.every((v, i) => v === y[i]);
 }
 
-/** `task`: a task's MCP server whose tools the arm must also list (Codex: directly or nested in `exec`). */
 export function checkSurface(host: 'claude' | 'codex', arm: ArmId, all: readonly string[], task?: { readonly server: string; readonly tools: readonly string[] }): string[] {
   const reasons: string[] = [];
   const isTask = (t: string): boolean => task !== undefined && taskToolName(t, task.server) !== null;

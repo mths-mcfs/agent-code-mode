@@ -6,20 +6,12 @@ import { formatIssues } from '../core/schemas.js';
 import type { McpEffect, McpResult, McpRuntime, McpServerSpec } from '../core/types.js';
 import { shownName } from './names.js';
 
-/**
- * The upstream MCP server processes of one `serve` process, started with the
- * session with exactly the command, arguments, environment and directory the
- * host config gives. The server's stderr is discarded and its environment
- * never appears in a message: both can hold credentials.
- */
-
 /** Largest result (characters of its JSON) handed back whole, as for bash output. */
 export const MCP_RESULT_MAX_CHARS = 1024 * 1024;
 const LIST_PAGES = 20;
 const MAX_LISTED_TOOLS = 2_000;
 const MAX_SERVERS = 32;
 
-/** Where a cut result is kept for `readOverflow`. */
 export interface OverflowSink {
   put(text: string): string | undefined;
 }
@@ -41,7 +33,6 @@ const ListPage = z.looseObject({ tools: z.array(z.looseObject({ name: z.string()
 const RawResult = z.unknown();
 const McpErrorLike = z.looseObject({ code: z.number() });
 
-/** Who a spec runs as: two specs with these equal share one process. */
 function specKey(spec: McpServerSpec): string {
   return JSON.stringify([spec.name, spec.command, spec.args, Object.entries(spec.env).sort(([a], [b]) => (a < b ? -1 : 1)), spec.cwd]);
 }
@@ -57,9 +48,7 @@ function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<
 export class McpUpstreams implements McpRuntime {
   readonly #opts: McpUpstreamsOptions;
   readonly #connections = new Map<string, Promise<Connection>>();
-  /** Every server process spawned and not yet closed, connected or still starting. */
   readonly #processes = new Set<StdioClientTransport>();
-  /** Settles once `start` has spawned the session's servers. */
   #started: Promise<void> = Promise.resolve();
   #closed = false;
 
@@ -132,7 +121,6 @@ export class McpUpstreams implements McpRuntime {
       try {
         process.kill(pid, 'SIGKILL');
       } catch {
-        // Already gone.
       }
     }
   }
@@ -170,7 +158,6 @@ export class McpUpstreams implements McpRuntime {
   }
 }
 
-/** `pending`, or a cancel error once `signal` aborts; the work itself goes on. */
 function untilAborted<T>(pending: Promise<T>, signal: AbortSignal, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(new ToolError('cancelled', message));

@@ -85,7 +85,6 @@ describe('T16 orders server', () => {
     const pages = [...(sizes['list_customers'] ?? []), ...(sizes['list_orders'] ?? [])];
     expect(Math.max(...pages)).toBeLessThanOrEqual(20_000);
     expect((sizes['list_customers'] ?? []).every((b) => b >= 5_000)).toBe(true);
-    // The last page of a customer may hold a single order.
     expect((sizes['list_orders'] ?? []).filter((b) => b >= 5_000).length).toBeGreaterThan(pages.length / 3);
   }, 60_000);
 

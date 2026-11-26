@@ -5,7 +5,6 @@ import type { StdioServer } from './claude.ts';
 import { taskToolName } from './record.ts';
 import type { HostId } from './workspace.ts';
 
-/** A task's MCP server as a stdio command (this Node and the server file), or undefined for tasks without one. */
 export function taskServer(task: Pick<TaskDef, 'mcpServer'>, facts: FixtureFacts, nodePath: string = process.execPath): StdioServer | undefined {
   const m = task.mcpServer;
   return m === undefined ? undefined : { name: m.name, command: nodePath, args: [m.entry, ...m.args(facts)] };
@@ -14,7 +13,6 @@ export function taskServer(task: Pick<TaskDef, 'mcpServer'>, facts: FixtureFacts
 /** Helpers a Claude Code Mode script uses to find deferred tools: on an MCP task they lead to its tools. */
 export const REPL_DISCOVERY_TOOLS = ['searchTools', 'describeTool'];
 
-/** Whether a REPL script may call `tool` on a task beyond the arm A tools: the task's MCP tools and the discovery helpers. */
 export function taskScriptTool(task: Pick<TaskDef, 'mcpServer'>, tool: string): boolean {
   const m = task.mcpServer;
   return m !== undefined && (REPL_DISCOVERY_TOOLS.includes(tool) || taskToolName(tool, m.name) !== null);
@@ -32,7 +30,6 @@ function jsonLines(text: string): unknown[] {
     try {
       out.push(JSON.parse(line));
     } catch {
-      // Not a JSON line (a truncated last line): no tool call in it.
     }
   }
   return out;
@@ -66,7 +63,6 @@ export function toolInputsText(host: HostId, stdout: string, requests: string | 
   return out.join('\n');
 }
 
-/** The off-limits markers of a task's MCP server that a run's tool call inputs contain. */
 export function offLimitsHits(task: Pick<TaskDef, 'mcpServer'>, inputs: string): string[] {
   return (task.mcpServer?.offLimits ?? []).filter((m) => inputs.includes(m));
 }

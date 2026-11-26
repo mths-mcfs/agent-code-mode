@@ -3,14 +3,8 @@ import type { VerifyContext, VerifyResult } from '../types.ts';
 import { dollars, t16Data, topRefunded } from './data.ts';
 
 const CUSTOMER_ID = /C-\d{4}/g;
-/** A total as the prompt asks for it: dollars, positive, exactly two decimals (thousands separators allowed). */
 const TOTAL = /^(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}$/;
 
-/**
- * `(customer id, cents)` pairs of an `ANSWER:` line, in order: `C-0343 1673.00, C-0103 $876.90, ...`. Each id
- * takes the text up to the next id; its total is the first number there, and `cents` is null unless that
- * number has the exact form (a sign, a third decimal or a missing one make it null).
- */
 export function answerPairs(line: string): { customerId: string; cents: number | null }[] {
   const ids = [...line.matchAll(CUSTOMER_ID)];
   return ids.map((m, i) => {

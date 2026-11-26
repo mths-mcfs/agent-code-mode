@@ -245,8 +245,6 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
     verify: verifyT15,
     solution: solveT15,
   },
-  // The data lives only in the memory of the `orders` MCP server, behind paginated tools with large answers:
-  // the answer takes about 30 calls and a join of what they return.
   T16: {
     id: 'T16',
     title: 'top refunds of a quarter across ~30 paginated MCP calls',
@@ -265,10 +263,8 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
       args: (facts) => ['--seed', String(facts.seed)],
       tools: ['list_customers', 'list_orders', 'get_order'],
       offLimits: [
-        // The bench's files in the run directory, one level above the workspace.
         'mcp-config.json', 'claude-settings.json', 'codex-home', 'config.toml',
         'server.ts', 'data.ts', 't16Data', 'topRefunded', 'refundedInQuarter', 'generateFixture',
-        // The process table: the server's command line names its file and seed.
         '/proc/', 'pgrep', 'ps aux', 'ps -e', 'ps ax', 'ps -o', 'ps -p',
       ],
     },

@@ -1,6 +1,3 @@
-// A stdio MCP server for tests. Appends one JSON line per event to $FIXTURE_LOG (start, each tools/call).
-// Tools: echo, hang (never answers), big (FIXTURE_BIG characters of text), crash (exits), bad (an invalid result),
-// env (whether FIXTURE_SECRET is set). With FIXTURE_NO_INIT it never answers initialize.
 import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
@@ -26,7 +23,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (name === 'crash') process.exit(3);
       if (name === 'bad') return reply({ content: 'not a list' });
       if (name === 'env') return reply({ content: [{ type: 'text', text: process.env.FIXTURE_SECRET ? 'set' : 'unset' }] });
-      return undefined; // hang
+      return undefined;
     }
     default:
       return send({ id: msg.id, error: { code: -32601, message: 'method not found' } });

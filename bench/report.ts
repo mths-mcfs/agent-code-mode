@@ -31,7 +31,6 @@ export interface GroupSummary {
   readonly cacheReadTokens: Spread | null;
   readonly costUsd: Spread | null;
   readonly wallMs: Spread | null;
-  /** Calls to the task's MCP tools made as tool calls and from inside scripts (null without an MCP server). */
   readonly mcpDirect: Spread | null;
   readonly mcpScript: Spread | null;
   readonly runIds: readonly string[];

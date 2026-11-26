@@ -22,7 +22,6 @@ interface Options {
   readonly local?: Record<string, unknown>;
   readonly user?: Record<string, unknown>;
   readonly mcpJson?: Record<string, unknown>;
-  /** Extra keys of this project's entry in .claude.json. */
   readonly projectEntry?: Record<string, unknown>;
   readonly userServers?: Record<string, unknown>;
   readonly trusted?: boolean;

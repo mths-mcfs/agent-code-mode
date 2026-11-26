@@ -448,7 +448,6 @@ function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-/** The `task` option of `codexConfigToml`: a task's MCP server with every tool approved. */
 function codexTask(task: TaskDef, facts: FixtureFacts, nodePath: string): { task?: { server: StdioServer; tools: readonly string[] } } {
   const server = taskServer(task, facts, nodePath);
   return server === undefined || task.mcpServer === undefined ? {} : { task: { server, tools: task.mcpServer.tools } };
@@ -773,7 +772,6 @@ async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promi
   if (parsed !== null) {
     if (parsed.hostError !== null) invalidReasons.push(`host error: ${parsed.hostError}`);
     if (!ctx.opts.dryRun && parsed.model !== null && parsed.model !== model) invalidReasons.push(`model mismatch: ran ${parsed.model}, expected ${model}`);
-    // A dry run's canned transcripts come from a task without an MCP server: the task's tools are checked on real runs.
     // Arm D defers MCP tools behind a placeholder, so they may be missing from its surface.
     const surfaceTask = mcpServer === undefined || ctx.opts.dryRun ? undefined : { server: mcpServer.name, tools: codeMode ? [] : mcpServer.tools };
     if (parsed.availableTools !== null) invalidReasons.push(...checkSurface(p.host, surfaceArm(p.arm), parsed.availableTools, surfaceTask));

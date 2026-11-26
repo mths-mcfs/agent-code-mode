@@ -37,7 +37,6 @@ export interface StaticHostAdapterOptions {
   readonly policyError?: string;
   readonly bashContainment?: BashContainment;
   readonly protectedPaths?: readonly string[];
-  /** The upstream MCP servers the policy names. */
   readonly mcp?: McpPolicy;
 }
 

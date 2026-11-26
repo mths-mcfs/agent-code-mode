@@ -712,7 +712,6 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       ]),
     ];
 
-    // Without the Claude process its --mcp-config and --strict-mcp-config are unknown: no server is reachable.
     const mcp: McpPolicy =
       parent === undefined
         ? { servers: [], notes: ['the Claude Code process could not be read, so its MCP servers are unknown'] }
@@ -917,7 +916,6 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       const condition = hook.handler.if;
       if (condition === undefined) return true;
       const rule = parseRule(condition, 'allow', 'project', { cwd: policy.cwd, sourceDir: policy.projectRoot, home: policy.home });
-      // A condition that cannot be read, or never matches by itself, runs the hook.
       if (!rule || rule.matcher.type === 'never') return true;
       return governsMcp(rule, server, qualifiedName);
     });
@@ -962,7 +960,6 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       case 'allow': {
         const reason = combined.reason === undefined ? {} : { reason: combined.reason };
         if (combined.updatedInput === undefined) return { kind: 'allow', ...reason };
-        // Same server and tool, new input: the dispatcher parses and checks it again.
         const timeout = prepared.args.timeoutMs === undefined ? {} : { options: { timeoutMs: prepared.args.timeoutMs } };
         return { kind: 'allow', updatedArgs: { server: prepared.effect.server, tool: prepared.effect.tool, args: combined.updatedInput, ...timeout }, ...reason };
       }

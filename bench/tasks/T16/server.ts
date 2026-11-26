@@ -4,13 +4,6 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { z } from 'zod';
 import { CUSTOMER_PAGE_SIZE, ORDER_PAGE_SIZE, t16Data, type Order } from './data.ts';
 
-/**
- * The `orders` MCP server of T16 (stdio): `node server.ts --seed <fixture seed>`. Its data is generated
- * in memory from the seed (data.ts) and exists nowhere else, so the only way to the answer is through
- * these tools. Every answer is JSON text (pretty-printed, as many APIs return it); list results are
- * paginated, and refunds appear only in `get_order`.
- */
-
 const SeedArgs = z.tuple([z.literal('--seed'), z.string().regex(/^\d+$/)]);
 const parsedArgs = SeedArgs.safeParse(process.argv.slice(2));
 if (!parsedArgs.success) {
@@ -47,7 +40,6 @@ const TOOLS = [
   },
 ] as const;
 
-/** An order as `list_orders` shows it: no refunds, no payments, no refund events. */
 function listView(o: Order): Record<string, unknown> {
   const { refunds: _refunds, payments: _payments, events, ...rest } = o;
   return { ...rest, events: events.filter((e) => !e.type.startsWith('refund')) };

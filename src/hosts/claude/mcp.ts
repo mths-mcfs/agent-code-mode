@@ -20,7 +20,6 @@ import type { SettingsDoc } from './settings.js';
 export const CLAUDE_MCP_STARTUP_TIMEOUT_MS = 30_000;
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
-/** Settings keys that restrict MCP servers in ways this server does not evaluate. */
 const RESTRICTING_KEYS = ['allowedMcpServers', 'deniedMcpServers'] as const;
 
 const Entry = z.strictObject({
@@ -48,7 +47,6 @@ const ApprovalKeys = z.looseObject({
 
 export interface ClaudeMcpInput {
   readonly flags: ClaudeCliFlags;
-  /** Claude's process directory: `.mcp.json`, the local scope key and relative `--mcp-config` paths. */
   readonly projectDir: string;
   readonly parentCwd: string | undefined;
   readonly configDir: string;
@@ -56,9 +54,7 @@ export interface ClaudeMcpInput {
   readonly managedDir: string | undefined;
   readonly docs: readonly SettingsDoc[];
   readonly projectTrusted: boolean;
-  /** The environment Claude Code started this server with, close to its own: servers get it, and `${VAR}` reads it. */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** Whether a rule or the permission mode can allow some tool of a server without asking. */
   readonly mayAllow: (server: string) => boolean;
 }
 
@@ -93,7 +89,6 @@ export function expandVars(value: string, env: Readonly<Record<string, string | 
   return missing === undefined ? out : { missing };
 }
 
-/** The spec Claude Code would start for one config entry, or why it is left out. */
 function toSpec(name: string, c: Candidate, input: ClaudeMcpInput): McpServerSpec | string {
   const problem = mcpNameProblem(name);
   if (problem !== undefined) return `server ${shownName(name)} (${c.origin}): ${problem}`;
@@ -230,7 +225,6 @@ export async function discoverClaudeMcp(input: ClaudeMcpInput): Promise<McpPolic
     const same = (a: McpServerSpec, b: McpServerSpec): boolean => JSON.stringify([a.command, a.args, a.env]) === JSON.stringify([b.command, b.args, b.env]);
     const first = servers[earlier];
     if (first !== undefined && !same(first, spec)) {
-      // Which definition Claude Code would start is not reproduced: neither is reachable.
       notes.push(`server ${shownName(name)}: defined differently in ${first.origin} and ${spec.origin}`);
       servers.splice(earlier, 1);
       left.add(name);

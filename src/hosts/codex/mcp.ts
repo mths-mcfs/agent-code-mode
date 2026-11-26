@@ -41,7 +41,6 @@ const StdioEntry = z.strictObject({
   tools: z.record(z.string(), z.looseObject({ approval_mode: z.string().optional() })).optional(),
 });
 
-/** How Codex gates the tools of one server. */
 export interface CodexMcpRules {
   readonly enabledTools?: readonly string[];
   readonly disabledTools: readonly string[];
@@ -109,7 +108,6 @@ export function discoverCodexMcp(
   return { mcp: { servers, notes }, rules };
 }
 
-/** The static decision for an upstream tool under Codex. */
 export function codexMcpDecision(prepared: PreparedMcpCall, rules: Readonly<Record<string, CodexMcpRules>>, approvalPolicy: ApprovalPolicy): Decision {
   const { server, tool, qualifiedName } = prepared.effect;
   const r = rules[server];

@@ -1,18 +1,7 @@
 import { Rng } from '../../lib/rng.ts';
 
-/**
- * T16 data: a small order system that lives only in the memory of the `orders` MCP server
- * (server.ts), generated from a seed, never written to the workspace. 16 customers with 6 to 12 orders
- * each; about one order in seven has refunds. A refund counts by its own date (it can belong to an order
- * placed months earlier) and only when it succeeded; refunds of other quarters and failed ones are the
- * decoys. Each record carries the kind of descriptive fields real APIs return, so a page of results is
- * several kilobytes: reading every page into the model's context is what a script avoids.
- */
-
 export const T16_QUARTER = { label: 'Q2 2026', from: '2026-04-01', to: '2026-06-30' } as const;
-/** Customers per `list_customers` page. */
 export const CUSTOMER_PAGE_SIZE = 8;
-/** Orders per `list_orders` page. */
 export const ORDER_PAGE_SIZE = 8;
 
 const CUSTOMERS = 16;
@@ -58,7 +47,6 @@ export interface OrderItem {
 
 export interface Refund {
   readonly refundId: string;
-  /** UTC date the refund was issued (YYYY-MM-DD). */
   readonly date: string;
   readonly amountCents: number;
   readonly status: 'succeeded' | 'failed';
@@ -69,7 +57,6 @@ export interface Refund {
 export interface Order {
   readonly id: string;
   readonly customerId: string;
-  /** UTC date the order was placed (YYYY-MM-DD). */
   readonly orderDate: string;
   readonly status: (typeof STATUSES)[number] | 'refunded' | 'partially_refunded';
   readonly currency: 'USD';
@@ -87,7 +74,6 @@ export interface T16Data {
 
 const pad = (n: number, w: number): string => String(n).padStart(w, '0');
 
-/** A UTC date between 2026-01-02 and 2026-09-28. */
 function dateIn(rng: Rng, fromDay: number, toDay: number): string {
   const day = rng.int(fromDay, toDay);
   return new Date(Date.UTC(2026, 0, 1) + day * 86_400_000).toISOString().slice(0, 10);
@@ -173,7 +159,6 @@ function generate(seed: number): T16Data {
   return { customers, orders };
 }
 
-/** Total of a customer's succeeded refunds dated inside the quarter. */
 export function refundedInQuarter(data: T16Data): Map<string, number> {
   const totals = new Map<string, number>();
   for (const o of data.orders) {
@@ -185,7 +170,6 @@ export function refundedInQuarter(data: T16Data): Map<string, number> {
   return totals;
 }
 
-/** The ranking the task asks for, highest first (ties broken by customer id, but the seed is chosen so the top 4 are distinct). */
 export function topRefunded(data: T16Data, n = 3): { customerId: string; cents: number }[] {
   return [...refundedInQuarter(data)]
     .map(([customerId, cents]) => ({ customerId, cents }))
@@ -193,10 +177,6 @@ export function topRefunded(data: T16Data, n = 3): { customerId: string; cents: 
     .slice(0, n);
 }
 
-/**
- * The data for a fixture seed: the first variant whose top four quarter totals are distinct and whose
- * decoys matter (counting failed refunds, or refunds by order date, would change the top three).
- */
 export function t16Data(seed: number): T16Data {
   for (let k = 0; k < 1_000; k++) {
     const data = generate(seed + k * 7_919);
@@ -210,14 +190,13 @@ export function t16Data(seed: number): T16Data {
     };
     const inQ = (d: string): boolean => d >= T16_QUARTER.from && d <= T16_QUARTER.to;
     const right = key(top.slice(0, 3));
-    if (naive((_o, r) => inQ(r.date)) === right) continue; // failed refunds must matter
-    if (naive((o, r) => r.status === 'succeeded' && inQ(o.orderDate)) === right) continue; // the refund date must matter
+    if (naive((_o, r) => inQ(r.date)) === right) continue;
+    if (naive((o, r) => r.status === 'succeeded' && inQ(o.orderDate)) === right) continue;
     return data;
   }
   throw new Error(`no usable T16 data for seed ${seed}`);
 }
 
-/** `12345` cents as `123.45`. */
 export function dollars(cents: number): string {
   return `${Math.floor(cents / 100)}.${pad(cents % 100, 2)}`;
 }

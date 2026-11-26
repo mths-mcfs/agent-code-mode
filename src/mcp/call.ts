@@ -4,8 +4,6 @@ import { formatIssues } from '../core/schemas.js';
 import type { McpCall, McpPolicy, McpServerSpec, PreparedMcpCall } from '../core/types.js';
 import { mcpNameProblem, qualifiedMcpName, shownName } from './names.js';
 
-/** `mcpCall(server, tool, args?, options?)`: validation of the script's arguments and the prepared call. */
-
 export const DEFAULT_MCP_CALL_TIMEOUT_MS = 60_000;
 export const MAX_MCP_CALL_TIMEOUT_MS = 600_000;
 
@@ -27,7 +25,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-/** Validates untrusted `mcpCall` arguments as they come from the sandbox. */
 export function parseMcpCall(args: unknown, id: string): McpCall | ToolError {
   const r = RawCall.safeParse(args);
   if (!r.success) return new ToolError('invalid-args', `mcpCall: ${formatIssues(r.error)}`);
@@ -37,7 +34,6 @@ export function parseMcpCall(args: unknown, id: string): McpCall | ToolError {
   return { id, tool: 'mcp', args: { server: r.data.server, tool: r.data.tool, input, ...(timeoutMs === undefined ? {} : { timeoutMs }) } };
 }
 
-/** The server spec and the exact effect of a call, or why the host session has no such server. */
 export function prepareMcpCall(call: McpCall, mcp: McpPolicy | undefined): { prepared: PreparedMcpCall; spec: McpServerSpec } | ToolError {
   const { server, tool, input } = call.args;
   const spec = mcp?.servers.find((s) => s.name === server);

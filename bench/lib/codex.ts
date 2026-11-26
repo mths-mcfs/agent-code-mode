@@ -27,7 +27,6 @@ export interface CodexHomeOptions {
   readonly serverEntry: string;
   readonly nodePath: string;
   readonly emptyServerEntry: string;
-  /** A task's MCP server, configured in every arm with each of its tools approved. */
   readonly task?: { readonly server: StdioServer; readonly tools: readonly string[] };
 }
 
@@ -251,7 +250,6 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     const type = item.data.item.type;
     const mcp = McpItem.safeParse(item.data.item);
     if (type === 'command_execution' || type === 'file_change' || type === 'mcp_tool_call' || type === 'web_search') {
-      // An MCP item is counted by its tool, so a code-mode script's calls to a task's MCP server show up.
       const key = mcp.success ? `mcp__${mcp.data.server}__${mcp.data.tool}` : type;
       innerItems += 1;
       innerByType[key] = (innerByType[key] ?? 0) + 1;
@@ -351,7 +349,6 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
     denials,
     hostError,
     evidence,
-    // Set by the runner, which knows the task's MCP server.
     mcpCalls: null,
   };
 }
