@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
-import { claudeServer, codexServer, makeLab, posix, type Lab, type Server } from './harness.js';
+import { BASH_SANDBOX_AVAILABLE, claudeServer, codexServer, makeLab, posix, type Lab, type Server } from './harness.js';
 
 /**
  * Words bash changes before the command sees them (brace and tilde expansion,
@@ -56,7 +56,7 @@ describe.runIf(posix)('shell expansions do not reach outside the workspace (Clau
     expect(passed).toEqual([]);
   });
 
-  it('still runs words whose expansion it resolves exactly', async () => {
+  it.runIf(BASH_SANDBOX_AVAILABLE)('still runs words whose expansion it resolves exactly', async () => {
     lab = makeLab({ 'a b': 'AB\n', x: 'X\n' });
     server = await claudeServer(lab, { permissions: { allow: ['Bash(cat:*)', 'Bash(printf:*)'] } });
     expect(await attempt(server, `cat \\a\\ b 'x'`)).toContain('RAN:AB\nX\n');
@@ -134,6 +134,18 @@ describe.runIf(posix)('tilde expansion follows bash, not the text (Claude)', () 
       expect(text, command).not.toMatch(/^RAN:/);
       expect(text, command).toMatch(/^PermissionDenied:/);
     }
+  });
+});
+
+describe.runIf(posix && BASH_SANDBOX_AVAILABLE)('an env assignment with a run-time tilde is still an assignment (Claude)', () => {
+  it('runs `env FOO=a~b printf ok` in the sandbox and still matches rules on the inner command', async () => {
+    lab = makeLab();
+    server = await claudeServer(lab, {}, { mode: 'default' });
+    expect(await attempt(server, 'env FOO=a~b printf ok')).toBe('RAN:ok');
+    expect(await attempt(server, 'env FOO=$(id) printf ok')).toMatch(/^PermissionDenied:/);
+    await server.close();
+    server = await claudeServer(lab, { permissions: { deny: ['Bash(printf ok)'] } }, { mode: 'default' });
+    expect(await attempt(server, 'env FOO=a~b printf ok')).toMatch(/^PermissionDenied:denied:denied by deny rule/);
   });
 });
 
