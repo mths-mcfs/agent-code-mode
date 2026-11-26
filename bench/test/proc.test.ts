@@ -43,4 +43,26 @@ describe('runProcess', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')('rejects with an output file error and leaves no process behind', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'acm-proc-'));
+    try {
+      const pidFile = path.join(dir, 'pid');
+      const run = runProcess({
+        command: process.execPath,
+        args: ['-e', `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`],
+        cwd: dir,
+        env: { PATH: process.env['PATH'] },
+        timeoutMs: 60_000,
+        stdoutFile: path.join(dir, 'missing', 'out'),
+        stderrFile: path.join(dir, 'err'),
+      });
+      await expect(run).rejects.toMatchObject({ code: 'ENOENT' });
+      await new Promise((r) => setTimeout(r, 500));
+      const pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'));
+      if (pid > 0) expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

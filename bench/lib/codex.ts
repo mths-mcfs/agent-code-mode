@@ -277,6 +277,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
   let turns: number | null = null;
   let calls = jsonCalls;
   let denials: string[] | null = runInnerSeen ? [...runDenials] : null;
+  const rolloutRunNames = new Set<string>();
   if (requests !== null && requests.trim() !== '') {
     turns = 0;
     calls = { native: 0, run: 0, codeMode: 0, other: 0, byName: {} };
@@ -300,6 +301,7 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
         calls[kind] += 1;
         const name = call.data.namespace ? `${call.data.namespace}.${call.data.name}` : call.data.name;
         calls.byName[name] = (calls.byName[name] ?? 0) + 1;
+        if (kind === 'run') rolloutRunNames.add(name);
         evidence['calls']?.push(i + 1);
       }
     });
@@ -313,6 +315,13 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
       const n = jsonCalls.byName[kind];
       if (n !== undefined) calls.byName[kind] = n;
     }
+  }
+
+  // Every run call is an mcp_tool_call item in the --json stream, so its count is a floor for the rollout's.
+  if (jsonCalls.run > calls.run) {
+    const byName = Object.fromEntries(Object.entries(calls.byName).filter(([name]) => !rolloutRunNames.has(name)));
+    for (const [name, n] of Object.entries(jsonCalls.byName)) if (classifyCodexTool(name) === 'run') byName[name] = n;
+    calls = { ...calls, run: jsonCalls.run, byName };
   }
 
   const innerCalls = runInnerSeen

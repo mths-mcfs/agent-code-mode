@@ -89,14 +89,19 @@ export function syncBack(dir: string, warn: (message: string) => void = (m) => p
   return 'conflict-kept-real';
 }
 
+/**
+ * Syncs the credential back, then deletes the home. When the write-back fails, the home and its marker stay,
+ * because the temp copy may be the only valid credential left; the next start's sweep retries it.
+ */
 export function removeCodexHome(dir: string): SyncOutcome {
-  let outcome: SyncOutcome = 'no-auth';
+  let outcome: SyncOutcome;
   try {
     outcome = syncBack(dir);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    live.delete(dir);
+  } catch (err) {
+    throw new Error(`could not write a refreshed credential back (${err instanceof Error ? err.message : String(err)}); it is kept in ${dir}, and the next bench run retries the write-back`);
   }
+  rmSync(dir, { recursive: true, force: true });
+  live.delete(dir);
   return outcome;
 }
 
@@ -142,8 +147,12 @@ export function sweepStaleHomes(root: string, maxDepth = 6): string[] {
     if (entries.some((e) => e.isFile() && e.name === HOME_MARKER)) {
       const pid = markerPid(dir);
       if (pid === process.pid || !alive(pid)) {
-        removeCodexHome(dir);
-        removed.push(dir);
+        try {
+          removeCodexHome(dir);
+          removed.push(dir);
+        } catch (err) {
+          process.stderr.write(`bench: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
       return;
     }

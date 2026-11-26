@@ -74,6 +74,17 @@ describe('sanitizer', () => {
     expect(sanitize(prose, ctx)).toBe(prose);
   });
 
+  it('redacts whole quoted values and whole Authorization header values, also inside JSON', () => {
+    expect(sanitize("HF_TOKEN='opaque value' cmd", ctx)).toBe('HF_TOKEN=<redacted> cmd');
+    expect(sanitize('HF_TOKEN="opaque value" cmd', ctx)).toBe('HF_TOKEN=<redacted> cmd');
+    expect(sanitize('run "HF_TOKEN=\\"opaque value\\" cmd"', ctx)).toBe('run "HF_TOKEN=<redacted> cmd"');
+    expect(JSON.parse(sanitize(JSON.stringify({ cmd: "HF_TOKEN='x y' cmd" }), ctx))).toEqual({ cmd: 'HF_TOKEN=<redacted> cmd' });
+    expect(JSON.parse(sanitize(JSON.stringify({ cmd: 'HF_TOKEN="x y" cmd' }), ctx))).toEqual({ cmd: 'HF_TOKEN=<redacted> cmd' });
+    expect(JSON.parse(sanitize(JSON.stringify({ payload: JSON.stringify({ cmd: "NPM_TOKEN='a b' npm publish" }) }), ctx))).toEqual({ payload: JSON.stringify({ cmd: 'NPM_TOKEN=<redacted> npm publish' }) });
+    expect(sanitize('> Authorization: Basic dXNlcjpwdw==', ctx)).toBe('> Authorization: <redacted>');
+    expect(JSON.parse(sanitize(JSON.stringify({ out: 'Proxy-Authorization: Basic YTpi\nnext' }), ctx))).toEqual({ out: 'Proxy-Authorization: <redacted>\nnext' });
+  });
+
   it('keeps tool names, relative arguments and numbers', () => {
     const line = JSON.stringify({ name: 'Edit', input: { file_path: 'src/handlers/orders.js' }, usage: { input_tokens: 1234 } });
     expect(sanitize(line, ctx)).toBe(line);

@@ -153,6 +153,19 @@ describe('Codex transcript parser', () => {
     expect(checkArm('codex', 'C', p.toolCalls).reasons).toHaveLength(1);
   });
 
+  it('counts run calls the --json stream shows even when the rollout misses them, without double counting', () => {
+    const run = JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'mcp_tool_call', server: 'agent-code-mode', tool: 'run', result: { content: [] } } });
+    const done = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3 } });
+    const request = JSON.stringify({ kind: 'request', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3 } });
+    const rolloutCall = JSON.stringify({ kind: 'call', type: 'function_call', name: 'run', namespace: 'mcp__agent-code-mode__' });
+    const missed = parseCodexTranscript([run, done].join('\n'), request);
+    expect(missed.toolCalls.run).toBe(1);
+    expect(missed.toolCalls.byName).toEqual({ 'mcp__agent-code-mode__run': 1 });
+    const both = parseCodexTranscript([run, done].join('\n'), [request, rolloutCall].join('\n'));
+    expect(both.toolCalls.run).toBe(1);
+    expect(both.toolCalls.byName).toEqual({ 'mcp__agent-code-mode__.run': 1 });
+  });
+
   it('classifies only the agent-code-mode run tool as run', () => {
     expect(classifyCodexTool('mcp__agent-code-mode__run')).toBe('run');
     expect(classifyCodexTool('mcp__agent_code_mode__run')).toBe('run');

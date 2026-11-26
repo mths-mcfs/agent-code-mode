@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { killGroup } from '../lib/proc.ts';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { VerifyResult } from './types.ts';
@@ -53,18 +54,40 @@ export interface NodeTestRun {
   readonly output: string;
 }
 
+/** What the tests see of the environment: enough to run node, none of the operator's credentials. */
+function testEnv(): Record<string, string> {
+  const keep = ['PATH', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR'];
+  return { ...Object.fromEntries(keep.flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k] ?? '']]))), NODE_OPTIONS: '' };
+}
+
+/**
+ * Runs `node --test` in the workspace. It leads its own process group, so a timeout kills the test files'
+ * processes with it; a runner that cannot start is a failed run.
+ */
 export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
+    const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: testEnv(), detached: process.platform !== 'win32' });
     let output = '';
+    let settled = false;
+    const finish = (run: NodeTestRun): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(run);
+    };
     child.stdout.on('data', (d: Buffer) => (output += d.toString('utf8')));
     child.stderr.on('data', (d: Buffer) => (output += d.toString('utf8')));
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid !== undefined) killGroup(child.pid);
+    }, timeoutMs);
+    child.on('error', (err) => finish({ ok: false, pass: 0, fail: 0, output: `Error: node --test could not start: ${err.message}` }));
     child.on('close', (code) => {
-      clearTimeout(timer);
+      if (timedOut) output += `\nError: node --test timed out after ${timeoutMs} ms`;
       // Spec reporter prints `ℹ pass 13`, TAP prints `# pass 13` (Node 22 without a TTY).
       const num = (label: string): number => Number(new RegExp(`^(?:ℹ|#) ${label} (\\d+)`, 'm').exec(output)?.[1] ?? '0');
-      resolve({ ok: code === 0, pass: num('pass'), fail: num('fail'), output: output.slice(-4000) });
+      finish({ ok: code === 0 && !timedOut, pass: num('pass'), fail: num('fail'), output: output.slice(-4000) });
     });
   });
 }

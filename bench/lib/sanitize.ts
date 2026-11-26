@@ -41,7 +41,10 @@ const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<token>'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g, '$1 <token>'],
   [/(\\*"(?:api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|authorization|password|passwd|secret|client[_-]?secret|cookie|private[_-]?key)\\*"\s*:\s*(\\*)")(?:(?!\2").)*(\2")/gi, '$1<redacted>$3'],
-  [/\b((?:[A-Za-z0-9]+[_-])+(?:TOKEN|KEY)|(?:[A-Za-z0-9]+[_-])*(?:SECRET|PASSWORD|AUTHORIZATION)|token|apikey)(\s*[=:]\s*)(?!<redacted>)("?)[^\s"',;]+/gi, '$1$2$3<redacted>'],
+  // An Authorization header value is the whole rest of the line, however short (`Basic dXNlcjpwdw==`).
+  [/\b((?:proxy-)?authorization)(\s*:\s*)(?!<redacted>)[^\r\n"\\]+/gi, '$1$2<redacted>'],
+  // A value is a single- or double-quoted string (also with escaped quotes) or one unquoted word.
+  [/\b((?:[A-Za-z0-9]+[_-])+(?:TOKEN|KEY)|(?:[A-Za-z0-9]+[_-])*(?:SECRET|PASSWORD|AUTHORIZATION)|token|apikey)(\s*[=:]\s*)(?!<redacted>)(?:(\\*)"(?:(?!\3").)*\3"|'[^']*'|[^\s"',;]+)/gi, '$1$2<redacted>'],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
 ];
 

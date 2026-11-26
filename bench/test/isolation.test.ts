@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -271,6 +271,23 @@ describe('syncBack rule', () => {
       expect(warnings).toHaveLength(1);
     } finally {
       removeCodexHome(home);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!posix || process.getuid?.() === 0)('keeps the only refreshed copy when the write-back fails, and the next sweep finishes it', async () => {
+    const { root, real, home } = await setup();
+    try {
+      await writeFile(path.join(home, 'auth.json'), REFRESHED);
+      await chmod(path.dirname(real), 0o500);
+      expect(() => removeCodexHome(home)).toThrow(/kept in .*next bench run retries/);
+      await chmod(path.dirname(real), 0o700);
+      expect(await readFile(path.join(home, 'auth.json'), 'utf8')).toBe(REFRESHED);
+      expect(await readFile(real, 'utf8')).toBe(ORIGINAL);
+      expect(sweepStaleHomes(root).map((d) => path.basename(d))).toEqual(['home']);
+      expect(await readFile(real, 'utf8')).toBe(REFRESHED);
+    } finally {
+      await chmod(path.dirname(real), 0o700);
       await rm(root, { recursive: true, force: true });
     }
   });

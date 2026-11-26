@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
+import { finished } from 'node:stream/promises';
 
 export interface ProcessSpec {
   readonly command: string;
@@ -21,10 +22,11 @@ export interface ProcessOutcome {
 
 const liveChildren = new Set<number>();
 
-function killGroup(pid: number): void {
+/** Kills a child and its descendants: the group it leads off Windows (it was spawned detached), its tree on Windows. */
+export function killGroup(pid: number): void {
   try {
     if (process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
-    else process.kill(pid, 'SIGKILL');
+    else if (spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }).status !== 0) process.kill(pid, 'SIGKILL');
   } catch {
     try {
       process.kill(pid, 'SIGKILL');
@@ -38,6 +40,10 @@ export function killLiveChildren(): void {
   liveChildren.clear();
 }
 
+/**
+ * Runs the host with its output streamed to files. Settles once: an error of the child, its stdin or either
+ * output file (ENOSPC, say) kills the process group and rejects the run with that error.
+ */
 export function runProcess(spec: ProcessSpec): Promise<ProcessOutcome> {
   return new Promise((resolve, reject) => {
     const out = createWriteStream(spec.stdoutFile);
@@ -50,33 +56,47 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessOutcome> {
       detached: process.platform !== 'win32',
     });
     if (child.pid !== undefined) liveChildren.add(child.pid);
+    let settled = false;
     let timedOut = false;
-    const kill = (): void => {
-      timedOut = true;
-      try {
-        if (process.platform !== 'win32' && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-        else child.kill('SIGKILL');
-      } catch {
-        child.kill('SIGKILL');
+    const stop = (): void => {
+      clearTimeout(timer);
+      if (child.pid !== undefined) {
+        killGroup(child.pid);
+        liveChildren.delete(child.pid);
       }
     };
-    const timer = setTimeout(kill, spec.timeoutMs);
+    const fail = (e: Error): void => {
+      if (settled) return;
+      settled = true;
+      stop();
+      out.destroy();
+      err.destroy();
+      reject(e);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid !== undefined) killGroup(child.pid);
+    }, spec.timeoutMs);
+    out.on('error', fail);
+    err.on('error', fail);
+    child.on('error', fail);
+    // A host that exits without reading its prompt closes stdin early; that is not a harness failure.
+    child.stdin.on('error', (e: NodeJS.ErrnoException) => {
+      if (e.code !== 'EPIPE') fail(e);
+    });
     child.stdout.pipe(out);
     child.stderr.pipe(err);
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
     child.on('close', (exitCode, signal) => {
+      if (settled) return;
       clearTimeout(timer);
       if (child.pid !== undefined) liveChildren.delete(child.pid);
       const wallMs = Math.round(performance.now() - started);
-      let pending = 2;
-      const done = (): void => {
-        if (--pending === 0) resolve({ exitCode, signal, timedOut, wallMs });
-      };
-      out.end(done);
-      err.end(done);
+      // The pipes end both files when the child's output ends; resolve once both are on disk.
+      Promise.all([finished(out), finished(err)]).then(() => {
+        if (settled) return;
+        settled = true;
+        resolve({ exitCode, signal, timedOut, wallMs });
+      }, fail);
     });
     child.stdin.end(spec.stdin ?? '');
   });
