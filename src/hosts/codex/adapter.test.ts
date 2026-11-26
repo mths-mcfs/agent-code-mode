@@ -635,7 +635,7 @@ describe('CodexContextProvider', () => {
   });
 });
 
-describe('Codex requirements.toml mcp_servers allowlist, through the adapter', () => {
+describe.runIf(posix)('Codex requirements.toml mcp_servers allowlist, through the adapter', () => {
   const tools = ['[mcp_servers.ok.tools.t]', 'approval_mode = "approve"', '[mcp_servers.blocked.tools.t]', 'approval_mode = "approve"'].join('\n');
   const files = {
     '/home/u/.codex/config.toml': `[mcp_servers.ok]\ncommand = "node"\n[mcp_servers.blocked]\ncommand = "other-server"\n${tools}\n`,

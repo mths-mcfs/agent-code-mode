@@ -312,7 +312,8 @@ describe('MCP server and the session\'s upstream servers', () => {
       await client.close();
       await server.close();
       await upstreams.close();
-      rmSync(dir, { recursive: true, force: true });
+      // Windows releases the exited server's working directory a moment later.
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     });
     await client.callTool({ name: 'run', arguments: { code: JSON.stringify([{ log: 'ran' }]) } });
     expect(readFileSync(log, 'utf8')).toContain('"listed"');

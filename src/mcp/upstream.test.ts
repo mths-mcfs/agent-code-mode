@@ -11,7 +11,7 @@ import { McpUpstreams, shapeResult } from './upstream.js';
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'upstream-server.mjs');
 const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-upstream-'));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
 let n = 0;
 let pools: McpUpstreams[] = [];
