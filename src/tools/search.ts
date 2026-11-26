@@ -386,36 +386,50 @@ export async function runGrep(
   top: SearchTop,
   signal: AbortSignal,
   fileBudgetMs: number = DEFAULT_GREP_FILE_BUDGET_MS,
+  readFilter?: (realAbsPath: string) => boolean,
 ): Promise<GrepResult> {
   compileGrep(effect.pattern, effect.ignoreCase);
   const globs = effect.glob === null ? null : expandBraces(effect.glob.replace(/\\/g, '/'));
   const matches: GrepMatch[] = [];
+  let filtered = 0;
   const worker = new MatchWorker(effect.pattern, effect.ignoreCase ? 'i' : '');
   try {
     for await (const file of walkFiles(top, signal)) {
       const rel = file.abs === effect.absRoot ? path.basename(file.abs) : toRel(effect.absRoot, file.abs);
       if (globs && !matchesFileGlob(rel, globs)) continue;
+      if (readFilter && !readFilter(file.abs)) {
+        filtered++;
+        continue;
+      }
       const bytes = await readFileInside(file, MAX_GREP_FILE_BYTES);
       if (bytes === null || isBinary(bytes)) continue;
       const room = effect.maxResults - matches.length;
       const found = await worker.match(file.abs, bytes.toString('utf8'), room, fileBudgetMs, signal);
       for (const [line, text] of found.hits) matches.push({ file: file.abs, line, text });
-      if (found.more) return { matches, truncated: true };
+      if (found.more) return { matches, truncated: true, filtered };
     }
   } finally {
     worker.close();
   }
-  return { matches, truncated: false };
+  return { matches, truncated: false, filtered };
 }
 
-export async function runGlob(effect: GlobEffect, top: SearchTop, signal: AbortSignal): Promise<GlobResult> {
+export async function runGlob(
+  effect: GlobEffect,
+  top: SearchTop,
+  signal: AbortSignal,
+  readFilter?: (realAbsPath: string) => boolean,
+): Promise<GlobResult> {
   const patterns = expandBraces(normalizeGlob(effect.pattern, effect.absRoot));
   const all: string[] = [];
+  let filtered = 0;
   for await (const file of walkFiles(top, signal)) {
     if (file.abs === effect.absRoot) continue;
     const rel = toRel(effect.absRoot, file.abs);
-    if (patterns.some((p) => matchesPathPattern(rel, p))) all.push(file.abs);
+    if (!patterns.some((p) => matchesPathPattern(rel, p))) continue;
+    if (readFilter && !readFilter(file.abs)) filtered++;
+    else all.push(file.abs);
   }
   all.sort();
-  return { files: all.slice(0, effect.maxResults), truncated: all.length > effect.maxResults };
+  return { files: all.slice(0, effect.maxResults), truncated: all.length > effect.maxResults, filtered };
 }

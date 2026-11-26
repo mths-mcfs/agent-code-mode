@@ -135,7 +135,7 @@ export function parseGrep(prepared: PreparedCallOf<'grep'>, result: BashResult):
     if (text.length > MAX_LINE_CHARS) text = `${text.slice(0, MAX_LINE_CHARS)}…`;
     matches.push({ file, line: line.data.line_number, text });
   }
-  return { matches, truncated: result.truncated || found > max };
+  return { matches, truncated: result.truncated || found > max, filtered: 0 };
 }
 
 export function parseGlob(prepared: PreparedCallOf<'glob'>, result: BashResult): GlobResult {
@@ -151,7 +151,7 @@ export function parseGlob(prepared: PreparedCallOf<'glob'>, result: BashResult):
     if (files.length === max) break;
     files.push(name);
   }
-  return { files, truncated: result.truncated || names.length > max };
+  return { files, truncated: result.truncated || names.length > max, filtered: 0 };
 }
 
 export function lowerSearch(prepared: PreparedCallOf<'grep'> | PreparedCallOf<'glob'>): SearchLowering {

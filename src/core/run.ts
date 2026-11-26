@@ -1,5 +1,6 @@
 import { Dispatcher, type StopReason } from './dispatcher.js';
 import { TransactionFinalizeError, errorMessage } from './errors.js';
+import { releasingClaims } from './file-claims.js';
 import { DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS, type RunArgs } from './schemas.js';
 import type {
   CallLogEntry,
@@ -243,7 +244,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       policy = { error: errorMessage(err) };
     }
     checkDeadline();
-    if (req.transaction && stopReason === undefined) tx = deps.tools.beginTransaction();
+    if (req.transaction && stopReason === undefined) tx = releasingClaims(deps.tools.beginTransaction());
 
     const leftMs = deadline - now();
     if (leftMs <= 0) stop('timeout');

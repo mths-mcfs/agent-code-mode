@@ -85,6 +85,8 @@ describe.runIf(posix)('loadCodexConfig', () => {
     expect(c.networkAccess).toBe(true);
     expect(c.approvalPolicy).toBe('never');
     expect(c.hooksEnabled).toBe(false);
+    expect(loadCodexConfig('/w', memoryIo({ argv: ['sh', '-c', 'codex', '--yolo'] })).cmdline).toBeNull();
+    expect(loadCodexConfig('/w', memoryIo({ argv: ['node', '/opt/codex.js', '--yolo'] })).cmdline).toBeNull();
     const yolo = loadCodexConfig('/w', memoryIo({ argv: ['codex', '--yolo'] }));
     expect(yolo.sandboxMode).toBe('danger-full-access');
     expect(yolo.approvalPolicy).toBe('never');

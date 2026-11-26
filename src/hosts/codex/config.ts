@@ -423,8 +423,9 @@ export function parseParentCommandLine(argv: readonly string[]): ParentCommandLi
   };
 }
 
+/** The Codex binary itself: its flags start at argv[1], which is where `parseParentCommandLine` reads them. */
 function looksLikeCodex(argv: readonly string[]): boolean {
-  return argv.slice(0, 3).some((a) => /(^|[\\/])codex(\.exe|\.js)?$/.test(a));
+  return /(^|[\\/])codex(\.exe)?$/.test(argv[0] ?? '');
 }
 
 const RequirementsSchema = z.looseObject({

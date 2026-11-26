@@ -7,7 +7,7 @@ function options(overrides: Partial<SandboxRunOptions> = {}): SandboxRunOptions 
     timeoutMs: 1_000,
     memoryBytes: 1,
     signal: new AbortController().signal,
-    onCall: async () => ({ ok: true, value: { files: [], truncated: false } }),
+    onCall: async () => ({ ok: true, value: { files: [], truncated: false, filtered: 0 } }),
     onLog: () => undefined,
     ...overrides,
   };

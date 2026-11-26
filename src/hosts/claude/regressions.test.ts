@@ -128,20 +128,20 @@ describe('Bash rule bypasses', () => {
 });
 
 describe('recursive grep and glob', () => {
-  it.skipIf(!posix)('the policy exposes isReadDenied so the tools layer can drop denied files from results', async () => {
+  it.skipIf(!posix)('the policy readFilter lets the tools layer drop denied files from results', async () => {
     const s = await setup({ permissions: { deny: ['Read(./.env)'] } }, 'bypassPermissions');
     const tools = new MemoryToolRuntime({ root: s.project, files: { '.env': 'SECRET=fixture\n', 'a.txt': 'SECRET mention\n' } });
     const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: s.ctx, policy: s.policy });
     const grep = await dispatcher.dispatch('grep', { pattern: 'SECRET', path: '.' });
     const glob = await dispatcher.dispatch('glob', { pattern: '**/*', path: '.' });
     if (!grep.ok || !glob.ok) throw new Error('search failed');
-    const keep = (file: string): boolean => !s.policy.payload.isReadDenied(file);
+    const keep = (file: string): boolean => s.policy.readFilter?.(file) ?? true;
     const grepFiles = ('matches' in grep.value ? (grep.value as GrepResult).matches : []).map((m) => m.file);
     const globFiles = 'files' in glob.value ? (glob.value as GlobResult).files : [];
     expect(grepFiles).toContain(path.join(s.project, '.env'));
     expect(grepFiles.filter(keep)).toEqual([path.join(s.project, 'a.txt')]);
     expect(globFiles.filter(keep)).not.toContain(path.join(s.project, '.env'));
-    expect(s.policy.payload.isReadDenied(path.join(s.project, 'sub', '.env'))).toBe(false);
+    expect(keep(path.join(s.project, 'sub', '.env'))).toBe(true);
   });
 });
 

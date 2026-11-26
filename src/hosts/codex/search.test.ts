@@ -56,20 +56,21 @@ describe('parsing the rg output', () => {
         { file: '/w/a.ts', line: 2, text: 'x two' },
       ],
       truncated: true,
+      filtered: 0,
     });
     expect(parseGrep(grep({ maxResults: 3 }), out(three))).toMatchObject({ truncated: false, matches: [{}, {}, { line: 7, text: 'x three' }] });
-    expect(parseGlob(glob(), out('/w/a.ts\0/w/b.ts\0/w/c.ts\0'))).toEqual({ files: ['/w/a.ts', '/w/b.ts'], truncated: true });
-    expect(parseGlob(glob(), out('/w/a.ts\0'))).toEqual({ files: ['/w/a.ts'], truncated: false });
-    expect(parseGlob(glob(), out(''))).toEqual({ files: [], truncated: false });
+    expect(parseGlob(glob(), out('/w/a.ts\0/w/b.ts\0/w/c.ts\0'))).toEqual({ files: ['/w/a.ts', '/w/b.ts'], truncated: true, filtered: 0 });
+    expect(parseGlob(glob(), out('/w/a.ts\0'))).toEqual({ files: ['/w/a.ts'], truncated: false, filtered: 0 });
+    expect(parseGlob(glob(), out(''))).toEqual({ files: [], truncated: false, filtered: 0 });
   });
 
   it('reports output cut by the runtime cap as truncated and drops the cut record', () => {
-    expect(parseGrep(grep({ maxResults: 9 }), out(`${match('/w/a', 1, 'x')}{"type":"ma`, { truncated: true }))).toEqual({ matches: [{ file: '/w/a', line: 1, text: 'x' }], truncated: true });
-    expect(parseGlob(glob({ maxResults: 9 }), out('/w/a\0/w/b\0/w/partia', { truncated: true }))).toEqual({ files: ['/w/a', '/w/b'], truncated: true });
+    expect(parseGrep(grep({ maxResults: 9 }), out(`${match('/w/a', 1, 'x')}{"type":"ma`, { truncated: true }))).toEqual({ matches: [{ file: '/w/a', line: 1, text: 'x' }], truncated: true, filtered: 0 });
+    expect(parseGlob(glob({ maxResults: 9 }), out('/w/a\0/w/b\0/w/partia', { truncated: true }))).toEqual({ files: ['/w/a', '/w/b'], truncated: true, filtered: 0 });
   });
 
   it('keeps names with newlines, clips long lines and decodes non-UTF-8 lines', () => {
-    expect(parseGlob(glob({ maxResults: 9 }), out('/w/odd\nname.ts\0'))).toEqual({ files: ['/w/odd\nname.ts'], truncated: false });
+    expect(parseGlob(glob({ maxResults: 9 }), out('/w/odd\nname.ts\0'))).toEqual({ files: ['/w/odd\nname.ts'], truncated: false, filtered: 0 });
     const latin1 = `${JSON.stringify({ type: 'match', data: { path: { text: '/w/c' }, lines: { bytes: Buffer.from('caf\xe9\n', 'latin1').toString('base64') }, line_number: 1 } })}\n`;
     const r = parseGrep(grep({ maxResults: 9 }), out(match('/w/a\nb', 3, 'y'.repeat(2500)) + latin1));
     expect(r.matches[0]).toMatchObject({ file: '/w/a\nb', line: 3 });
@@ -169,7 +170,7 @@ describe.runIf(hasRg)('against the real ripgrep', () => {
     };
     expect(files('*.ts').files.map((p) => path.relative(dir, p))).toEqual(['-dash.ts', '.hidden.ts', 'odd\nname.ts', 'skipped.ts', 'src/a.ts', 'src/b.ts']);
     expect(files('**').files.some((p) => p.split(path.sep).includes('.git'))).toBe(false);
-    expect(files('*.ts', 2)).toEqual({ truncated: true, files: [path.join(dir, '-dash.ts'), path.join(dir, '.hidden.ts')] });
+    expect(files('*.ts', 2)).toEqual({ truncated: true, filtered: 0, files: [path.join(dir, '-dash.ts'), path.join(dir, '.hidden.ts')] });
   });
 
   it('applies .gitignore outside a git repository, like the runtime', () => {

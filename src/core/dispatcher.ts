@@ -1,5 +1,7 @@
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { ToolError, errorMessage } from './errors.js';
+import { claimFile } from './file-claims.js';
 import { frozenCopy } from './freeze.js';
 import { findMatchingPattern } from './paths.js';
 import { DecisionSchema, isMutating, parseToolCall } from './schemas.js';
@@ -153,10 +155,12 @@ export class Dispatcher<P = unknown> {
   readonly #warnings: string[] = [];
   #deniedCount = 0;
   #bashCommits = 0;
+  readonly #realCwd: string;
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
     this.#now = opts.now ?? (() => performance.now());
+    this.#realCwd = realPathOrResolved(opts.ctx.cwd);
   }
 
   /** Signal aborted when the dispatcher stops. */
@@ -393,7 +397,7 @@ export class Dispatcher<P = unknown> {
       if (returned === ABORTED) return this.#stoppedFailure();
       // A dispatcher-owned deep-frozen copy: what is authorized and then
       // committed cannot be changed by the runtime or anyone holding its object.
-      prepared = frozenCopy(returned);
+      prepared = frozenCopy(withRequestedPath(returned, call));
     } catch (err) {
       return this.#toolFailure(err);
     }
@@ -459,6 +463,10 @@ export class Dispatcher<P = unknown> {
     const tool = lowered?.tool ?? prepared.tool;
     const transaction = this.#opts.transaction;
     const journaled = transaction !== undefined && (prepared.tool === 'write' || prepared.tool === 'edit');
+    if (journaled && !claimFile(transaction, prepared.effect.absPath)) {
+      const error = new ToolError('tool-error', `${prepared.effect.absPath} is being changed by another transactional run that has not finished; retry once it ends`);
+      return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error });
+    }
     let result: ToolResult;
     try {
       const pending = this.#opts.tools.commit(prepared, signal, transaction);
@@ -559,7 +567,7 @@ export class Dispatcher<P = unknown> {
   }
 
   #addChanged(absPath: string): void {
-    const shown = displayPath(absPath, this.#opts.ctx.cwd);
+    const shown = displayPath(absPath, this.#realCwd);
     if (!this.#changed.includes(shown)) this.#changed.push(shown);
   }
 
@@ -574,6 +582,20 @@ function isBashResult(r: ToolResult): r is BashResult {
 
 function isLowering(v: unknown): v is SearchLowering {
   return typeof v === 'object' && v !== null && 'command' in v && typeof v.command === 'string' && v.command !== '' && 'parse' in v && typeof v.parse === 'function';
+}
+
+function realPathOrResolved(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+function withRequestedPath(prepared: PreparedCall, call: ToolCall): PreparedCall {
+  const { requestedPath: _fromRuntime, ...rest } = prepared;
+  const requested = call.tool === 'bash' ? undefined : call.args.path;
+  return requested === undefined ? rest : { ...rest, requestedPath: requested };
 }
 
 /** Path relative to `cwd` when inside it, else the absolute path. */

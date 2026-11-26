@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { stateDirPath } from '../../core/state-dir.js';
 import type { BashContainment, BashShell, Decision, HostAdapter, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, SessionContext } from '../../core/types.js';
-import { ConfigError, decodeNulList, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
+import { ConfigError, decodeNulList, getPath, isTable, loadCodexConfig, nodeConfigIo, ruleFiles, type ApprovalPolicy, type ConfigIo, type SandboxMode } from './config.js';
 import { executableLookupKey, isDangerousCommand, matchRules, parseRulesFile, RulesParseError, strictest, type ExecPolicy, type PrefixRule } from './exec-policy.js';
 import { discoverHooks, matcherMatches, runHooks, type HookHandler } from './hooks.js';
 import { APPLY_PATCH_NAMES, BASH_NAMES, mapUpdatedInput, nativeCall, NativeShapeError, shellCommandFor, type NativeCall } from './native.js';
@@ -178,6 +178,8 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       host: 'codex',
       bashContainment,
       protectedPaths,
+      // Configured writable roots and --add-dir widen the tools' workspace in workspace-write only; /tmp and $TMPDIR do not.
+      ...(sandboxMode === 'workspace-write' ? { additionalRoots: unique(config.writableRoots.map((p) => path.resolve(p))) } : {}),
       payload: {
         sandboxMode,
         approvalPolicy: config.approvalPolicy,
@@ -447,4 +449,18 @@ function parentAwareEnv(): Record<string, string | undefined> {
     if (value !== undefined) env['CODEX_HOME'] = value;
   }
   return env;
+}
+
+export function codexToolTimeoutSec(cwd: string, serverName: string, io: ConfigIo = nodeConfigIo(parentAwareEnv())): number | undefined {
+  let merged;
+  try {
+    merged = loadCodexConfig(cwd, io).merged;
+  } catch {
+    return undefined;
+  }
+  const servers = getPath(merged, ['mcp_servers']);
+  if (!isTable(servers) || !Object.hasOwn(servers, serverName)) return undefined;
+  const entry = servers[serverName];
+  const value = isTable(entry) && Object.hasOwn(entry, 'tool_timeout_sec') ? entry['tool_timeout_sec'] : undefined;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }

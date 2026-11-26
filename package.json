@@ -21,7 +21,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test && npm run build",
     "bench": "node -e \"console.log('bench: not implemented yet')\""
