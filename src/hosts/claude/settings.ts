@@ -118,6 +118,8 @@ function hookControls(docs: readonly SettingsDoc[]) {
 export interface LoadedSettings {
   readonly docs: readonly SettingsDoc[];
   readonly plugins: readonly PluginHooks[];
+  /** Install directory of every enabled plugin, with or without hooks. */
+  readonly pluginRoots: readonly string[];
   readonly componentHooks: string | undefined;
   readonly hookControls: ReturnType<typeof hookControls>;
   readonly projectTrusted: boolean;
@@ -555,7 +557,7 @@ export async function loadSettings(opts: LoadSettingsOptions): Promise<LoadedSet
     ];
     const nested = (await Promise.all(roots.map(({ root }) => nestedClaudeDirs(root)))).flat();
     const componentHooks = await findComponentHooks(componentDirs, installed.map((p) => p.root), nested);
-    return { docs, plugins, projectTrusted, hookControls: controls, componentHooks };
+    return { docs, plugins, pluginRoots: installed.map((p) => p.root), projectTrusted, hookControls: controls, componentHooks };
   } catch (err) {
     if (err instanceof SettingsError) throw err;
     throw new SettingsError(errorMessage(err));

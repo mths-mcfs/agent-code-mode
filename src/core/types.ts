@@ -496,7 +496,32 @@ export interface PolicySnapshot<P = unknown> {
    * readable.
    */
   readonly readFilter?: (realAbsPath: string) => boolean;
+  /**
+   * Absolute path patterns (the `protectedPaths` syntax, each starting with a
+   * literal directory) of the policy files the host and this adapter read.
+   * The dispatcher fingerprints them around every `bash` call and reports a
+   * change in `RunResult.protectedChanges`. It never blocks or restores.
+   * Absent: nothing is watched.
+   */
+  readonly watchedPaths?: readonly string[];
+  /** Changes in the watched paths this host makes routinely, which are not reported. */
+  readonly isRoutineWatchedChange?: (change: WatchedChange) => Promise<boolean>;
   readonly payload: P;
+}
+
+/** One watched path that differs between two snapshots; a missing side means the path did not exist. */
+export interface WatchedChange {
+  readonly path: string;
+  readonly before?: { readonly type: WatchedType; readonly mode: number };
+  readonly after?: { readonly type: WatchedType; readonly mode: number };
+}
+
+export type WatchedType = 'file' | 'dir' | 'symlink' | 'other';
+
+/** The watched paths as they were at one moment (`ToolRuntime.snapshotWatched`). */
+export interface WatchedSnapshot {
+  /** The paths that differ from `earlier`, minus those `routine` accepts. */
+  changedSince(earlier: WatchedSnapshot, routine?: (change: WatchedChange) => Promise<boolean>): Promise<string[]>;
 }
 
 /** Returned by `HostAdapter.loadPolicy` when the host config cannot be understood. Every call is then denied with `unsupported-config`. */
@@ -622,6 +647,12 @@ export interface ToolRuntime<P = unknown> {
   commit(prepared: PreparedCall, signal: AbortSignal, tx?: Transaction): Promise<ToolResult>;
   /** Starts a journal for one transactional run. */
   beginTransaction(): Transaction;
+  /**
+   * Fingerprints every entry matching `patterns` (see
+   * `PolicySnapshot.watchedPaths`). Rejects when it cannot finish, for
+   * example past its entry or time limit.
+   */
+  snapshotWatched?(patterns: readonly string[]): Promise<WatchedSnapshot>;
 }
 
 // ---------------------------------------------------------------------------
@@ -745,4 +776,23 @@ export interface RunResult {
   readonly rolledBack?: RollbackReport;
   /** Notes the model must know, e.g. bash effects that were not rolled back. */
   readonly warnings: readonly string[];
+  /** Watched host policy files that changed around bash calls. Present only when there is one. */
+  readonly protectedChanges?: readonly ProtectedChange[];
+}
+
+/**
+ * Watched host policy files that changed while a bash call ran, or after it
+ * ended (before the next bash call or the end of the run). Detected and
+ * reported only: nothing was blocked or restored.
+ */
+export interface ProtectedChange {
+  /** The bash call's id. */
+  readonly call: string;
+  /** Its call-log summary. */
+  readonly command: string;
+  readonly when: 'during' | 'after';
+  /** The changed paths (relative to the session cwd when inside it). */
+  readonly changed: readonly string[];
+  /** Why the check could not finish; files may have changed unseen. */
+  readonly unchecked?: string;
 }

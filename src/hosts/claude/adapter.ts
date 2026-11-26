@@ -16,6 +16,7 @@ import type {
   ToolResult,
 } from '../../core/types.js';
 import { BashAnalyzer, type BashAnalysis } from './bash.js';
+import { contextDir, routineContextChange } from './context.js';
 import {
   NATIVE_TOOL,
   combineOutcomes,
@@ -649,6 +650,28 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     ];
     const canonical = await Promise.all(lexicalProtected.map(canonicalPatterns));
     const protectedPaths = [...new Set([...lexicalProtected, ...canonical.flat()])];
+    // Watched around bash: the files above that Claude Code and this adapter read as policy. Not the rest of the user
+    // config directory (transcripts, sessions, caches) nor ~/.claude.json, which Claude Code rewrites all the time.
+    const watchedPaths = [
+      ...new Set([
+        ...[projectRoot, primaryDir, ctx.cwd, sessionCwd].flatMap((root) => [
+          path.join(root, '.claude', 'settings*.json'),
+          path.join(root, '.claude', 'hooks', '**'),
+          path.join(root, '.claude', 'agents', '**'),
+          path.join(root, '.mcp.json'),
+        ]),
+        ...[configDir, path.join(home, '.claude')].flatMap((dir) => [
+          path.join(dir, 'settings*.json'),
+          path.join(dir, 'hooks', '**'),
+          path.join(dir, 'agents', '**'),
+          path.join(dir, 'plugins', 'installed_plugins.json'),
+        ]),
+        ...settings.pluginRoots.flatMap((root) => [path.join(root, 'hooks', '**'), path.join(root, '.claude-plugin', 'plugin.json')]),
+        ...(managedDir === undefined ? [] : [path.join(managedDir, '**')]),
+        ...docs.flatMap((d) => (d.file === undefined ? [] : [d.file])),
+        path.join(contextDir(stateDir), '**'),
+      ]),
+    ];
 
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
     const isReadRestricted = (absPath: string): boolean =>
@@ -658,6 +681,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
       host: 'claude',
       bashContainment,
       protectedPaths,
+      watchedPaths,
+      isRoutineWatchedChange: routineContextChange(contextDir(stateDir), platform),
       additionalRoots: [...new Set(additionalDirs)],
       readFilter: (realAbsPath: string): boolean => !isReadRestricted(realAbsPath),
       payload: {

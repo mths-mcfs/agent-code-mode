@@ -37,6 +37,7 @@ export const RunOutputSchema = z.looseObject({
     .optional(),
   changedFiles: z.array(z.string()).optional(),
   warnings: z.array(z.string()).optional(),
+  protectedChanges: z.array(z.looseObject({ call: z.string(), when: z.string(), changed: z.array(z.string()), unchecked: z.string().optional() })).optional(),
   rolledBack: z.unknown().optional(),
   truncated: z.unknown().optional(),
 });

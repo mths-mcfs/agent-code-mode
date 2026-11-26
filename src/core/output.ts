@@ -1,5 +1,5 @@
 import { errorMessage } from './errors.js';
-import type { CallLogEntry, RunResult } from './types.js';
+import type { CallLogEntry, ProtectedChange, RunResult } from './types.js';
 
 /** Response budget, well below Claude Code's MAX_MCP_OUTPUT_TOKENS (25,000). */
 export const RESPONSE_CAP_TOKENS = 10_000;
@@ -171,6 +171,7 @@ interface View {
   ok: boolean;
   result?: unknown;
   error?: unknown;
+  protectedChanges?: readonly unknown[];
   logs?: readonly string[];
   calls: CompactCalls | readonly CallLogEntry[];
   changedFiles?: readonly string[];
@@ -207,12 +208,13 @@ export function formatRunResult(result: RunResult, opts: FormatOptions = {}): Mc
   const isError = !result.ok;
   const cap = isError ? (opts.errorCap ?? ERROR_CAP_CHARS) : (opts.successCap ?? SUCCESS_CAP_CHARS);
   const verbose = opts.verbose === true;
-  const { ok, logs, calls, changedFiles, diff, warnings, rolledBack } = result;
+  const { ok, logs, calls, changedFiles, diff, warnings, rolledBack, protectedChanges = [] } = result;
   const bigDiff = !verbose && diff.length > DIFF_INLINE_CHARS;
   const view: View = {
     ok,
     ...('result' in result ? { result: result.result } : {}),
     ...(result.error ? { error: result.error } : {}),
+    ...(protectedChanges.length > 0 ? { protectedChanges } : {}),
     ...(logs.length > 0 ? { logs } : {}),
     calls: verbose ? calls : summarizeCalls(calls),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
@@ -228,12 +230,19 @@ export function formatRunResult(result: RunResult, opts: FormatOptions = {}): Mc
   const kept: View = id === undefined ? view : { ...view, overflow: { id, chars: full.length } };
   const noted = response(kept, isError);
   if (noted.chars <= cap) return noted.out;
-  return capped(kept, summarizeCalls(calls), cap, isError);
+  return capped(kept, summarizeCalls(calls), protectedChanges, cap, isError);
 }
 
 function cutList<T>(list: readonly T[] | undefined, keep: number, where: string): readonly (T | string)[] | undefined {
   if (list === undefined || list.length <= keep) return list;
   return [...list.slice(0, keep), `…[${list.length - keep} more${where}]`];
+}
+
+/** Protected changes in a cut response are never dropped: at most `keep` windows of at most `keep` paths each, the rest counted. */
+function boundProtected(list: readonly ProtectedChange[], keep: number, textMax: number, where: string): readonly unknown[] | undefined {
+  if (list.length === 0) return undefined;
+  const windows = list.map((c) => clipStrings({ ...c, changed: cutList(c.changed, keep, where) ?? [] }, textMax));
+  return cutList(windows, keep, where);
 }
 
 function clip(text: string, max: number): string {
@@ -265,7 +274,7 @@ function grouped(list: CompactCalls['denied'], textMax: number, perGroup: number
   return [...all.slice(0, keep), `…[${left.length} more reasons (${n} calls)${where}]`];
 }
 
-function capped(view: View, compact: CompactCalls, cap: number, isError: boolean): McpToolResponse {
+function capped(view: View, compact: CompactCalls, protectedChanges: readonly ProtectedChange[], cap: number, isError: boolean): McpToolResponse {
   const where = view.overflow ? ' in readOverflow' : '';
   const marker = (n: number): string => `\n…[${n} chars cut${view.overflow ? `; readOverflow(${JSON.stringify(view.overflow.id)}) has the whole result` : ''}]\n`;
   const { result, logs, diff, ...envelope } = view;
@@ -279,8 +288,10 @@ function capped(view: View, compact: CompactCalls, cap: number, isError: boolean
     const clipped = textMax === Infinity ? base : clipStrings(base, textMax);
     // File names are keys, which clipping leaves whole: a clipped envelope keeps only the totals.
     const stat = clipped.diffStat && textMax !== Infinity ? { files: {}, moreFiles: Object.keys(clipped.diffStat.files).length + (clipped.diffStat.moreFiles ?? 0), total: clipped.diffStat.total } : clipped.diffStat;
+    const kept = boundProtected(protectedChanges, Math.max(lists, 5), textMax, where);
     return {
       ...clipped,
+      ...(kept ? { protectedChanges: kept } : {}),
       ...(stat ? { diffStat: stat } : {}),
       calls,
       ...(clipped.changedFiles ? { changedFiles: cutList(clipped.changedFiles, lists, where) } : {}),
@@ -300,9 +311,11 @@ function capped(view: View, compact: CompactCalls, cap: number, isError: boolean
     ...[1000, 100, 10, 1, 0].map((k) => () => withCalls(groupedCalls(200, 1, k), 0, 200)),
   ];
   const counted = (list: CompactCalls['denied'], what: string): string[] | undefined => (list === undefined ? undefined : [`…[${list.length} ${what} calls${where}]`]);
+  const fewest = boundProtected(protectedChanges, 3, 200, where);
   let env: View = {
     ok: view.ok,
     ...(view.error === undefined ? {} : { error: clipStrings(view.error, 200) }),
+    ...(fewest ? { protectedChanges: fewest } : {}),
     calls: { total: compact.total, byTool: {}, ...(compact.denied ? { denied: counted(compact.denied, 'denied') } : {}), ...(compact.errors ? { errors: counted(compact.errors, 'failed') } : {}) },
     ...(view.overflow ? { overflow: view.overflow } : {}),
     truncated: true,

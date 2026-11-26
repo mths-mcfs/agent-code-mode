@@ -18,6 +18,7 @@ import type {
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
+  ProtectedChange,
   ScriptValue,
   SearchLowering,
   SessionContext,
@@ -25,7 +26,15 @@ import type {
   ToolResult,
   ToolRuntime,
   Transaction,
+  WatchedSnapshot,
 } from './types.js';
+
+/** A stretch of a run in which the watched paths are compared: while a bash call runs, or after it ended. */
+interface WatchWindow {
+  readonly call: string;
+  readonly command: string;
+  readonly when: 'during' | 'after';
+}
 
 /** Why the dispatcher stopped accepting calls. */
 export type StopReason = 'finished' | 'cancelled' | 'timeout' | 'denied';
@@ -173,6 +182,12 @@ export class Dispatcher<P = unknown> {
   #deniedCount = 0;
   #bashCommits = 0;
   readonly #realCwd: string;
+  readonly #protected: ProtectedChange[] = [];
+  /** The last snapshot of the watched paths, and the window it opens: during or after a bash call. */
+  #watchMark: (WatchWindow & { readonly snapshot: WatchedSnapshot }) | undefined;
+  /** Checks of the watched paths run one at a time, the end-of-run one last. */
+  #watchTail: Promise<void> = Promise.resolve();
+  #watchClosed = false;
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
@@ -202,6 +217,23 @@ export class Dispatcher<P = unknown> {
 
   get warnings(): readonly string[] {
     return [...this.#warnings];
+  }
+
+  /** Watched policy files that changed around this run's bash calls. */
+  get protectedChanges(): readonly ProtectedChange[] {
+    return [...this.#protected];
+  }
+
+  /**
+   * Compares the watched paths once more, closing the window the last bash
+   * call opened. Call once, after `stop` and any rollback; later checks are
+   * skipped.
+   */
+  async finishWatch(): Promise<void> {
+    const policy = this.#opts.policy;
+    const done = this.#checkWatched(isPolicyError(policy) ? undefined : policy, undefined);
+    this.#watchClosed = true;
+    await done;
   }
 
   get deniedCount(): number {
@@ -485,6 +517,8 @@ export class Dispatcher<P = unknown> {
       const error = new ToolError('tool-error', `${prepared.effect.absPath} is being changed by another transactional run that has not finished; retry once it ends`);
       return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error });
     }
+    const watched = prepared.tool === 'bash' && lowered === undefined;
+    if (watched) await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'during' });
     let result: ToolResult;
     try {
       const pending = this.#opts.tools.commit(prepared, signal, transaction);
@@ -500,6 +534,7 @@ export class Dispatcher<P = unknown> {
       return this.#fail(slot, prepared.id, tool, summary, started, this.#toolFailure(err));
     } finally {
       if (journaled) this.#journalWrite = undefined;
+      if (watched) await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'after' });
     }
 
     if (signal.aborted) {
@@ -591,6 +626,53 @@ export class Dispatcher<P = unknown> {
       }
     }
     return { ok: false, error };
+  }
+
+  /**
+   * Snapshots the watched paths, reports what changed since the last
+   * snapshot under the window that one opened, and opens `next`. A snapshot
+   * that fails leaves both windows unchecked, and says so.
+   */
+  #checkWatched(policy: PolicySnapshot<P> | undefined, next: WatchWindow | undefined): Promise<void> {
+    if (this.#watchClosed) return Promise.resolve();
+    const run = async (): Promise<void> => {
+      const patterns = policy?.watchedPaths ?? [];
+      const take = this.#opts.tools.snapshotWatched;
+      if (patterns.length === 0 || take === undefined) return;
+      const mark = this.#watchMark;
+      this.#watchMark = undefined;
+      let now: WatchedSnapshot;
+      try {
+        now = await take.call(this.#opts.tools, patterns);
+      } catch (err) {
+        const why = `the watched files could not be read: ${errorMessage(err)}`;
+        if (mark) this.#reportProtected(mark, [], why);
+        if (next) this.#reportProtected(next, [], why);
+        return;
+      }
+      if (mark) {
+        try {
+          const changed = await now.changedSince(mark.snapshot, policy?.isRoutineWatchedChange);
+          if (changed.length > 0) this.#reportProtected(mark, changed);
+        } catch (err) {
+          this.#reportProtected(mark, [], `the watched files could not be compared: ${errorMessage(err)}`);
+        }
+      }
+      if (next) this.#watchMark = { ...next, snapshot: now };
+    };
+    const done = this.#watchTail.then(run);
+    this.#watchTail = done.catch(() => undefined);
+    return done.catch(() => undefined);
+  }
+
+  #reportProtected(window: WatchWindow, changed: readonly string[], unchecked?: string): void {
+    this.#protected.push({
+      call: window.call,
+      command: clip(window.command, 200),
+      when: window.when,
+      changed: changed.map((p) => relative(p, [this.#realCwd, this.#opts.ctx.cwd])),
+      ...(unchecked === undefined ? {} : { unchecked }),
+    });
   }
 
   #addChanged(absPath: string): void {
