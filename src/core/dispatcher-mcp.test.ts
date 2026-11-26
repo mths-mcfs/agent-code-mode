@@ -119,6 +119,28 @@ describe('Dispatcher mcpCall', () => {
     expect(runtime.sent[0]?.input).toEqual({ auth: `x${secret}`, page: 2 });
   });
 
+  it('shows no input of a call refused or stopped before the server\'s secrets are known', async () => {
+    const leaks = (d: Dispatcher<null>): string => JSON.stringify([d.calls, d.warnings]);
+    const hang = new FakeRuntime(() => new Promise<McpResult>(() => undefined));
+    const queued = await setup({}, hang);
+    void queued.dispatcher.dispatch('mcp', { server: 'srv', tool: 't', args: { auth: 'secret' } });
+    const waiting = queued.dispatcher.dispatch('mcp', { server: 'srv', tool: 't', args: { auth: 'secret' } });
+    await new Promise((r) => setTimeout(r, 20));
+    await queued.dispatcher.stop('cancelled', 50);
+    expect(queued.dispatcher.warnings.join(' ')).toMatch(/did not settle/);
+    expect(leaks(queued.dispatcher)).not.toContain('secret');
+    void waiting;
+
+    const unknown = await setup();
+    await unknown.dispatcher.dispatch('mcp', { server: 'other', tool: 't', args: { auth: 'secret' } });
+    const restricted = await setup({ mcp: { ...MCP, unsupported: 'restricted' } });
+    await restricted.dispatcher.dispatch('mcp', { server: 'srv', tool: 't', args: { auth: 'secret' } });
+    for (const d of [unknown.dispatcher, restricted.dispatcher]) {
+      expect(d.calls[0]?.summary).toBe(`mcp ${d === unknown.dispatcher ? 'other' : 'srv'}.t <input not shown>`);
+      expect(leaks(d)).not.toContain('secret');
+    }
+  });
+
   it('runs mcpCalls one at a time with the mutations, in call order', async () => {
     const order: string[] = [];
     const runtime = new FakeRuntime(async (e) => {

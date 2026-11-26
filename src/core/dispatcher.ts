@@ -404,7 +404,8 @@ export class Dispatcher<P = unknown> {
     const call = parseMcpCall(args, id);
     if (call instanceof ToolError) return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: call }));
     const label = mcpLabel(call);
-    const summary = summarizeMcp(call);
+    // Until the server's secrets are known the summary carries no input: a call refused or stopped before then shows none.
+    const summary = `mcp ${call.args.server}.${call.args.tool} <input not shown>`;
     this.#labels[slot] = { id, tool: label, summary };
     const policy = this.#opts.policy;
     if (isPolicyError(policy)) {
@@ -871,7 +872,7 @@ function mcpLabel(call: McpCall): string {
 }
 
 /** The input is redacted as values, before it is serialized: a secret with a quote or a newline is escaped in JSON and no longer matches as text. */
-function summarizeMcp(call: McpCall, secrets: readonly string[] = []): string {
+function summarizeMcp(call: McpCall, secrets: readonly string[]): string {
   return `mcp ${call.args.server}.${call.args.tool} ${clip(oneLine(JSON.stringify(redactDeep(call.args.input, secrets))), 160)}`;
 }
 
