@@ -35,9 +35,22 @@ export function killGroup(pid: number): void {
   }
 }
 
+/** Private tmux servers of arm D runs (`tmux -L <name>`) still running. */
+const liveTmux = new Set<string>();
+
+export function trackTmuxServer(name: string): void {
+  liveTmux.add(name);
+}
+
+export function untrackTmuxServer(name: string): void {
+  liveTmux.delete(name);
+}
+
 export function killLiveChildren(): void {
   for (const pid of [...liveChildren]) killGroup(pid);
   liveChildren.clear();
+  for (const name of [...liveTmux]) spawnSync('tmux', ['-L', name, 'kill-server'], { stdio: 'ignore', timeout: 5_000 });
+  liveTmux.clear();
 }
 
 /**

@@ -1,14 +1,15 @@
 import { z } from 'zod';
 
-export const HOST_ARMS = { claude: ['A', 'B', 'C'], codex: ['A', 'B', 'C'] } as const;
-export type ArmId = 'A' | 'B' | 'C';
+/** Claude D is Claude Code's own Code Mode (the `REPL` tool), which exists only in an interactive session. */
+export const HOST_ARMS = { claude: ['A', 'B', 'C', 'D'], codex: ['A', 'B', 'C'] } as const;
+export type ArmId = 'A' | 'B' | 'C' | 'D';
 /**
  * Baseline arms: the strict agent-code-mode arm of a host (Claude B, Codex C) run against another build of
  * agent-code-mode (`--acm-ref` / `--acm-dist`), so two versions are measured in the same matrix.
  */
 export const BASELINE_ARMS = { claude: 'B0', codex: 'C0' } as const;
 export type BenchArm = ArmId | 'B0' | 'C0';
-export const BENCH_ARMS: readonly BenchArm[] = ['A', 'B', 'C', 'B0', 'C0'];
+export const BENCH_ARMS: readonly BenchArm[] = ['A', 'B', 'C', 'D', 'B0', 'C0'];
 
 /**
  * The arm whose tool surface a bench arm uses (a baseline arm is its host's strict agent-code-mode arm).
@@ -35,7 +36,7 @@ export function hostArms(host: 'claude' | 'codex', withBaseline: boolean): Bench
 }
 
 export const ARM_LABELS: Readonly<Record<'claude' | 'codex', Readonly<Record<string, string>>>> = {
-  claude: { A: 'native tools', B: 'agent-code-mode (strict)', C: 'agent-code-mode hybrid (native + run, batching guidance)', B0: 'agent-code-mode baseline build (strict)' },
+  claude: { A: 'native tools', B: 'agent-code-mode (strict)', C: 'agent-code-mode hybrid (native + run, batching guidance)', D: 'Claude Code Code Mode (REPL, interactive)', B0: 'agent-code-mode baseline build (strict)' },
   codex: { A: 'native tools (direct)', B: 'Codex code mode', C: 'agent-code-mode (strict)', C0: 'agent-code-mode baseline build (strict)' },
 };
 
@@ -48,6 +49,9 @@ export const UsageSchema = z.object({
   cacheRead: z.number().nonnegative(),
   /** Reasoning tokens when the host reports them separately (already included in `output` on Codex). */
   reasoning: z.number().nonnegative().nullable(),
+  /** Cache writes split by TTL when the host reports the split; they sum to `cacheCreation`. */
+  cacheCreation5m: z.number().nonnegative().optional(),
+  cacheCreation1h: z.number().nonnegative().optional(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
@@ -84,7 +88,7 @@ export const RunRecordSchema = z.object({
   configHash: z.string().regex(/^[0-9a-f]{12}$/),
   config: z.record(z.string(), z.unknown()),
   host: z.enum(['claude', 'codex']),
-  arm: z.enum(['A', 'B', 'C', 'B0', 'C0']),
+  arm: z.enum(['A', 'B', 'C', 'D', 'B0', 'C0']),
   armLabel: z.string(),
   /** A warmup run: made before the matrix to warm the prompt cache, kept apart and out of every statistic. */
   warmup: z.boolean().default(false),
@@ -108,6 +112,11 @@ export const RunRecordSchema = z.object({
   valid: z.boolean(),
   invalidReasons: z.array(z.string()),
   files: z.record(z.string(), z.string()),
+  /**
+   * Interactive Claude runs: the session's own cost record, which also counts requests the transcript lacks
+   * (session title, side calls). `costUsd` covers the transcript's requests only, like a `-p` run.
+   */
+  hostSessionCostUsd: z.number().nonnegative().nullable().default(null),
 });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
@@ -125,6 +134,13 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
     if (calls.other > 0) reasons.push(`hybrid agent-code-mode arm made ${calls.other} call(s) to tools outside its surface`);
     return { fallback: false, reasons };
   }
+  if (host === 'claude' && arm === 'D') {
+    if (calls.codeMode === 0) reasons.push('Code Mode arm made no REPL call');
+    if (calls.run > 0) reasons.push('Code Mode arm made agent-code-mode run calls');
+    if (calls.native > 0) reasons.push(`Code Mode arm made ${calls.native} direct native file/shell tool call(s)`);
+    if (calls.other > 0) reasons.push(`Code Mode arm made ${calls.other} call(s) to tools outside its surface`);
+    return { fallback: false, reasons };
+  }
   const acm = (host === 'claude' && arm === 'B') || (host === 'codex' && arm === 'C');
   if (acm) {
     if (calls.run === 0) reasons.push('agent-code-mode arm made no run call');
@@ -137,7 +153,7 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
     if (calls.codeMode === 0 && total > 0) reasons.push('Codex code-mode arm made tool calls outside exec');
     if (calls.native > 0) reasons.push('Codex code-mode arm made direct native tool calls');
   } else if (calls.codeMode > 0) {
-    reasons.push('native arm used Codex code mode');
+    reasons.push(host === 'claude' ? 'native arm used Claude Code Mode' : 'native arm used Codex code mode');
   }
   return { fallback: false, reasons };
 }
@@ -147,7 +163,14 @@ export const CLAUDE_ARM_SURFACE: Readonly<Record<ArmId, readonly string[]>> = {
   A: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
   B: ['mcp__agent-code-mode__run'],
   C: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__agent-code-mode__run'],
+  // `REPL.<name>`: a tool a REPL script can call.
+  D: ['REPL', 'REPL.Bash', 'REPL.Read', 'REPL.Write', 'REPL.Edit', 'REPL.Glob', 'REPL.Grep'],
 };
+/**
+ * Tools every interactive session sends whatever `--tools` says (the `-p` init event lists none of them):
+ * the deferred-loading placeholder, the account's advisor, Code Mode's `Poll` and `EndConversation`.
+ */
+export const CLAUDE_INTERACTIVE_HARNESS_TOOLS = ['DeferredToolPlaceholder', 'advisor', 'Poll', 'EndConversation', 'REPL.EndConversation', 'REPL.Poll'];
 export const CODEX_COMMON_NON_FILE = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource', 'request_user_input'];
 const CODEX_FILE_SHELL = ['exec_command', 'write_stdin', 'apply_patch'];
 const CODEX_CODE_MODE = ['exec', 'wait'];
@@ -163,7 +186,7 @@ export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readon
   const reasons: string[] = [];
   if (host === 'claude') {
     const expected = CLAUDE_ARM_SURFACE[arm];
-    if (!sameSet(tools, expected)) reasons.push(`Claude arm ${arm} tools are [${[...tools].sort().join(', ')}], expected exactly [${[...expected].sort().join(', ')}]`);
+    if (!sameSet(tools.filter((t) => !CLAUDE_INTERACTIVE_HARNESS_TOOLS.includes(t)), expected)) reasons.push(`Claude arm ${arm} tools are [${[...tools].sort().join(', ')}], expected exactly [${[...expected].sort().join(', ')}]`);
     return reasons;
   }
   const apps = tools.filter((t) => t.includes('codex_apps'));

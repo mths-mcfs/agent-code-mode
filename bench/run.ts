@@ -1,13 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { generateFixture, treeHash, DEFAULT_FIXTURE_SEED } from './fixture/generate.ts';
-import { claudeArgs, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
+import { claudeArgs, CLAUDE_INNER_ALLOWED, claudeIsolationIssues, claudeMcpConfig, parseClaudeTranscript } from './lib/claude.ts';
+import { claudeInteractiveArgs, claudeSemver, interactiveEnv, parseClaudeInteractiveTranscript, seededClaudeJson, trimInteractiveTranscript, type InteractiveFacts } from './lib/claude-interactive.ts';
+import { driveInteractive, findSessionTranscript, INTERACTIVE_DRIVER, serverAlive, sweepStaleTmuxServers, tmuxVersion } from './lib/tmux.ts';
 import { catalogForArm, CODEX_FEATURES_OFF, EMPTY_MCP_SERVER, catalogHasModel, codexArgs, codexConfigToml, codexHooksJson, codexToolSurface, extractCodexRequests, parseCodexTranscript } from './lib/codex.ts';
 import { createCodexHome, installCleanupHandlers, removeCodexHome, sweepStaleHomes } from './lib/codex-home.ts';
 import { costFromUsage, loadPricing, type Pricing } from './lib/pricing.ts';
@@ -448,7 +450,18 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
   const arm = surfaceArm(p.arm);
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   let def: unknown;
-  if (p.host === 'claude') {
+  if (p.host === 'claude' && arm === 'D') {
+    def = {
+      driver: INTERACTIVE_DRIVER,
+      args: claudeInteractiveArgs({ model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, settingsFile: '<settings>', mcpConfigFile: '<mcp>', sessionId: '<session>' }),
+      env: interactiveEnv({}, '<config>'),
+      claudeJson: seededClaudeJson('<workspace>', claudeSemver(ctx.versions['claude'])),
+      maxTurns: ctx.opts.maxTurns,
+      settings: claudeProjectSettings(task, fixture),
+      mcp: claudeMcpConfig(arm, '<server>'),
+      isolation: claudeIsolationMethod(true),
+    };
+  } else if (p.host === 'claude') {
     def = {
       args: claudeArgs({ arm, model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, maxTurns: ctx.opts.maxTurns, settingsFile: '<settings>', mcpConfigFile: '<mcp>' }),
       settings: claudeProjectSettings(task, fixture, companionHookFor(ctx, p.host, p.arm, '<server>')),
@@ -506,6 +519,17 @@ interface HostOutput {
   readonly wallMs: number;
   readonly configs: Record<string, string>;
   readonly availableTools?: string[] | null;
+  /** Arm D: what the driver observed. */
+  readonly interactive?: InteractiveObserved;
+}
+
+interface InteractiveObserved {
+  readonly problem: string | null;
+  readonly stop: string;
+  readonly codeModeLine: string | null;
+  /** Plugin keys of the session's .claude.json (`pluginUsage`): the isolation proof `-p` reads from its init event. */
+  readonly plugins: readonly string[] | null;
+  readonly serverGone: boolean;
 }
 
 async function cannedTranscript(host: HostId, arm: ArmId): Promise<{ stdout: string; requests: string | null }> {
@@ -515,7 +539,95 @@ async function cannedTranscript(host: HostId, arm: ArmId): Promise<{ stdout: str
   return { stdout, requests };
 }
 
+const ClaudeJsonPlugins = z.object({ pluginUsage: z.record(z.string(), z.unknown()).optional() }).passthrough();
+
+/**
+ * Arm D: a temporary CLAUDE_CONFIG_DIR with a copy of the credentials file and a seeded .claude.json, the tmux
+ * driver, and the session transcript trimmed and copied out before the config dir is synced back and removed.
+ */
+async function runClaudeCodeMode(ctx: Context, p: PlannedRun, runWork: string, ws: string): Promise<HostOutput> {
+  const task = TASKS[p.task];
+  const fixture = generateFixture(ctx.opts.fixtureSeed);
+  const settingsFile = path.join(runWork, 'claude-settings.json');
+  const mcpConfigFile = path.join(runWork, 'mcp-config.json');
+  const settings = `${JSON.stringify(claudeProjectSettings(task, fixture), null, 2)}\n`;
+  const mcp = `${JSON.stringify(claudeMcpConfig('D', ''), null, 2)}\n`;
+  await writeFile(settingsFile, settings);
+  await writeFile(mcpConfigFile, mcp);
+  const sessionId = randomUUID();
+  const args = claudeInteractiveArgs({ model: ctx.opts.claudeModel, effort: ctx.opts.claudeEffort, settingsFile, mcpConfigFile, sessionId });
+  const configDir = path.join(runWork, 'claude-config');
+  const env = interactiveEnv(process.env, configDir);
+  const configs: Record<string, string> = {
+    'claude-settings.json': settings,
+    'mcp-config.json': mcp,
+    'command.txt': `env -i ${Object.keys(env).sort().join(' ')} claude ${args.join(' ')}\n# driven in tmux: ${INTERACTIVE_DRIVER}\n`,
+  };
+  if (ctx.opts.dryRun) return { ...(await cannedTranscript('claude', 'D')), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
+  if (!(await exists(path.join(sourceClaudeConfig(), '.credentials.json')))) throw new Error('arm D needs a Claude credentials file to copy into a temporary config dir');
+  const realWs = realpathSync(ws);
+  const claudeJson = `${JSON.stringify(seededClaudeJson(realWs, claudeSemver(ctx.versions['claude'])), null, 2)}\n`;
+  configs['claude-json-seed.json'] = claudeJson;
+  try {
+    createCodexHome(configDir, sourceClaudeConfig(), '.credentials.json');
+    await writeFile(path.join(configDir, '.claude.json'), claudeJson, { mode: 0o600 });
+    const outcome = await driveInteractive({
+      cwd: realWs,
+      command: ['claude', ...args],
+      env,
+      prompt: task.prompt(fixture.facts),
+      transcriptFile: () => findSessionTranscript(configDir, sessionId),
+      timeoutMs: ctx.opts.timeoutMin * 60_000,
+      maxTurns: ctx.opts.maxTurns,
+      scratchDir: runWork,
+    });
+    const file = findSessionTranscript(configDir, sessionId);
+    const stdout = file === null ? '' : trimInteractiveTranscript(await readFile(file, 'utf8'));
+    let plugins: string[] | null = null;
+    try {
+      const seen = ClaudeJsonPlugins.safeParse(JSON.parse(await readFile(path.join(configDir, '.claude.json'), 'utf8')));
+      if (seen.success) plugins = Object.keys(seen.data.pluginUsage ?? {});
+    } catch {
+    }
+    configs['screen.txt'] = outcome.screens;
+    configs['auth.txt'] = `.credentials.json: ${removeCodexHome(configDir)}\n`;
+    configs['isolation.txt'] = `${claudeIsolationMethod(true)}; env -i allowlist (${Object.keys(env).sort().join(', ')}), seeded .claude.json\n`;
+    const stderr = `stop: ${outcome.stop}\nready after: ${outcome.readyMs ?? '-'} ms\npermission prompts denied: ${outcome.permissionPrompts}\n${outcome.problem === null ? '' : `problem: ${outcome.problem}\n`}`;
+    const interactive: InteractiveObserved = { problem: outcome.problem, stop: outcome.stop, codeModeLine: outcome.codeModeLine, plugins, serverGone: !serverAlive(outcome.server) };
+    return { stdout, stderr, requests: null, exitCode: outcome.exitCode, timedOut: outcome.timedOut, wallMs: outcome.wallMs, configs, interactive };
+  } finally {
+    removeCodexHome(configDir);
+  }
+}
+
+/**
+ * Arm D's validity from what was observed, not from its configuration: Code Mode on screen and in the
+ * transcript, the requests' effort and permission mode, the inner calls staying on arm A's tools, and the
+ * tmux server gone. The dry run checks only what its canned transcript shows.
+ */
+export function codeModeReasons(opts: Pick<Options, 'dryRun' | 'claudeEffort'>, seen: InteractiveObserved | null, facts: InteractiveFacts | null): string[] {
+  const reasons: string[] = [];
+  if (!opts.dryRun) {
+    if (seen === null) return ['interactive session not observed'];
+    if (seen.problem !== null) reasons.push(seen.problem);
+    if (seen.stop === 'max-turns') reasons.push('host error: error_max_turns');
+    if (seen.codeModeLine === null) reasons.push('Code Mode on was not seen on screen');
+    if (seen.plugins === null) reasons.push('session .claude.json not readable: plugins not observed');
+    if (!seen.serverGone) reasons.push('the tmux server was still running after the run');
+  }
+  if (facts !== null) {
+    if (!facts.replMode) reasons.push('the transcript does not record Code Mode (repl-mode)');
+    if (!opts.dryRun && (facts.efforts.length !== 1 || facts.efforts[0] !== opts.claudeEffort)) reasons.push(`requests ran with effort [${facts.efforts.join(', ')}], expected ${opts.claudeEffort}`);
+    const modes = facts.permissionModes.filter((m) => m !== 'default');
+    if (modes.length > 0) reasons.push(`permission mode ${modes.join(', ')} recorded, expected default`);
+    const outside = Object.keys(facts.innerByTool).filter((t) => !CLAUDE_INNER_ALLOWED.includes(t));
+    if (outside.length > 0) reasons.push(`REPL scripts called tools outside the arm A tools: ${outside.join(', ')}`);
+  }
+  return reasons;
+}
+
 async function runClaude(ctx: Context, p: PlannedRun, runWork: string, ws: string): Promise<HostOutput> {
+  if (p.arm === 'D') return runClaudeCodeMode(ctx, p, runWork, ws);
   const task = TASKS[p.task];
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   const settingsFile = path.join(runWork, 'claude-settings.json');
@@ -611,10 +723,17 @@ async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promi
 
   const output = p.host === 'claude' ? await runClaude(ctx, p, runWork, ws) : await runCodex(ctx, p, runWork, ws);
 
+  const codeMode = p.host === 'claude' && p.arm === 'D';
   let parsed: ParsedRun | null = null;
+  let facts: InteractiveFacts | null = null;
   let parseError: string | null = null;
   try {
-    parsed = p.host === 'claude' ? parseClaudeTranscript(output.stdout) : parseCodexTranscript(output.stdout, output.requests);
+    if (codeMode) {
+      const r = parseClaudeInteractiveTranscript(output.stdout);
+      facts = r.facts;
+      const plugins = output.interactive?.plugins;
+      parsed = { ...r.parsed, hostContext: r.parsed.hostContext === null ? null : { ...r.parsed.hostContext, plugins: [...(plugins ?? [])] } };
+    } else parsed = p.host === 'claude' ? parseClaudeTranscript(output.stdout) : parseCodexTranscript(output.stdout, output.requests);
     if (parsed.availableTools === null && output.availableTools) parsed = { ...parsed, availableTools: output.availableTools };
   } catch (err) {
     parseError = err instanceof Error ? err.message : String(err);
@@ -651,15 +770,19 @@ async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promi
     fallback = arm.fallback;
     invalidReasons.push(...arm.reasons);
   }
+  if (codeMode) invalidReasons.push(...codeModeReasons(ctx.opts, output.interactive ?? null, facts));
 
   const config = runConfig(ctx, p);
   const hash = configHash(config);
   const outDir = p.warmup === true ? warmupResultDir(ctx.resultsDir, ctx.invocation, p, hash) : runResultDir(ctx.resultsDir, p, hash);
   await mkdir(outDir, { recursive: true });
+  // Arm D's session runs in the resolved workspace path, so its transcript names that form.
   const sctx: SanitizeContext = defaultSanitizeContext([
     { path: ws, label: '<workspace>' },
+    { path: realish(ws), label: '<workspace>' },
     { path: path.join(runWork, 'codex-home'), label: '<codex-home>' },
     { path: runWork, label: '<run>' },
+    { path: realish(runWork), label: '<run>' },
     ...(ctx.baseline === null ? [] : [{ path: path.dirname(ctx.baseline.entry), label: '<baseline>' }]),
     { path: REPO_ROOT, label: '<repo>' },
     { path: process.execPath, label: 'node' },
@@ -705,6 +828,7 @@ async function executeRunIn(ctx: Context, p: PlannedRun, runWork: string): Promi
     valid: invalidReasons.length === 0,
     invalidReasons: invalidReasons.map((r) => sanitize(r, sctx)),
     files,
+    hostSessionCostUsd: facts?.sessionCost?.totalUsd ?? null,
   });
   await markRunDone(outDir, record);
   return record;
@@ -844,6 +968,16 @@ export async function main(argv: readonly string[]): Promise<number> {
       return 2;
     }
   }
+  const codeModeArm = plan.some((p) => p.host === 'claude' && p.arm === 'D');
+  let tmux: string | null = null;
+  if (codeModeArm && !opts.dryRun) {
+    tmux = tmuxVersion();
+    if (tmux === null) {
+      process.stderr.write('arm D (Claude Code Mode) needs tmux on PATH\n');
+      return 2;
+    }
+    for (const stale of sweepStaleTmuxServers()) process.stderr.write(`killed a tmux server left by an interrupted run: ${stale}\n`);
+  }
   for (const h of hosts) {
     if (!opts.dryRun && versions[h] === null) {
       process.stderr.write(`${h} CLI not found on PATH\n`);
@@ -871,7 +1005,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       hosts.map((h) => [
         h,
         h === 'claude'
-          ? { version: versions['claude'], model: opts.claudeModel, effort: opts.claudeEffort, maxTurns: opts.maxTurns, isolation: claudeIsolationMethod(claudeCredentials) }
+          ? { version: versions['claude'], model: opts.claudeModel, effort: opts.claudeEffort, maxTurns: opts.maxTurns, isolation: claudeIsolationMethod(claudeCredentials), ...(codeModeArm ? { interactiveDriver: INTERACTIVE_DRIVER, tmux } : {}) }
           : { version: versions['codex'], model: opts.codexModel, effort: opts.codexEffort, maxTurns: null, catalogSha256: rawCatalog === null ? null : sha256(rawCatalog) },
       ]),
     ),

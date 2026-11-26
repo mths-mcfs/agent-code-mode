@@ -31,11 +31,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Install the Linux sandbox dependencies
+      - name: Install the Linux sandbox and bench dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap socat ripgrep
+          sudo apt-get install -y bubblewrap socat ripgrep tmux
           # Ubuntu's AppArmor restricts the unprivileged user namespaces Bubblewrap needs, and its
           # bwrap-userns-restrict profile drops the capabilities the nested seccomp namespace needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

@@ -16,8 +16,10 @@ describe('Claude transcript parser', () => {
     expect(p.turns).toBe(2);
     expect(p.requests).toBe(2);
     expect(p.hostDurationMs).toBe(2414);
-    expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0 });
+    expect(p.usage).toEqual({ input: 4, output: 171, cacheCreation: 2187, cacheRead: 12187, reasoning: 0, cacheCreation5m: 0, cacheCreation1h: 2187 });
     expect(p.hostCostUsd).toBeCloseTo(0.0116847, 10);
+    // pricing.json with the TTL split reproduces the host's cost: the formula arm D's cost relies on.
+    expect(p.usage === null ? null : costFromUsage(loadPricing(), 'claude-sonnet-5-5', p.usage)).toBeCloseTo(0.0116847, 10);
     expect(p.model).toBe('claude-sonnet-5-5');
     expect(p.finalAnswer).toMatch(/ANSWER: 7$/);
     expect(p.toolCalls).toEqual({ native: 1, run: 0, codeMode: 0, other: 0, byName: { Read: 1 } });

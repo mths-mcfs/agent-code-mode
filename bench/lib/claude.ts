@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
+import type { ArmId, ParsedRun, ToolCalls, Usage } from './record.ts';
 import { runInnerCalls } from './run-result.ts';
 
 export const CLAUDE_NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
@@ -45,18 +45,35 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
 }
 
 export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
-  if (arm === 'A') return { mcpServers: {} };
+  if (arm === 'A' || arm === 'D') return { mcpServers: {} };
   const args = [serverEntry, 'serve', '--host', 'claude', ...(arm === 'C' ? ['--hybrid'] : [])];
   return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args } } };
 }
 
-const UsageEvent = z.object({
+export const ClaudeUsageEvent = z.object({
   input_tokens: z.number(),
   output_tokens: z.number(),
   cache_creation_input_tokens: z.number().optional(),
   cache_read_input_tokens: z.number().optional(),
-  output_tokens_details: z.object({ thinking_tokens: z.number().optional() }).passthrough().optional(),
+  output_tokens_details: z.object({ thinking_tokens: z.number().optional() }).passthrough().nullable().optional(),
+  cache_creation: z.object({ ephemeral_5m_input_tokens: z.number().nonnegative(), ephemeral_1h_input_tokens: z.number().nonnegative() }).passthrough().nullable().optional(),
 }).passthrough();
+export type ClaudeUsageEvent = z.infer<typeof ClaudeUsageEvent>;
+
+export function claudeUsage(u: ClaudeUsageEvent): Usage {
+  const usage: Usage = {
+    input: u.input_tokens,
+    output: u.output_tokens,
+    cacheCreation: u.cache_creation_input_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    reasoning: u.output_tokens_details?.thinking_tokens ?? null,
+  };
+  if (u.cache_creation != null) {
+    usage.cacheCreation5m = u.cache_creation.ephemeral_5m_input_tokens;
+    usage.cacheCreation1h = u.cache_creation.ephemeral_1h_input_tokens;
+  }
+  return usage;
+}
 
 const ResultEvent = z.object({
   type: z.literal('result'),
@@ -66,7 +83,7 @@ const ResultEvent = z.object({
   duration_ms: z.number(),
   total_cost_usd: z.number(),
   result: z.string().optional(),
-  usage: UsageEvent,
+  usage: ClaudeUsageEvent,
   modelUsage: z.record(z.string(), z.unknown()).optional(),
 }).passthrough();
 
@@ -206,13 +223,7 @@ export function parseClaudeTranscript(text: string): ParsedRun {
     turns: r.num_turns,
     requests: requestIds.size === 0 ? null : requestIds.size,
     hostDurationMs: r.duration_ms,
-    usage: {
-      input: r.usage.input_tokens,
-      output: r.usage.output_tokens,
-      cacheCreation: r.usage.cache_creation_input_tokens ?? 0,
-      cacheRead: r.usage.cache_read_input_tokens ?? 0,
-      reasoning: r.usage.output_tokens_details?.thinking_tokens ?? null,
-    },
+    usage: claudeUsage(r.usage),
     hostCostUsd: r.total_cost_usd,
     model: model ?? (r.modelUsage ? (Object.keys(r.modelUsage)[0] ?? null) : null),
     finalAnswer: r.result ?? '',

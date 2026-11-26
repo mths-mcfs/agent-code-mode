@@ -41,6 +41,14 @@ describe('exit code', () => {
     expect(r.errors).toMatch(/claude-T1-A-r1: dry run failed verification/);
   }, 120_000);
 
+  it('is 1 when a reference answer is off by one on arm D (Claude Code Mode)', async () => {
+    const solve = TASKS.T1.solution;
+    vi.spyOn(TASKS.T1, 'solution').mockImplementation(async (ws, facts) => (await solve(ws, facts)).replace(`ANSWER: ${facts.retryLimit}`, `ANSWER: ${facts.retryLimit + 1}`));
+    const r = await quiet(() => main(args.map((a) => (a === 'A' ? 'D' : a))));
+    expect(r.value).toBe(1);
+    expect(r.errors).toMatch(/claude-T1-D-r1: dry run failed verification/);
+  }, 120_000);
+
   it('is 1 when a planned run leaves no record', async () => {
     vi.spyOn(TASKS.T1, 'solution').mockRejectedValue(new Error('solution crashed'));
     const r = await quiet(() => main(args));
