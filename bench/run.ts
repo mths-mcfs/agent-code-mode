@@ -20,11 +20,6 @@ import { writeReport } from './report.ts';
 import { TASKS } from './tasks/index.ts';
 import { TASK_IDS, type TaskId } from './tasks/types.ts';
 
-/**
- * Benchmark runner: `npm run bench -- --host claude --arms A,B --tasks T1,T5 --runs 3`.
- * Resumable (a run whose record.json exists is skipped), `--dry-run` uses reference solutions and
- * canned transcripts instead of model calls.
- */
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const BENCH_DIR = import.meta.dirname;
@@ -111,7 +106,6 @@ export interface PlannedRun {
   readonly orderIndex: number;
 }
 
-/** Runs per round in a seeded random order: every host × task × arm once per round, interleaved. */
 export function planRuns(hosts: readonly HostId[], tasks: readonly TaskId[], arms: readonly ArmId[] | undefined, runs: number, seed: number): PlannedRun[] {
   const combos: { host: HostId; task: TaskId; arm: ArmId }[] = [];
   for (const host of hosts) {
@@ -129,7 +123,6 @@ export function runId(p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>): str
   return `${p.host}-${p.task}-${p.arm}-r${p.run}`;
 }
 
-/** Results of a run live under its config hash, so a run made with other settings is never taken for this one. */
 export function runResultDir(resultsDir: string, p: Pick<PlannedRun, 'host' | 'task' | 'arm' | 'run'>, configHash: string): string {
   return path.join(resultsDir, p.host, p.task, p.arm, configHash, String(p.run));
 }
@@ -151,7 +144,6 @@ function tryExec(cmd: string, args: readonly string[], cwd?: string): string | n
   }
 }
 
-/** Environment passed to a host: enough to run and authenticate, nothing from the calling agent session. */
 function hostEnv(extra: Record<string, string>): Record<string, string | undefined> {
   const keep = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY'];
   const env: Record<string, string | undefined> = {};
@@ -175,7 +167,6 @@ async function findFiles(dir: string, suffix: string): Promise<string[]> {
   return out.sort();
 }
 
-/** The user's Claude config dir (`$CLAUDE_CONFIG_DIR` when absolute, else `~/.claude`). */
 function sourceClaudeConfig(): string {
   const env = process.env['CLAUDE_CONFIG_DIR'];
   return env !== undefined && env !== '' && path.isAbsolute(env) ? env : path.join(os.homedir(), '.claude');
@@ -212,7 +203,6 @@ export interface Context {
   readonly pricing: Pricing;
   readonly serverEntry: string;
   readonly rawCatalog: string | null;
-  /** Order seed of this invocation. */
   readonly seed: number;
   readonly versions: Readonly<Record<string, string | null>>;
   readonly git: { readonly commit: string | null; readonly dirty: boolean | null };
@@ -234,7 +224,6 @@ function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-/** What the host is actually given for an arm (args, settings, config), with machine paths replaced by placeholders. */
 function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'>): string {
   const task = TASKS[p.task];
   const fixture = generateFixture(ctx.opts.fixtureSeed);
@@ -258,7 +247,6 @@ function armDefinition(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'
   return stableJson(def).split(REPO_ROOT).join('<repo>').split(JSON.stringify(process.execPath).slice(1, -1)).join('node');
 }
 
-/** Everything a run's numbers depend on. Two runs are comparable only when this is equal. */
 export function runConfig(ctx: Context, p: Pick<PlannedRun, 'host' | 'task' | 'arm'>): Record<string, unknown> {
   const fixture = generateFixture(ctx.opts.fixtureSeed);
   return {
@@ -292,9 +280,7 @@ interface HostOutput {
   readonly exitCode: number | null;
   readonly timedOut: boolean;
   readonly wallMs: number;
-  /** Config files to keep with the transcript (sanitized). */
   readonly configs: Record<string, string>;
-  /** Codex: model-visible tools from `codex debug prompt-input` with the run's config. */
   readonly availableTools?: string[] | null;
 }
 
@@ -342,7 +328,6 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
   const codexHome = path.join(runWork, 'codex-home');
   await mkdir(codexHome, { recursive: true, mode: 0o700 });
   try {
-    // The auth link is placed last, right before the host runs, and the home is registered for cleanup.
     const catalog = ctx.rawCatalog === null ? null : catalogForArm(p.arm, ctx.rawCatalog);
     const catalogFile = catalog === null ? null : path.join(codexHome, 'catalog.json');
     if (catalogFile !== null && catalog !== null) await writeFile(catalogFile, catalog);
@@ -369,16 +354,13 @@ async function runCodex(ctx: Context, p: PlannedRun, runWork: string, ws: string
     const rollouts = await findFiles(path.join(codexHome, 'sessions'), '.jsonl');
     let requests = '';
     for (const r of rollouts) requests += extractCodexRequests(await readFile(r, 'utf8'));
-    // Sync a refreshed token back to the real auth file (if it is still the copied version) and delete the home now.
     configs['auth.txt'] = `auth.json: ${removeCodexHome(codexHome)}\n`;
     return { stdout: await readFile(stdoutFile, 'utf8'), stderr: await readFile(stderrFile, 'utf8'), requests: rollouts.length > 0 ? requests : null, ...outcome, configs, availableTools };
   } finally {
-    // Signal handlers and the startup sweep cover the cases where this never runs.
     removeCodexHome(codexHome);
   }
 }
 
-/** Runs (or dry-runs) one planned run and writes its sanitized artifacts and record. */
 export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord> {
   const task = TASKS[p.task];
   const id = runId(p);
@@ -484,7 +466,6 @@ export async function executeRun(ctx: Context, p: PlannedRun): Promise<RunRecord
     invalidReasons,
     files,
   });
-  // record.json last: its presence marks the run as done (resume skips it).
   await writeFile(path.join(outDir, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
   return record;
 }
@@ -495,7 +476,6 @@ function gitInfo(): { commit: string | null; dirty: boolean | null } {
   return { commit, dirty: status === null ? null : status !== '' };
 }
 
-/** Platform, arch and kernel major.minor only: the full release string can name the distro or build. */
 export function osLabel(platform: string = os.platform(), release: string = os.release(), arch: string = os.arch()): string {
   const m = /^(\d+)\.(\d+)/.exec(release);
   return `${platform} ${m ? `${m[1]}.${m[2]}` : 'unknown'} ${arch}`;
@@ -510,10 +490,6 @@ async function lastSeed(resultsDir: string): Promise<number | undefined> {
   }
 }
 
-/**
- * Adds to this invocation's environment block the tool surface each host/arm was observed with (Claude
- * init event, Codex prompt-input) next to the surface the arm-integrity check requires.
- */
 async function recordSurfaces(resultsDir: string, observed: Record<string, string[]>): Promise<void> {
   const file = path.join(resultsDir, 'env.json');
   const parsed = z.object({ invocations: z.array(z.record(z.string(), z.unknown())).min(1) }).passthrough().safeParse(JSON.parse(await readFile(file, 'utf8')));
@@ -534,7 +510,6 @@ async function appendEnvironment(resultsDir: string, invocation: Record<string, 
     const parsed = z.object({ invocations: z.array(z.unknown()) }).safeParse(JSON.parse(await readFile(file, 'utf8')));
     if (parsed.success) invocations = parsed.data.invocations;
   } catch {
-    // first invocation for this date
   }
   const sctx = defaultSanitizeContext([{ path: REPO_ROOT, label: '<repo>' }]);
   await writeFile(file, sanitize(`${JSON.stringify({ invocations: [...invocations, invocation] }, null, 2)}\n`, sctx));
@@ -563,9 +538,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   for (const stale of sweepStaleHomes(workDir)) process.stderr.write(`removed a temp CODEX_HOME left by an interrupted run: ${path.relative(workDir, stale)}\n`);
   const resultsRoot = opts.out !== undefined ? path.resolve(opts.out) : opts.dryRun ? path.join(workDir, 'dry-run', 'results') : path.join(BENCH_DIR, 'results');
   const resultsDir = path.join(resultsRoot, date);
-  // A dry run always starts clean (its results are throwaway, under the work dir).
   if (opts.dryRun && opts.out === undefined) await rm(resultsDir, { recursive: true, force: true });
-  // Without --seed, a resume reuses the seed of the last invocation for this date (it is part of the config hash).
   const seed = opts.seed ?? (await lastSeed(resultsDir)) ?? Math.floor(Math.random() * 2 ** 31);
   const hosts: HostId[] = opts.host === 'all' ? ['claude', 'codex'] : [opts.host];
   const tasks: TaskId[] = opts.tasks ?? [...TASK_IDS];
@@ -669,11 +642,6 @@ export async function main(argv: readonly string[]): Promise<number> {
   return problems.length === 0 ? 0 : 1;
 }
 
-/**
- * What keeps the plan from being complete: a planned run with no record (a harness error or a crash).
- * In a dry run, which replays reference solutions and recorded transcripts, a failed or invalid run is
- * a harness defect too; in a real run it is a result.
- */
 async function planProblems(ctx: Context, plan: readonly PlannedRun[]): Promise<string[]> {
   const problems: string[] = [];
   for (const p of plan) {

@@ -15,7 +15,6 @@ function parse(text: string | undefined): unknown {
   }
 }
 
-/** True when `text` is exactly `value` printed with 2-space indentation (one trailing newline allowed). Key order is free. */
 export function isTwoSpaceJson(text: string, value: unknown): boolean {
   const body = text.endsWith('\n') ? text.slice(0, -1) : text;
   return body === JSON.stringify(value, null, 2);

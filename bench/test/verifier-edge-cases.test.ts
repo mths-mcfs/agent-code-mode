@@ -1,4 +1,3 @@
-// The verifier edge cases. The verifier cases are split across files so that Vitest runs them in parallel processes.
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';

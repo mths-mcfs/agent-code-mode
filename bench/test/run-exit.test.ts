@@ -1,4 +1,3 @@
-// The exit code of main() over a dry-run plan, apart from run.test.ts so that Vitest runs them in their own process.
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';

@@ -12,7 +12,6 @@ import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
  * - MCP tools are listed behind `tool_search`; a tool is approved with `mcp_servers.<server>.tools.<tool>.approval_mode`.
  */
 
-/** Model-visible native tool names in direct mode. */
 export const CODEX_NATIVE_TOOLS = ['exec_command', 'write_stdin', 'apply_patch', 'shell', 'local_shell', 'container.exec'];
 export const CODEX_CODE_MODE_TOOLS = ['exec', 'wait'];
 export const CODEX_SERVER_NAME = 'agent-code-mode';
@@ -22,15 +21,12 @@ export interface CodexHomeOptions {
   readonly model: string;
   readonly effort: string;
   readonly codexHome: string;
-  /** Path of the catalog override file (arms A and C). */
   readonly catalogFile: string | null;
   readonly serverEntry: string;
   readonly nodePath: string;
-  /** The empty MCP server (bench/lib/empty-mcp-server.mjs), configured in arms A and B. */
   readonly emptyServerEntry: string;
 }
 
-/** Path of the empty MCP server shipped with the bench. */
 export const EMPTY_MCP_SERVER = new URL('./empty-mcp-server.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 
 /**
@@ -40,14 +36,12 @@ export const EMPTY_MCP_SERVER = new URL('./empty-mcp-server.mjs', import.meta.ur
  */
 export const CODEX_FEATURES_OFF = ['apps', 'view_image', 'image_generation', 'goals', 'multi_agent', 'sleep_tool'];
 
-/** `tool_timeout_sec` of the installed server block (`INSTALL_CODEX_TOOL_TIMEOUT_SEC` in src/install.ts). */
 export const CODEX_TOOL_TIMEOUT_SEC = 300;
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-/** `config.toml` for the temporary CODEX_HOME of one run. */
 export function codexConfigToml(o: CodexHomeOptions): string {
   const top = [
     `model = ${tomlString(o.model)}`,
@@ -61,7 +55,6 @@ export function codexConfigToml(o: CodexHomeOptions): string {
   const features = ['hooks = true', ...CODEX_FEATURES_OFF.map((f) => `${f} = false`)];
   if (o.arm === 'B') features.push('code_mode = true');
   if (o.arm === 'C') features.push('shell_tool = false');
-  // Each table is built whole, so no key can land in the wrong table.
   const tables: [string, string[]][] = [
     ['features', features],
     // Multi-agent tools (spawn_agent, followup_task, ...): `features.multi_agent` does not remove them;
@@ -70,7 +63,6 @@ export function codexConfigToml(o: CodexHomeOptions): string {
   ];
   if (o.arm === 'C') {
     tables.push(
-      // The server block `install --host codex` writes, with the local server and this run's CODEX_HOME.
       [`mcp_servers.${CODEX_SERVER_NAME}`, [`command = ${tomlString(o.nodePath)}`, `args = [${[o.serverEntry, 'serve', '--host', 'codex'].map(tomlString).join(', ')}]`, `tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}`]],
       [`mcp_servers.${CODEX_SERVER_NAME}.env`, [`CODEX_HOME = ${tomlString(o.codexHome)}`]],
       [`mcp_servers.${CODEX_SERVER_NAME}.tools.run`, ['approval_mode = "approve"']],
@@ -84,11 +76,6 @@ export function codexConfigToml(o: CodexHomeOptions): string {
 
 const CatalogSchema = z.object({ models: z.array(z.object({ slug: z.string() }).passthrough()) }).passthrough();
 
-/**
- * The catalog override for an arm, from the raw `codex debug models` output. Every arm drops the
- * model's experimental extra tools (`clock`, `send_user_message_async`) and `supports_search_tool`;
- * A and C switch to direct tools (B keeps the shipped `code_mode_only`); C also drops apply_patch.
- */
 export function catalogForArm(arm: ArmId, rawCatalog: string): string {
   const catalog = CatalogSchema.parse(JSON.parse(rawCatalog));
   // Arm C also turns off `supports_search_tool`: with it, Codex 0.169 defers MCP tools behind
@@ -109,17 +96,14 @@ export function catalogHasModel(rawCatalog: string, model: string): boolean {
   return CatalogSchema.parse(JSON.parse(rawCatalog)).models.some((m) => m.slug === model);
 }
 
-/** `hooks.json` for the temporary CODEX_HOME when a task installs the protect-file hook. */
 export function codexHooksJson(matcher: string, command: string): string {
   return `${JSON.stringify({ hooks: { PreToolUse: [{ matcher, hooks: [{ type: 'command', command, timeout: 30 }] }] } }, null, 2)}\n`;
 }
 
-/** Arguments for `codex`; the prompt goes on stdin (`-`). */
 export function codexArgs(workspace: string, withHooks: boolean): string[] {
   return ['exec', '--json', '-C', workspace, ...(withHooks ? ['--dangerously-bypass-hook-trust'] : []), '-'];
 }
 
-// --- Rollout extraction ------------------------------------------------------------------------
 
 const RolloutLine = z.object({ type: z.string(), payload: z.unknown() }).passthrough();
 const TokenRecord = z.object({
@@ -129,7 +113,6 @@ const OutputItem = z.object({
   type: z.enum(['function_call_output', 'custom_tool_call_output']),
   output: z.union([z.string(), z.array(z.object({ text: z.string().optional() }).passthrough())]),
 }).passthrough();
-/** Tool output of a blocked call: a PreToolUse hook or policy denial. */
 const CODEX_DENIAL = /blocked by PreToolUse hook|denied|forbidden by|not allowed/i;
 
 const CallItem = z.object({
@@ -140,11 +123,6 @@ const CallItem = z.object({
   input: z.string().optional(),
 }).passthrough();
 
-/**
- * Keeps only what the bench needs from a Codex rollout file (which also holds account ids and the
- * full prompt): one `request` line per model response with its usage, one `call` line per tool call
- * the model made, and one `denial` line per tool output that reports a blocked call, in order.
- */
 export function extractCodexRequests(rollout: string): string {
   const out: string[] = [];
   for (const line of rollout.split('\n')) {
@@ -176,7 +154,6 @@ export function extractCodexRequests(rollout: string): string {
   return out.length > 0 ? `${out.join('\n')}\n` : '';
 }
 
-// --- Transcript parsing ------------------------------------------------------------------------
 
 const TurnCompleted = z.object({
   type: z.literal('turn.completed'),
@@ -364,7 +341,6 @@ export function parseCodexTranscript(json: string, requests: string | null): Par
 const PromptItem = z.object({ type: z.string(), tools: z.array(z.unknown()).optional() }).passthrough();
 const ToolEntry = z.object({ type: z.string(), name: z.string().optional(), tools: z.array(z.unknown()).optional() }).passthrough();
 
-/** Model-visible tool names (namespace.name) from `codex debug prompt-input` output. */
 export function codexToolSurface(promptInput: string): string[] {
   const items = z.array(PromptItem).parse(JSON.parse(promptInput));
   const names: string[] = [];

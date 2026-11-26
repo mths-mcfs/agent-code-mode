@@ -1,4 +1,3 @@
-/** Small deterministic PRNG (mulberry32). Same seed, same sequence, on every platform. */
 export class Rng {
   private state: number;
 
@@ -6,7 +5,6 @@ export class Rng {
     this.state = seed >>> 0;
   }
 
-  /** Float in [0, 1). */
   next(): number {
     this.state = (this.state + 0x6d2b79f5) >>> 0;
     let t = this.state;
@@ -15,7 +13,6 @@ export class Rng {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
-  /** Integer in [min, max], both inclusive. */
   int(min: number, max: number): number {
     return min + Math.floor(this.next() * (max - min + 1));
   }
@@ -26,7 +23,6 @@ export class Rng {
     return item;
   }
 
-  /** Fisher-Yates shuffle into a new array. */
   shuffle<T>(items: readonly T[]): T[] {
     const out = [...items];
     for (let i = out.length - 1; i > 0; i--) {

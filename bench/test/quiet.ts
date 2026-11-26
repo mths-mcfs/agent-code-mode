@@ -1,4 +1,3 @@
-/** Runs `fn` with stdout and stderr captured; returns its value and what it wrote to each. */
 export async function quiet<T>(fn: () => Promise<T>): Promise<{ value: T; text: string; errors: string }> {
   const out: string[] = [];
   const err: string[] = [];

@@ -1,7 +1,6 @@
 import { answerBlock, checkScope, Checks } from '../checks.ts';
 import type { VerifyContext, VerifyResult } from '../types.ts';
 
-/** The first three distinct customer names, in the order they appear in the answer. */
 export function namedCustomers(text: string, customers: readonly string[]): string[] {
   const lower = text.toLowerCase();
   const hits: { name: string; at: number }[] = [];

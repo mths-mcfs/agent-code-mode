@@ -23,7 +23,6 @@ const live = new Set<string>();
 const MarkerSchema = z.object({
   pid: z.number().int(),
   source: z.string().min(1),
-  /** Name of the credentials file inside the home (`auth.json` for Codex, `.credentials.json` for Claude). */
   file: z.string().min(1).default('auth.json'),
   copiedSha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
@@ -52,7 +51,6 @@ function readMarker(dir: string): Marker | null {
   }
 }
 
-/** Writes `data` to `file` atomically: a 0600 temp file in the same directory, then rename over it. */
 export function atomicWrite(file: string, data: Buffer): void {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.bench-${process.pid}-${randomBytes(4).toString('hex')}`);
   writeFileSync(tmp, data, { mode: 0o600, flag: 'wx' });
@@ -65,23 +63,17 @@ export function atomicWrite(file: string, data: Buffer): void {
   }
 }
 
-/**
- * Creates a temp home holding a 0600 copy of `<sourceHome>/<file>` and the marker used by `syncBack`.
- * Used for Codex (`CODEX_HOME`, `auth.json`) and Claude (`CLAUDE_CONFIG_DIR`, `.credentials.json`).
- */
 export function createCodexHome(dir: string, sourceHome: string, file = 'auth.json'): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const source = path.resolve(sourceHome, file);
   const bytes = readFileSync(source);
   const marker: Marker = { pid: process.pid, source, file, copiedSha256: sha256(bytes) };
-  // Marker first, so any copy on disk can be synced back and cleaned by the sweep.
   writeFileSync(path.join(dir, HOME_MARKER), `${JSON.stringify(marker)}\n`, { mode: 0o600 });
   live.add(dir);
   writeFileSync(path.join(dir, file), bytes, { mode: 0o600 });
   if (process.platform !== 'win32') chmodSync(path.join(dir, file), 0o600);
 }
 
-/** Applies the write-back rule for one home (see the module comment). Never deletes anything. */
 export function syncBack(dir: string, warn: (message: string) => void = (m) => process.stderr.write(`${m}\n`)): SyncOutcome {
   const marker = readMarker(dir);
   if (marker === null) return 'no-auth';
@@ -97,7 +89,6 @@ export function syncBack(dir: string, warn: (message: string) => void = (m) => p
   return 'conflict-kept-real';
 }
 
-/** Syncs the auth file back if needed, then deletes the home. */
 export function removeCodexHome(dir: string): SyncOutcome {
   let outcome: SyncOutcome = 'no-auth';
   try {
@@ -139,10 +130,6 @@ function markerPid(dir: string): number {
   }
 }
 
-/**
- * Removes temp homes under `root` whose owning harness process is gone, applying the write-back rule
- * first. Returns the removed paths.
- */
 export function sweepStaleHomes(root: string, maxDepth = 6): string[] {
   const removed: string[] = [];
   const walk = (dir: string, depth: number): void => {
@@ -169,7 +156,6 @@ export function sweepStaleHomes(root: string, maxDepth = 6): string[] {
 
 let installed = false;
 
-/** On SIGINT/SIGTERM/SIGHUP: kill running hosts, sync back and remove every temp home, then die by the same signal. */
 export function installCleanupHandlers(): void {
   if (installed) return;
   installed = true;

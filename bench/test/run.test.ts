@@ -34,10 +34,8 @@ describe('host commands', () => {
     const a = claudeArgs({ arm: 'A', model: 'm', effort: 'low', maxTurns: 5, settingsFile: 's.json', mcpConfigFile: 'm.json' });
     expect(a).toEqual(expect.arrayContaining(['--setting-sources', 'project', '--strict-mcp-config', '--no-session-persistence']));
     const b = claudeArgs({ arm: 'B', model: 'm', effort: 'low', maxTurns: 5, settingsFile: 's.json', mcpConfigFile: 'm.json' });
-    // Native tools removed with --tools "" (not denied: a CLI deny would also deny them inside run).
     expect(b).not.toContain('--disallowedTools');
     expect(b.slice(b.indexOf('--tools'))).toEqual(['--tools', '', '--allowedTools', 'mcp__agent-code-mode__run,Bash,Read,Write,Edit,Glob,Grep']);
-    // Arm A: exactly the native file/shell tools, nothing else built in.
     expect(a.slice(a.indexOf('--tools'))).toEqual(['--tools', 'Bash,Read,Write,Edit,Glob,Grep', '--allowedTools', 'Bash,Read,Write,Edit,Glob,Grep']);
     expect(claudeMcpConfig('A', 'x')).toEqual({ mcpServers: {} });
   });
@@ -51,7 +49,6 @@ describe('host commands', () => {
       for (const f of ['apps', 'view_image', 'image_generation', 'goals', 'multi_agent', 'sleep_tool']) expect(toml).toContain(`\n${f} = false`);
       expect(toml).toContain('[agents]\nenabled = false');
       expect(toml).toContain('web_search = "disabled"');
-      // Feature keys sit in [features], not in a later table.
       const features = toml.slice(toml.indexOf('[features]'), toml.indexOf('\n[', toml.indexOf('[features]') + 1));
       if (arm === 'C') expect(features).toContain('shell_tool = false');
       if (arm === 'B') expect(features).toContain('code_mode = true');

@@ -8,7 +8,6 @@ import { claudeProjectSettings, companionHookCommand } from '../lib/workspace.ts
 import { generateFixture } from '../fixture/generate.ts';
 import { TASKS } from '../tasks/index.ts';
 
-// The local entry `install --local` registers, so both sides name the same server file.
 const entry = cliArgv(true)[1] ?? '';
 const ServerTable = z.looseObject({ 'agent-code-mode': z.looseObject({ command: z.string(), args: z.array(z.string()) }) });
 

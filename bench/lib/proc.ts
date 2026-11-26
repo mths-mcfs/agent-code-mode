@@ -7,7 +7,6 @@ export interface ProcessSpec {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs: number;
-  /** stdout is streamed into this file. */
   readonly stdoutFile: string;
   readonly stderrFile: string;
   readonly stdin?: string;
@@ -17,7 +16,6 @@ export interface ProcessOutcome {
   readonly exitCode: number | null;
   readonly signal: string | null;
   readonly timedOut: boolean;
-  /** Wall time measured by the harness, from spawn to exit. */
   readonly wallMs: number;
 }
 
@@ -31,18 +29,15 @@ function killGroup(pid: number): void {
     try {
       process.kill(pid, 'SIGKILL');
     } catch {
-      // already gone
     }
   }
 }
 
-/** Kills every host process (and its process group) still running. Used by the signal handlers. */
 export function killLiveChildren(): void {
   for (const pid of [...liveChildren]) killGroup(pid);
   liveChildren.clear();
 }
 
-/** Runs a process with a wall timeout; on timeout kills its whole process group. */
 export function runProcess(spec: ProcessSpec): Promise<ProcessOutcome> {
   return new Promise((resolve, reject) => {
     const out = createWriteStream(spec.stdoutFile);

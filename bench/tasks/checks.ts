@@ -3,7 +3,6 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { VerifyResult } from './types.ts';
 
-/** Collects check lines; `pass` is true only when every check passed. */
 export class Checks {
   private readonly lines: string[] = [];
   private failed = false;
@@ -27,12 +26,6 @@ export async function readWorkspaceFile(workspace: string, rel: string): Promise
   }
 }
 
-/**
- * The answer block the prompts ask for: the text after the last line that starts with `ANSWER:`
- * (leading spaces allowed), or undefined when there is no such line. With `lastLine`, the `ANSWER:`
- * line must also be the last non-empty line and only its own text is returned ("End your reply with
- * a line `ANSWER: <value>`").
- */
 export function answerBlock(answer: string, opts: { readonly lastLine: boolean }): string | undefined {
   const lines = answer.replace(/\r\n/g, '\n').split('\n');
   let at = -1;
@@ -49,7 +42,6 @@ export function answerBlock(answer: string, opts: { readonly lastLine: boolean }
   return [first, ...rest].join('\n');
 }
 
-/** Removes whitespace, backticks and asterisks, so formatting does not matter. */
 export function squash(text: string): string {
   return text.replace(/[\s`*]+/g, '');
 }
@@ -61,7 +53,6 @@ export interface NodeTestRun {
   readonly output: string;
 }
 
-/** Runs `node --test` in the workspace (same Node as the harness), with a timeout. */
 export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<NodeTestRun> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['--test', '--test-reporter=spec'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
@@ -78,14 +69,12 @@ export function runNodeTests(workspace: string, timeoutMs = 60_000): Promise<Nod
   });
 }
 
-/** Checks that each file still has its initial content. */
 export async function checkUnchanged(checks: Checks, workspace: string, initial: ReadonlyMap<string, string>, files: readonly string[], label: string): Promise<void> {
   const changed: string[] = [];
   for (const file of files) if ((await readWorkspaceFile(workspace, file)) !== initial.get(file)) changed.push(file);
   checks.check(changed.length === 0, changed.length === 0 ? `${label} unchanged` : `${label} changed: ${changed.join(', ')}`);
 }
 
-/** Replaces exactly one occurrence of `from`, failing loudly when it is missing or repeated. */
 export function replaceOnce(text: string, from: string, to: string, where: string): string {
   const first = text.indexOf(from);
   if (first === -1 || text.indexOf(from, first + 1) !== -1) throw new Error(`expected exactly one ${JSON.stringify(from)} in ${where}`);
@@ -123,7 +112,6 @@ async function listFiles(root: string, rel = ''): Promise<string[]> {
   return out;
 }
 
-/** Every difference between the workspace and its initial tree (`.git` excluded), like `git status --untracked-files=all`. */
 export async function treeChanges(workspace: string, initial: ReadonlyMap<string, string>): Promise<TreeChanges> {
   const now = new Set(await listFiles(workspace));
   const modified: string[] = [];
@@ -136,11 +124,6 @@ export async function treeChanges(workspace: string, initial: ReadonlyMap<string
   return { modified: modified.sort(), deleted: deleted.sort(), added };
 }
 
-/**
- * Checks that nothing outside `allowed` changed. Read-only tasks pass no `allowed` and also forbid new
- * files (the workspace must equal its initial commit); edit tasks may leave new files (listed, not failed)
- * but may not modify or delete any file they were not asked to touch.
- */
 export async function checkScope(checks: Checks, workspace: string, initial: ReadonlyMap<string, string>, allowed?: (file: string) => boolean): Promise<void> {
   const c = await treeChanges(workspace, initial);
   if (allowed === undefined) {

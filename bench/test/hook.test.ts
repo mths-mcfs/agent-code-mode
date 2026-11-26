@@ -15,7 +15,6 @@ function bash(command: string): number | null {
 
 describe('protect-file hook', () => {
   it('blocks shell commands that write to the protected file through its directory (smoke run escape)', () => {
-    // The script Codex used in the smoke run: it never names the file, it walks the directory.
     const escape = "python3 - <<'PY'\nfrom pathlib import Path\nfor p in sorted(Path('src/handlers').rglob('*')):\n    p.write_bytes(p.read_bytes().replace(b'3000', b'5000'))\nPY";
     expect(bash(escape)).toBe(2);
     expect(bash("sed -i 's/3000/5000/' src/handlers/*.js")).toBe(2);

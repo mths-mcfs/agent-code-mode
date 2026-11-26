@@ -16,7 +16,7 @@ rl.on('line', (line) => {
   } catch {
     return;
   }
-  if (msg === null || typeof msg !== 'object' || msg.id === undefined) return; // notifications
+  if (msg === null || typeof msg !== 'object' || msg.id === undefined) return;
   if (msg.method === 'initialize') {
     const version = msg.params && typeof msg.params.protocolVersion === 'string' ? msg.params.protocolVersion : '2025-06-18';
     send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: version, capabilities: { tools: {}, resources: {} }, serverInfo: { name: 'bench-empty', version: '1.0.0' } } });

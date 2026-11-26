@@ -7,15 +7,11 @@ import { createWorkspace } from '../lib/workspace.ts';
 import { TASKS } from '../tasks/index.ts';
 import { TASK_IDS } from '../tasks/types.ts';
 
-/**
- * Sets up the verifier tests of one file: the case timeout, a temporary root of the file's own and its cleanup.
- * Call it once at the top level of each verifier test file, before its describes.
- */
 export async function verifierWorkspaces() {
   // Every case builds git workspaces and runs node --test on them: past the 20 s default on the slower Windows runner.
   vi.setConfig({ testTimeout: 120_000 });
   const root = await mkdtemp(path.join(os.tmpdir(), 'acm-verify-'));
-  // Each workspace is a git repo of 340-560 entries (T12 adds 80 log files). Deleting them takes longer than the
+  // Each workspace is a git repo of 340-560 entries. Deleting them takes longer than the
   // 10 s hook default on Windows, where every delete is scanned and a file still held open fails with EBUSY for a
   // moment, so the cleanup gets its own timeout and retries.
   afterAll(async () => {

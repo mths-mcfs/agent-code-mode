@@ -20,7 +20,6 @@ export function loadPricing(file: string = PRICING_FILE): Pricing {
   return PricingSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
 }
 
-/** Cost in USD from usage (uncached input, cache reads, cache writes, output). Null when the model has no price. */
 export function costFromUsage(pricing: Pricing, model: string, usage: Usage): number | null {
   const p = pricing.models[model];
   if (p === undefined) return null;

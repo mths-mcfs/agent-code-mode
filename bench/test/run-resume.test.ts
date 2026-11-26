@@ -1,4 +1,3 @@
-// The resume dry runs of main(), apart from run.test.ts so that Vitest runs them in their own process.
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +13,6 @@ describe('resume', () => {
     try {
       const first = await quiet(() => main([...base, '--seed', '1']));
       expect(first.text).toMatch(/claude T1 A r1: pass, valid/);
-      // Same config without --seed: the seed of the last invocation is reused, so the run is skipped.
       expect((await quiet(() => main(base))).text).toMatch(/^skip claude-T1-A-r1/m);
       for (const change of [['--claude-model', 'claude-haiku-5-5'], ['--seed', '2'], ['--claude-effort', 'high'], ['--fixture-seed', '999']]) {
         const args = change[0] === '--seed' ? [...base, ...change] : [...base, '--seed', '1', ...change];

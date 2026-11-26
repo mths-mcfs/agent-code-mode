@@ -1,7 +1,6 @@
 import os from 'node:os';
 
 export interface SanitizeContext {
-  /** Absolute paths replaced by a label, e.g. the workspace by `<workspace>`. Longest first wins. */
   readonly paths: readonly { readonly path: string; readonly label: string }[];
   readonly home: string;
   readonly username: string;
@@ -39,16 +38,13 @@ const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/\bxox[abpr]-[A-Za-z0-9-]{10,}/g, '<token>'],
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<token>'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g, '$1 <token>'],
-  // "key": "value" pairs, also inside JSON text that was escaped one or more times (\" or \\\").
   [/(\\*"(?:api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|authorization|password|passwd|secret|client[_-]?secret|cookie|private[_-]?key)\\*"\s*:\s*(\\*)")(?:(?!\2").)*(\2")/gi, '$1<redacted>$3'],
-  // key = value / key: value in TOML, env files and headers.
   [/\b((?:[A-Z0-9]+_)*(?:API_?KEY|ACCESS_TOKEN|REFRESH_TOKEN|AUTH_TOKEN|SECRET|PASSWORD|AUTHORIZATION)|api_?key|access_token|refresh_token|auth_token|secret|password|authorization)(\s*[=:]\s*)(?!<redacted>)("?)[^\s"',;]+/gi, '$1$2$3<redacted>'],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
   // Anthropic request and message ids: the API's logs tie them to the account that made the call.
   [/\b(req|msg)_[A-Za-z0-9]{16,}/g, '$1_<redacted>'],
 ];
 
-/** Keys whose string values are always secrets or account identifiers, whatever they look like. */
 const SECRET_KEYS = new Set([
   'apikey', 'xapikey', 'token', 'accesstoken', 'refreshtoken', 'idtoken', 'authtoken', 'sessiontoken', 'bearertoken',
   'authorization', 'auth', 'password', 'passwd', 'secret', 'clientsecret', 'cookie', 'setcookie', 'credential', 'credentials',
@@ -60,7 +56,6 @@ export function isSecretKey(key: string): boolean {
   return SECRET_KEYS.has(k) || /(apikey|secret|password|accesstoken|refreshtoken|authtoken)$/.test(k);
 }
 
-/** Decodes %XX runs (URL-encoded paths), leaving malformed runs as they are. */
 function urlDecode(text: string): string {
   return text.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
     try {
@@ -78,7 +73,6 @@ function sanitizeText(text: string, ctx: SanitizeContext): string {
     .sort((a, b) => b.form.length - a.form.length);
   for (const { form, label } of labeled) out = out.split(form).join(label);
   for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
-  // Generic home-directory paths of any user (e.g. in error messages).
   out = out.replace(/\/(home|Users)\/[^/\s"'\\]+/g, '/$1/<user>');
   out = out.replace(/-(home|Users)-[^-\s"'/\\]+/g, '-$1-<user>');
   out = out.replace(/([A-Za-z]:(?:\\\\?|\/)Users(?:\\\\?|\/))[^\\/\s"']+/g, '$1<user>');
@@ -101,7 +95,6 @@ function parseStructured(text: string): unknown {
 
 function sanitizeValue(value: unknown, ctx: SanitizeContext, depth: number): unknown {
   if (typeof value === 'string') {
-    // A string that is itself JSON (tool arguments, MCP results) is decoded and sanitized as a value.
     const inner = depth < 8 ? parseStructured(value) : undefined;
     return inner === undefined ? sanitizeText(value, ctx) : JSON.stringify(sanitizeValue(inner, ctx, depth + 1));
   }
@@ -116,14 +109,6 @@ function sanitizeValue(value: unknown, ctx: SanitizeContext, depth: number): unk
   return value;
 }
 
-/**
- * Removes what identifies the machine or the person from a transcript, after decoding it: each line
- * that is JSON is parsed (recursively, strings holding JSON included) and every string is sanitized;
- * values under secret-looking keys are redacted whatever they contain. Other lines are URL-decoded and
- * sanitized as text: known absolute paths (workspace, repo, temp homes), the home directory, the
- * username, the hostname, emails and token-shaped strings. Tool names, workspace-relative arguments and
- * usage numbers stay.
- */
 export function sanitize(text: string, ctx: SanitizeContext): string {
   return text
     .split('\n')

@@ -4,23 +4,19 @@ import { z } from 'zod';
 import { ARM_LABELS, RunRecordSchema, type RunRecord } from './lib/record.ts';
 import { spread, type Spread } from './lib/stats.ts';
 
-/** Aggregates run records into `summary.json` and a Markdown table snippet for the README. */
 
 export interface GroupSummary {
   readonly host: 'claude' | 'codex';
   readonly task: string;
   readonly arm: string;
   readonly armLabel: string;
-  /** Runs with different configs are never pooled: each config is its own group. */
   readonly configHash: string;
   readonly config: Readonly<Record<string, unknown>>;
   readonly runs: number;
   readonly validRuns: number;
   readonly invalidRuns: number;
   readonly invalidReasons: readonly string[];
-  /** Over valid runs. Null when there is no valid run. */
   readonly passRate: number | null;
-  /** Over all runs (a fallback in a strict arm makes the run invalid, so it would never show over valid runs). */
   readonly fallbackRate: number | null;
   readonly turns: Spread | null;
   readonly inputTokens: Spread | null;
@@ -29,7 +25,6 @@ export interface GroupSummary {
   readonly cacheReadTokens: Spread | null;
   readonly costUsd: Spread | null;
   readonly wallMs: Spread | null;
-  /** Run ids behind the numbers, so each one traces to its record and transcript. */
   readonly runIds: readonly string[];
 }
 
@@ -149,7 +144,6 @@ async function readEnvironment(resultsDir: string): Promise<unknown> {
   }
 }
 
-/** Reads every record under `resultsDir`, writes `summary.json` and `summary.md` there, returns both. */
 export async function writeReport(resultsDir: string, now: Date = new Date()): Promise<{ summary: Summary; markdown: string }> {
   const records = await loadRecords(resultsDir);
   const summary: Summary = {
@@ -164,7 +158,6 @@ export async function writeReport(resultsDir: string, now: Date = new Date()): P
   return { summary, markdown };
 }
 
-/** The newest `YYYY-MM-DD` directory under `root`, or undefined. */
 export async function latestResultsDir(root: string): Promise<string | undefined> {
   let names: string[] = [];
   try {
@@ -176,7 +169,6 @@ export async function latestResultsDir(root: string): Promise<string | undefined
   return last === undefined ? undefined : path.join(root, last);
 }
 
-// `npm run bench:report [-- <results/date dir>]`: without a dir, the newest date under bench/results.
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === import.meta.filename) {
   const dir = process.argv[2] ?? (await latestResultsDir(path.join(import.meta.dirname, 'results')));
   if (dir === undefined) {

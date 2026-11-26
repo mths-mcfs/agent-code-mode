@@ -14,16 +14,10 @@ const posix = process.platform !== 'win32';
 const ORIGINAL = JSON.stringify({ token: 'FAKE_AUTH_ONLY', refresh: 'r1' });
 const REFRESHED = JSON.stringify({ token: 'REFRESHED', refresh: 'r2' });
 const OTHER = JSON.stringify({ token: 'OTHER_LOGIN', refresh: 'r9' });
-/** The real arm A surface (functions.* names), so the fake passes the arm-integrity check. */
 const ARM_A_TOOLS = z.object({ A: z.array(z.string()) }).parse(JSON.parse(readFileSync(path.join(BENCH, 'parser-fixtures', 'codex-surfaces.json'), 'utf8'))).A.map((t) => ({ type: 'function', name: t.replace(/^functions\./, '') }));
 
 type ExecMode = 'hang' | 'exit' | 'refresh-hang' | 'refresh-exit' | 'refresh-conflict-exit';
 
-/**
- * A fake `codex` that answers the harness's preflight calls. In `exec` it can refresh the token the
- * way Codex does (write a temp file, rename it over $CODEX_HOME/auth.json), change the real auth file
- * behind the harness's back (conflict), and then hang or print a minimal finished transcript.
- */
 function fakeCodex(pidFile: string, mode: ExecMode, realAuth: string): string {
   return `#!${process.execPath}
 const fs = require('node:fs');
@@ -84,7 +78,6 @@ interface Harness {
   readonly stderr: string;
 }
 
-/** Runs the real harness (`node bench/run.ts`) against the fake codex; kills it with `signal` once exec started. */
 async function harness(mode: ExecMode, signal?: NodeJS.Signals): Promise<Harness> {
   const root = await mkdtemp(path.join(os.tmpdir(), `acm-iso-${mode}-`));
   const bin = path.join(root, 'bin');
@@ -123,7 +116,6 @@ async function cleanup(h: Harness): Promise<void> {
   try {
     process.kill(-h.exec, 'SIGKILL');
   } catch {
-    // already gone
   }
   await rm(h.root, { recursive: true, force: true });
 }
@@ -211,7 +203,6 @@ describe.skipIf(!posix)('temporary CODEX_HOME: token refresh on a finished run',
     try {
       expect(await readFile(h.realAuth, 'utf8')).toBe(ORIGINAL);
       expect(await findFile(path.join(h.root, 'results'), 'auth.txt')).toBe('auth.json: unchanged\n');
-      // A real (non-dry) Codex run whose tool surface was observed is a valid run.
       const record = JSON.parse(await findFile(path.join(h.root, 'results'), 'record.json'));
       expect(record.invalidReasons).toEqual([]);
       expect(record.valid).toBe(true);
@@ -242,7 +233,6 @@ describe('syncBack rule', () => {
       const cfg = path.join(root, 'cfg');
       createCodexHome(cfg, path.join(root, 'user'), '.credentials.json');
       expect(await readFile(path.join(cfg, '.credentials.json'), 'utf8')).toBe(ORIGINAL);
-      // Claude rewrites its config dir freely; only the credentials file is synced back.
       await writeFile(path.join(cfg, '.credentials.json'), REFRESHED);
       await writeFile(path.join(cfg, '.claude.json'), '{}');
       expect(removeCodexHome(cfg)).toBe('written-back');
@@ -274,7 +264,6 @@ describe('syncBack rule', () => {
       expect(await readFile(real, 'utf8')).toBe(REFRESHED);
       if (posix) expect((await stat(real)).mode & 0o777).toBe(0o600);
       expect((await readdir(path.dirname(real))).filter((f) => f !== 'auth.json')).toEqual([]);
-      // The real file now differs from the copied hash: a second, different refresh is a conflict.
       await writeFile(path.join(home, 'auth.json'), OTHER);
       const warnings: string[] = [];
       expect(syncBack(home, (m) => warnings.push(m))).toBe('conflict-kept-real');

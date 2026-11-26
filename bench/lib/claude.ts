@@ -1,10 +1,8 @@
 import { z } from 'zod';
 import type { ArmId, ParsedRun, ToolCalls } from './record.ts';
 
-/** Native file and shell tools of Claude Code. Using one of them in the agent-code-mode arm is a fallback. */
 export const CLAUDE_NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'NotebookEdit'];
 export const CLAUDE_RUN_TOOL = 'mcp__agent-code-mode__run';
-/** Native tool names allowed by rule in both arms (in arm B they only reach the model through `run`). */
 export const CLAUDE_INNER_ALLOWED = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'];
 /** Agents Claude Code 2.1.325 ships; anything else in the init event came from the user's config. */
 export const CLAUDE_BUILTIN_AGENTS = ['claude', 'Explore', 'general-purpose', 'Plan', 'statusline-setup'];
@@ -14,13 +12,10 @@ export interface ClaudeCommandOptions {
   readonly model: string;
   readonly effort: string;
   readonly maxTurns: number;
-  /** Settings file passed with `--settings` (permissions and hooks). */
   readonly settingsFile: string;
-  /** MCP config file passed with `--mcp-config`. */
   readonly mcpConfigFile: string;
 }
 
-/** Arguments for `claude`; the prompt goes on stdin. */
 export function claudeArgs(o: ClaudeCommandOptions): string[] {
   const args = [
     '-p',
@@ -46,7 +41,6 @@ export function claudeArgs(o: ClaudeCommandOptions): string[] {
   return args;
 }
 
-/** The `--mcp-config` content for an arm: no servers for A, the agent-code-mode server for B. */
 export function claudeMcpConfig(arm: ArmId, serverEntry: string): unknown {
   if (arm === 'A') return { mcpServers: {} };
   return { mcpServers: { 'agent-code-mode': { type: 'stdio', command: process.execPath, args: [serverEntry, 'serve', '--host', 'claude'] } } };
@@ -75,7 +69,6 @@ const ResultEvent = z.object({
 const ContentBlock = z.object({ type: z.string() }).passthrough();
 const ToolUse = z.object({ type: z.literal('tool_use'), id: z.string(), name: z.string() }).passthrough();
 const ToolResult = z.object({ type: z.literal('tool_result'), tool_use_id: z.string(), content: z.unknown(), is_error: z.boolean().optional() }).passthrough();
-/** Error text of a blocked call (hook deny, permission rule), as opposed to an ordinary tool failure. */
 export const DENIAL_TEXT = /denied|blocked|hook|protected|not allowed|permission/i;
 const MessageEvent = z.object({ type: z.enum(['assistant', 'user']), message: z.object({ content: z.union([z.string(), z.array(ContentBlock)]) }).passthrough() }).passthrough();
 const InitEvent = z.object({
@@ -88,7 +81,6 @@ const InitEvent = z.object({
   memory_paths: z.unknown().optional(),
 }).passthrough();
 
-/** Reasons the run was not isolated from the user's Claude config, read from the `system/init` event. */
 export function claudeIsolationIssues(ctx: { agents: readonly string[]; plugins: readonly string[]; memory: boolean }): string[] {
   const reasons: string[] = [];
   const userAgents = ctx.agents.filter((a) => !CLAUDE_BUILTIN_AGENTS.includes(a));
@@ -99,7 +91,6 @@ export function claudeIsolationIssues(ctx: { agents: readonly string[]; plugins:
   return reasons;
 }
 
-/** The agent-code-mode `run` result as the server returns it (only the fields the bench reads). */
 const RunResultText = z.object({
   calls: z.array(z.object({ tool: z.string(), decision: z.string(), summary: z.string().optional(), reason: z.string().optional() }).passthrough()),
 }).passthrough();
@@ -131,7 +122,6 @@ export function classifyClaudeTool(name: string): 'native' | 'run' | 'other' {
   return 'other';
 }
 
-/** Parses a `claude -p --output-format stream-json --verbose` transcript. Throws when there is no result event. */
 export function parseClaudeTranscript(text: string): ParsedRun {
   const lines = text.split('\n');
   const seenToolUse = new Set<string>();

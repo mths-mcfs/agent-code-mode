@@ -5,7 +5,6 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { DEFAULT_FIXTURE_SEED, generateFixture, treeHash, writeTree } from '../fixture/generate.ts';
 import { runNodeTests } from '../tasks/checks.ts';
 
-/** Hash of the default fixture. If this changes, every published number changes meaning: bump it on purpose only. */
 const DEFAULT_FIXTURE_HASH = 'e8aee80fe0d34c5a38561d74cc1d850800ae134bc59ef55fe5cb3bb1a5e0c521';
 
 const dirs: string[] = [];

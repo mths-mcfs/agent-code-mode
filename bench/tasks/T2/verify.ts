@@ -1,7 +1,6 @@
 import { checkScope, checkUnchanged, Checks, runNodeTests } from '../checks.ts';
 import type { VerifyContext, VerifyResult } from '../types.ts';
 
-/** Tests must pass, the tests themselves stay as they were, and only files `allowed` may change. */
 export async function verifyFix(ctx: VerifyContext, allowed: (file: string) => boolean): Promise<VerifyResult> {
   const checks = new Checks();
   const tests = await runNodeTests(ctx.workspace);

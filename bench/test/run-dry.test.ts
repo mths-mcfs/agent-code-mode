@@ -1,4 +1,3 @@
-// The end-to-end dry run of main(), apart from run.test.ts so that Vitest runs them in their own process.
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,7 +27,6 @@ describe('dry run', () => {
     const summary = JSON.parse(await readFile(path.join(out, '2026-01-02', 'summary.json'), 'utf8'));
     expect(summary.dryRun).toBe(true);
     expect(summary.groups).toHaveLength(10);
-    // No copy of an auth file may survive a run.
     const left = (await readdir(path.join(work, 'runs'), { recursive: true })).filter((f) => f.endsWith('auth.json'));
     expect(left).toEqual([]);
     await rm(work, { recursive: true, force: true });

@@ -3,15 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Rng } from '../lib/rng.ts';
 
-/**
- * Deterministic fixture repo for the benchmark tasks: a small ES-module
- * "orders" project (about 96 files) with tests that run under `node --test`
- * and need no install. The same seed gives byte-identical files everywhere.
- */
 
 export const DEFAULT_FIXTURE_SEED = 1115;
 
-/** Files of a workspace tree, keyed by POSIX relative path. */
 export type Tree = Map<string, string>;
 
 export interface CustomerTotal {
@@ -19,23 +13,16 @@ export interface CustomerTotal {
   readonly totalCents: number;
 }
 
-/** Facts the verifiers check answers and edits against. */
 export interface FixtureFacts {
   readonly seed: number;
-  /** T1: `service.retryLimit` in config/app.json. */
   readonly retryLimit: number;
-  /** T3: the two functions whose signatures are asked. */
   readonly signatures: readonly { readonly name: string; readonly file: string; readonly signature: string }[];
-  /** T4: customers by paid total, highest first (all of them). */
   readonly customerTotals: readonly CustomerTotal[];
-  /** T5: the exported symbol to rename and the files that use it. */
   readonly renameFrom: string;
   readonly renameTo: string;
   readonly renameFiles: readonly string[];
-  /** T4/T6: order files and which of them are paid. */
   readonly orderFiles: readonly string[];
   readonly paidOrderFiles: readonly string[];
-  /** T8: handler files and the protected one. */
   readonly handlerFiles: readonly string[];
   readonly protectedFile: string;
 }
@@ -111,7 +98,6 @@ function customerTotals(orders: readonly Order[]): CustomerTotal[] {
     .sort((a, b) => b.totalCents - a.totalCents || a.customer.localeCompare(b.customer));
 }
 
-/** True when the top 4 totals are distinct, so "top 3" has one answer. */
 function topIsUnambiguous(totals: readonly CustomerTotal[]): boolean {
   const top = totals.slice(0, 4).map((t) => t.totalCents);
   return new Set(top).size === top.length && top.length >= 4;
@@ -372,7 +358,6 @@ test('handlers report their route and a positive timeout', () => {
 });
 `;
 
-/** Generates the fixture tree and its facts from a seed. */
 export function generateFixture(seed: number = DEFAULT_FIXTURE_SEED): Fixture {
   const rng = new Rng(seed);
   const files: Tree = new Map();
@@ -410,7 +395,6 @@ export function generateFixture(seed: number = DEFAULT_FIXTURE_SEED): Fixture {
   files.set('test/features.test.js', featuresTest(FEATURES));
   files.set('test/handlers.test.js', HANDLERS_TEST);
 
-  // Regenerate orders until the top 3 customers are unambiguous (deterministic: same rng stream).
   let orders = buildOrders(rng);
   while (!topIsUnambiguous(customerTotals(orders))) orders = buildOrders(rng);
   const orderFiles: string[] = [];
@@ -445,7 +429,6 @@ export function generateFixture(seed: number = DEFAULT_FIXTURE_SEED): Fixture {
   };
 }
 
-/** SHA-256 over the sorted (path, content) pairs. */
 export function treeHash(files: ReadonlyMap<string, string>): string {
   const hash = createHash('sha256');
   for (const file of [...files.keys()].sort()) {
@@ -457,7 +440,6 @@ export function treeHash(files: ReadonlyMap<string, string>): string {
   return hash.digest('hex');
 }
 
-/** Writes a tree under `dir` (which must exist or be creatable). */
 export async function writeTree(dir: string, files: ReadonlyMap<string, string>): Promise<void> {
   for (const [file, text] of files) {
     const target = path.join(dir, ...file.split('/'));
@@ -466,7 +448,6 @@ export async function writeTree(dir: string, files: ReadonlyMap<string, string>)
   }
 }
 
-// `node bench/fixture/generate.ts <dir> [seed]` writes the fixture and prints its hash.
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === import.meta.filename) {
   const dir = process.argv[2];
   if (dir === undefined) {

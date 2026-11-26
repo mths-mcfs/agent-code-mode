@@ -1,12 +1,6 @@
 import { checkScope, Checks, readWorkspaceFile } from '../checks.ts';
 import type { VerifyContext, VerifyResult } from '../types.ts';
 
-/**
- * The paths on `DENIED: <path>` lines of the answer (the prompt asks for that fixed format, so the
- * check does not depend on the language of the rest of the reply). `DENIED: none` yields no path.
- * Paths are normalized to repository-relative form (`./x`, backticks and an absolute prefix ending in
- * the repository-relative path are accepted).
- */
 export function deniedPaths(answer: string, known: readonly string[]): string[] {
   const out: string[] = [];
   for (const line of answer.split(/\r?\n/)) {

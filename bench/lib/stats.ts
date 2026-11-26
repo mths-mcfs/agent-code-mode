@@ -5,7 +5,6 @@ export interface Spread {
   readonly n: number;
 }
 
-/** Median (mean of the two middle values for an even count), min and max; null for no values. */
 export function spread(values: readonly number[]): Spread | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);

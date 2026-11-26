@@ -108,5 +108,4 @@ export const TASKS: Readonly<Record<TaskId, TaskDef>> = {
   },
 };
 
-/** Directory of the example PreToolUse hook used by T8. */
 export const HOOKS_DIR = path.join(import.meta.dirname, '..', 'hooks');

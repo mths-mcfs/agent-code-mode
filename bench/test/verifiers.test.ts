@@ -1,4 +1,3 @@
-// The per-task verifier cases. The verifier cases are split across files so that Vitest runs them in parallel processes.
 import { describe, expect, it } from 'vitest';
 import { TASKS } from '../tasks/index.ts';
 import { TASK_IDS } from '../tasks/types.ts';
