@@ -34,36 +34,32 @@ export function contextDir(stateDir: string): string {
   return path.join(stateDir, 'ctx');
 }
 
-/**
- * The context directory changes that the companion hook and this server make
- * all the time, which the protected-path watch does not report: the directory
- * created private, a new private hook temp file or server claim, a new private
- * record that is well formed and names its own id, and any file going away
- * (consumed or pruned; a missing record only makes the server fall back to
- * conservative defaults). A record that changed after it was written, or a
- * malformed new one, is reported. Forging a new record would take the id of a
- * tool call the host has not issued yet.
- */
+const HELPER_FILE = /^\.[A-Za-z0-9_-]+\.[0-9a-f]{12}\.(tmp|claimed)$/;
+const RECORD_FILE = /^([A-Za-z0-9_-]+)\.json$/;
+
+async function recordNamesItsOwnId(file: string): Promise<boolean> {
+  const id = RECORD_FILE.exec(path.basename(file))?.[1];
+  if (id === undefined) return false;
+  try {
+    const text = await readFile(file, 'utf8');
+    if (Buffer.byteLength(text) > MAX_CONTEXT_FILE_BYTES) return false;
+    const parsed = ContextFileSchema.safeParse(JSON.parse(text));
+    return parsed.success && parsed.data.tool_use_id === id;
+  } catch {
+    return false;
+  }
+}
+
 export function routineContextChange(ctxDir: string, platform: NodeJS.Platform = process.platform): (change: WatchedChange) => Promise<boolean> {
   // Windows has no POSIX modes, so the private modes can be checked only elsewhere.
-  const modeIs = (mode: number, expected: number): boolean => platform === 'win32' || (mode & 0o777) === expected;
+  const isPrivate = (side: WatchedChange['after'], type: 'dir' | 'file', mode: number): boolean =>
+    side?.type === type && (platform === 'win32' || (side.mode & 0o777) === mode);
   return async ({ path: p, before, after }) => {
-    if (p === ctxDir) return before === undefined && after?.type === 'dir' && modeIs(after.mode, 0o700);
+    if (p === ctxDir) return before === undefined && isPrivate(after, 'dir', 0o700);
     if (path.dirname(p) !== ctxDir) return false;
-    if (after === undefined) return before?.type === 'file';
-    if (before !== undefined || after.type !== 'file' || !modeIs(after.mode, 0o600)) return false;
-    const name = path.basename(p);
-    if (/^\.[A-Za-z0-9_-]+\.[0-9a-f]{12}\.(tmp|claimed)$/.test(name)) return true;
-    const id = /^([A-Za-z0-9_-]+)\.json$/.exec(name)?.[1];
-    if (id === undefined) return false;
-    try {
-      const text = await readFile(p, 'utf8');
-      if (Buffer.byteLength(text) > MAX_CONTEXT_FILE_BYTES) return false;
-      const parsed = ContextFileSchema.safeParse(JSON.parse(text));
-      return parsed.success && parsed.data.tool_use_id === id;
-    } catch {
-      return false;
-    }
+    const removed = after === undefined && before?.type === 'file';
+    const created = before === undefined && isPrivate(after, 'file', 0o600);
+    return removed || (created && (HELPER_FILE.test(path.basename(p)) || (await recordNamesItsOwnId(p))));
   };
 }
 

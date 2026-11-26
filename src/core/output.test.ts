@@ -167,7 +167,6 @@ describe('formatRunResult', () => {
     expect(shown.at(-1)).toBe(`…[${30 - (shown.length - 1)} more in readOverflow]`);
     expect(kept.at(-1)).toBe(`…[${40 - (kept.length - 1)} more in readOverflow]`);
 
-    // A rollback report is never cut, so a long one leaves only the last-resort envelope.
     const rolledBack = { restored: Array.from({ length: 2_000 }, (_, i) => `f${i}.txt`), skipped: [] };
     const last = formatRunResult({ ...base, ok: false, error: { kind: 'error', name: 'Error', message: 'x' }, rolledBack, protectedChanges }, { overflow: new OverflowStore() });
     expect(size(last)).toBeLessThanOrEqual(ERROR_CAP_CHARS);

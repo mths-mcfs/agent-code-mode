@@ -238,7 +238,6 @@ function cutList<T>(list: readonly T[] | undefined, keep: number, where: string)
   return [...list.slice(0, keep), `…[${list.length - keep} more${where}]`];
 }
 
-/** Protected changes in a cut response are never dropped: at most `keep` windows of at most `keep` paths each, the rest counted. */
 function boundProtected(list: readonly ProtectedChange[], keep: number, textMax: number, where: string): readonly unknown[] | undefined {
   if (list.length === 0) return undefined;
   const windows = list.map((c) => clipStrings({ ...c, changed: cutList(c.changed, keep, where) ?? [] }, textMax));

@@ -534,12 +534,12 @@ describe('runScript protected-path watch', () => {
 
   it('reports a change made after the last bash call, found by the end-of-run check', async () => {
     const files = new Map([['/ws/.claude/settings.json', '{}']]);
+    const AFTER_C1 = 2;
     let taken = 0;
     const tools = Object.assign(new MemoryToolRuntime({ root: '/ws' }), {
       async snapshotWatched(): Promise<WatchedSnapshot> {
         const snap = new Snap(new Map(files));
-        // Right after the snapshot that closes the bash call: a change no bash window saw yet.
-        if (++taken === 2) files.set('/ws/.claude/settings.json', '{"x":1}');
+        if (++taken === AFTER_C1) files.set('/ws/.claude/settings.json', '{"x":1}');
         return snap;
       },
     });

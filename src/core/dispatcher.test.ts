@@ -556,7 +556,6 @@ describe('summarize', () => {
 });
 
 describe('Dispatcher protected-path watch', () => {
-  /** A watched file system for the fake runtime: snapshots copy it, and `changedSince` lists the paths that differ. */
   class FakeSnapshot implements WatchedSnapshot {
     constructor(readonly files: ReadonlyMap<string, string>) {}
     async changedSince(earlier: WatchedSnapshot, routine?: (change: WatchedChange) => Promise<boolean>): Promise<string[]> {

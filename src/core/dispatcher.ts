@@ -29,7 +29,6 @@ import type {
   WatchedSnapshot,
 } from './types.js';
 
-/** A stretch of a run in which the watched paths are compared: while a bash call runs, or after it ended. */
 interface WatchWindow {
   readonly call: string;
   readonly command: string;
@@ -183,9 +182,7 @@ export class Dispatcher<P = unknown> {
   #bashCommits = 0;
   readonly #realCwd: string;
   readonly #protected: ProtectedChange[] = [];
-  /** The last snapshot of the watched paths, and the window it opens: during or after a bash call. */
   #watchMark: (WatchWindow & { readonly snapshot: WatchedSnapshot }) | undefined;
-  /** Checks of the watched paths run one at a time, the end-of-run one last. */
   #watchTail: Promise<void> = Promise.resolve();
   #watchClosed = false;
 
@@ -219,7 +216,6 @@ export class Dispatcher<P = unknown> {
     return [...this.#warnings];
   }
 
-  /** Watched policy files that changed around this run's bash calls. */
   get protectedChanges(): readonly ProtectedChange[] {
     return [...this.#protected];
   }
@@ -628,11 +624,6 @@ export class Dispatcher<P = unknown> {
     return { ok: false, error };
   }
 
-  /**
-   * Snapshots the watched paths, reports what changed since the last
-   * snapshot under the window that one opened, and opens `next`. A snapshot
-   * that fails leaves both windows unchecked, and says so.
-   */
   #checkWatched(policy: PolicySnapshot<P> | undefined, next: WatchWindow | undefined): Promise<void> {
     if (this.#watchClosed) return Promise.resolve();
     const run = async (): Promise<void> => {

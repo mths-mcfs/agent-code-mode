@@ -341,7 +341,6 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       }
     }
 
-    // The last look at the watched files: after the last bash call, the finalization and any rollback.
     await active.finishWatch();
     const protectedChanges = active.protectedChanges;
     const base = {

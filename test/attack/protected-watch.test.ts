@@ -3,13 +3,6 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeServer, codexServer, makeLab, posix, type Lab, type Server } from './harness.js';
 
-/**
- * The protected-path watch through `run`. Claude's checks keep bash from
- * naming a policy file, so these commands are `node wN.js` under an exact
- * allow rule, unsandboxed, and the script inside does the write: a spelling
- * no static check sees into. The call runs, the response names the file in
- * `protectedChanges`, and nothing is blocked or restored.
- */
 describe.runIf(posix)('protected policy files changed by bash are reported', () => {
   let lab: Lab | undefined;
   let server: Server | undefined;
@@ -21,7 +14,6 @@ describe.runIf(posix)('protected policy files changed by bash are reported', () 
   });
 
   const claude = { sandbox: { enabled: false }, permissions: { allow: ['Bash(node w1.js)', 'Bash(node w2.js)'] } };
-  /** Writes `wN.js`, which writes `text` to `file` (or links `file` to `linkTo`), and returns the call that runs it. */
   const writer = (l: Lab, n: number, file: string, text: string, linkTo?: string): string => {
     const body = linkTo === undefined ? `fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(text)}, { mode: 0o600 })` : `fs.symlinkSync(${JSON.stringify(linkTo)}, ${JSON.stringify(file)})`;
     writeFileSync(path.join(l.ws, `w${n}.js`), `const fs = require('fs');\n${body};\nconsole.log('done');\n`);

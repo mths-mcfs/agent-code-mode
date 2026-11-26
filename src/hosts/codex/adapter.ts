@@ -172,8 +172,6 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       ...[...codexDirs, ...readOnlySubpaths, config.codexHome, homeCodex, io.systemDir, stateDir].flatMap(both).map((d) => `${d}/**`),
       ...[path.join(config.cwd, '.mcp.json'), path.join(config.projectRoot, '.mcp.json')].flatMap(both),
     ]);
-    // Watched around bash: the files Codex and this adapter read as policy (config, hooks and exec-policy rules of every
-    // config folder, the system requirements), not the rest of the Codex home (sessions, logs, caches).
     const policyFolders = unique([
       config.codexHome,
       homeCodex,
