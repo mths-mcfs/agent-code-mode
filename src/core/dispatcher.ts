@@ -660,9 +660,8 @@ export class Dispatcher<P = unknown> {
       }
       if (next) this.#watchMark = { ...next, snapshot: now };
     };
-    const done = this.#watchTail.then(run);
-    this.#watchTail = done.catch(() => undefined);
-    return done.catch(() => undefined);
+    this.#watchTail = this.#watchTail.then(run);
+    return this.#watchTail;
   }
 
   #reportProtected(window: WatchWindow, changed: readonly string[], unchecked?: string): void {
