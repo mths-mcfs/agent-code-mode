@@ -636,7 +636,7 @@ describe('Dispatcher protected-path watch', () => {
     ]);
   });
 
-  it('leaves routine changes out, and checks nothing after the end of the run or without watched paths', async () => {
+  it('leaves routine changes out, and checks nothing after the end of the run, in a run without bash or without watched paths', async () => {
     const w = await watchSetup({ onBash: () => w.files.set('/ws/.claude/settings.local.json', '{}'), routine: async (c) => c.path.endsWith('.local.json') });
     await w.dispatcher.dispatch('bash', { command: 'one' });
     await w.dispatcher.finishWatch();
@@ -644,6 +644,11 @@ describe('Dispatcher protected-path watch', () => {
     await w.dispatcher.finishWatch();
     expect(w.tools.snapshots).toBe(taken);
     expect(w.dispatcher.protectedChanges).toEqual([]);
+
+    const readOnly = await watchSetup();
+    await readOnly.dispatcher.dispatch('glob', { pattern: '*' });
+    await readOnly.dispatcher.finishWatch();
+    expect(readOnly.tools.snapshots).toBe(0);
 
     const none = await watchSetup({ watchedPaths: [] });
     await none.dispatcher.dispatch('bash', { command: 'one' });

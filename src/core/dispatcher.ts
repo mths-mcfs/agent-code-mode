@@ -631,6 +631,7 @@ export class Dispatcher<P = unknown> {
       const take = this.#opts.tools.snapshotWatched;
       if (patterns.length === 0 || take === undefined) return;
       const mark = this.#watchMark;
+      if (mark === undefined && next === undefined) return;
       this.#watchMark = undefined;
       let now: WatchedSnapshot;
       try {
