@@ -9,16 +9,19 @@ import { Checks, checkNodeTests, runNodeTests } from '../tasks/checks.ts';
 
 const unavailable = process.platform === 'win32' ? 'no OS sandbox on Windows' : await containmentUnavailableReason();
 
+let root: string;
 let ws: string;
 
 beforeEach(async () => {
-  ws = await mkdtemp(path.join(os.tmpdir(), 'acm-node-tests-'));
-  await mkdir(path.join(ws, 'test'));
+  // The workspace sits in a directory of its own, so `../outside` is this test's and no one else's.
+  root = await mkdtemp(path.join(os.tmpdir(), 'acm-node-tests-'));
+  ws = path.join(root, 'ws');
+  await mkdir(path.join(ws, 'test'), { recursive: true });
 });
 
 afterEach(async () => {
   delete process.env['BENCH_FAKE_SECRET'];
-  await rm(ws, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
 });
 
 describe('the verifiers\' node --test run', () => {
@@ -60,7 +63,7 @@ describe('the verifiers\' node --test run', () => {
       const checks = new Checks();
       await checkNodeTests(checks, ws);
       expect(checks.result()).toMatchObject({ pass: false, details: [expect.stringMatching(/^FAIL node --test passes \(pass 0, fail 2\)/)] });
-      expect(existsSync(path.join(path.dirname(ws), 'outside'))).toBe(false);
+      expect(existsSync(path.join(root, 'outside'))).toBe(false);
       expect(connections).toHaveLength(0);
     } finally {
       for (const s of connections) s.destroy();
