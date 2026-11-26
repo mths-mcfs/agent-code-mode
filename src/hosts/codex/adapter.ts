@@ -172,11 +172,28 @@ export class CodexHostAdapter implements HostAdapter<CodexPolicy> {
       ...[...codexDirs, ...readOnlySubpaths, config.codexHome, homeCodex, io.systemDir, stateDir].flatMap(both).map((d) => `${d}/**`),
       ...[path.join(config.cwd, '.mcp.json'), path.join(config.projectRoot, '.mcp.json')].flatMap(both),
     ]);
+    const policyFolders = unique([
+      config.codexHome,
+      homeCodex,
+      io.systemDir,
+      ...projectDirs.map((d) => path.join(d, '.codex')),
+      ...config.layers.flatMap((l) => [l.folder, l.hooksFolder].filter((f): f is string => typeof f === 'string')),
+      ...config.untrustedProjectFolders,
+    ]);
+    const watchedPaths = unique([
+      ...policyFolders.flatMap((f) => [path.join(f, 'config.toml'), path.join(f, 'hooks.json'), path.join(f, 'rules', '*.rules')]),
+      ...config.layers.map((l) => l.file).filter((f) => path.isAbsolute(f)),
+      path.join(io.systemDir, 'requirements.toml'),
+      path.join(io.systemDir, 'managed_config.toml'),
+      path.join(config.cwd, '.mcp.json'),
+      path.join(config.projectRoot, '.mcp.json'),
+    ]);
 
     return {
       host: 'codex',
       bashContainment,
       protectedPaths,
+      watchedPaths,
       // Configured writable roots and --add-dir widen the tools' workspace in workspace-write only; /tmp and $TMPDIR do not.
       ...(sandboxMode === 'workspace-write' ? { additionalRoots: unique(config.writableRoots.map((p) => path.resolve(p))) } : {}),
       payload: {

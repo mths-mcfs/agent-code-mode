@@ -13,6 +13,7 @@ import type {
   ToolResult,
   ToolRuntime,
   Transaction,
+  WatchedSnapshot,
 } from '../core/types.js';
 import { DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS, findBash, runBash, shellQuote } from './bash.js';
 import { binaryDiff, unifiedDiff } from './diff.js';
@@ -22,6 +23,7 @@ import { FileTransaction } from './journal.js';
 import { Jail } from './jail.js';
 import { rooted } from './rooted.js';
 import { DEFAULT_GLOB_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, type SearchTop, compileGrep, normalizeGlob, runGlob, runGrep, searchTop } from './search.js';
+import { snapshotWatched } from './watch.js';
 
 /** Default number of lines `read` returns. */
 export const DEFAULT_READ_LIMIT = 2000;
@@ -421,5 +423,9 @@ export class NodeToolRuntime implements ToolRuntime {
 
   beginTransaction(): Transaction {
     return new FileTransaction(this.#opts.stateDir);
+  }
+
+  snapshotWatched(patterns: readonly string[]): Promise<WatchedSnapshot> {
+    return snapshotWatched(patterns);
   }
 }

@@ -466,6 +466,24 @@ describe.runIf(posix)('sandbox mode × tool', () => {
     expect((await policyOf(linked)).protectedPaths).toEqual(expect.arrayContaining(['/link/state/**', '/real/state/**']));
   });
 
+  it('watches the config, hooks and rules of every Codex config folder, not the state dir', async () => {
+    const p = await policyOf(adapter({}), ctx({ cwd: `${WS}/sub` }));
+    expect(p.watchedPaths).toEqual(
+      expect.arrayContaining([
+        `${WS}/sub/.codex/config.toml`,
+        `${WS}/sub/.codex/hooks.json`,
+        '/home/u/.codex/config.toml',
+        '/home/u/.codex/rules/*.rules',
+        '/etc/codex/requirements.toml',
+        '/etc/codex/managed_config.toml',
+        `${WS}/sub/.mcp.json`,
+      ]),
+    );
+    expect((p.watchedPaths ?? []).some((w) => w.startsWith('/state'))).toBe(false);
+    const profiled = await policyOf(adapter({ '/home/u/.codex/fast.config.toml': 'model = "m"\n' }, { argv: ['codex', '--profile', 'fast'] }));
+    expect(profiled.watchedPaths).toContain('/home/u/.codex/fast.config.toml');
+  });
+
   it('lets the turn metadata narrow the sandbox mode, never widen it', async () => {
     expect((await policyOf(adapter({}), ctx({ sandboxMode: 'danger-full-access' }))).bashContainment).toMatchObject({ mode: 'sandbox', readOnly: true });
     expect((await policyOf(adapter({}, { argv: ['codex', '-s', 'danger-full-access'] }), ctx({ sandboxMode: 'read-only' }))).bashContainment).toMatchObject({ readOnly: true });

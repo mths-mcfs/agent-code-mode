@@ -18,6 +18,7 @@ import type {
   PolicySnapshot,
   PreparedCall,
   PreparedCallOf,
+  ProtectedChange,
   ScriptValue,
   SearchLowering,
   SessionContext,
@@ -25,7 +26,14 @@ import type {
   ToolResult,
   ToolRuntime,
   Transaction,
+  WatchedSnapshot,
 } from './types.js';
+
+interface WatchWindow {
+  readonly call: string;
+  readonly command: string;
+  readonly when: 'during' | 'after';
+}
 
 /** Why the dispatcher stopped accepting calls. */
 export type StopReason = 'finished' | 'cancelled' | 'timeout' | 'denied';
@@ -43,6 +51,8 @@ export interface DispatcherOptions<P> {
   readonly checkDeadline?: () => void;
   /** Clock, for tests. */
   readonly now?: () => number;
+  /** Longest wait for one check of the watched paths (tests). */
+  readonly watchTimeoutMs?: number;
   /** Serves `readOverflow` from this server's memory; it never reaches the host. */
   readonly readOverflow?: (args: unknown) => CallReply;
 }
@@ -54,6 +64,32 @@ type Failure =
   | { readonly kind: 'error'; readonly error: ToolError };
 
 const ABORTED: unique symbol = Symbol('aborted');
+
+/** Longest wait for one snapshot or comparison of the watched paths: the runtime's own 2 s limit plus room for one slow file-system call. */
+export const WATCH_TIMEOUT_MS = 3_000;
+
+/**
+ * A snapshot each tool runtime started that outlived its wait. While one
+ * hangs, no other starts, so a stuck mount ties up one walk's file-system
+ * calls and not one per bash call.
+ */
+const hungSnapshots = new WeakMap<object, Set<Promise<unknown>>>();
+
+/** `work`, or a rejection after `ms`; `work` keeps running, and `onLate` gets it. */
+async function within<T>(work: Promise<T>, ms: number, onLate: (work: Promise<T>) => void): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onLate(work);
+      reject(new Error(`the check did not finish within ${ms} ms`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** How long `stop` waits for in-flight calls before giving up on them. */
 export const DEFAULT_SETTLE_GRACE_MS = 2_000;
@@ -173,6 +209,10 @@ export class Dispatcher<P = unknown> {
   #deniedCount = 0;
   #bashCommits = 0;
   readonly #realCwd: string;
+  readonly #protected: ProtectedChange[] = [];
+  #watchMark: (WatchWindow & { readonly snapshot: WatchedSnapshot }) | undefined;
+  #watchTail: Promise<void> = Promise.resolve();
+  #watchClosed = false;
 
   constructor(opts: DispatcherOptions<P>) {
     this.#opts = opts;
@@ -202,6 +242,22 @@ export class Dispatcher<P = unknown> {
 
   get warnings(): readonly string[] {
     return [...this.#warnings];
+  }
+
+  get protectedChanges(): readonly ProtectedChange[] {
+    return [...this.#protected];
+  }
+
+  /**
+   * Compares the watched paths once more, closing the window the last bash
+   * call opened. Call once, after `stop` and any rollback; later checks are
+   * skipped.
+   */
+  async finishWatch(): Promise<void> {
+    const policy = this.#opts.policy;
+    const done = this.#checkWatched(isPolicyError(policy) ? undefined : policy, undefined);
+    this.#watchClosed = true;
+    await done;
   }
 
   get deniedCount(): number {
@@ -485,6 +541,8 @@ export class Dispatcher<P = unknown> {
       const error = new ToolError('tool-error', `${prepared.effect.absPath} is being changed by another transactional run that has not finished; retry once it ends`);
       return this.#fail(slot, prepared.id, tool, summary, started, { kind: 'error', error });
     }
+    const watched = prepared.tool === 'bash' ? lowered === undefined : (prepared.tool === 'write' || prepared.tool === 'edit') && this.#isWatched(prepared.effect.absPath, policy);
+    if (watched) await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'during' });
     let result: ToolResult;
     try {
       const pending = this.#opts.tools.commit(prepared, signal, transaction);
@@ -500,6 +558,7 @@ export class Dispatcher<P = unknown> {
       return this.#fail(slot, prepared.id, tool, summary, started, this.#toolFailure(err));
     } finally {
       if (journaled) this.#journalWrite = undefined;
+      if (watched) await this.#checkWatched(policy, { call: prepared.id, command: summary, when: 'after' });
     }
 
     if (signal.aborted) {
@@ -591,6 +650,65 @@ export class Dispatcher<P = unknown> {
       }
     }
     return { ok: false, error };
+  }
+
+  #checkWatched(policy: PolicySnapshot<P> | undefined, next: WatchWindow | undefined): Promise<void> {
+    if (this.#watchClosed) return Promise.resolve();
+    const run = async (): Promise<void> => {
+      const patterns = policy?.watchedPaths ?? [];
+      const take = this.#opts.tools.snapshotWatched;
+      if (patterns.length === 0 || take === undefined) return;
+      const mark = this.#watchMark;
+      if (mark === undefined && next === undefined) return;
+      this.#watchMark = undefined;
+      const tools = this.#opts.tools;
+      const ms = this.#opts.watchTimeoutMs ?? WATCH_TIMEOUT_MS;
+      const hang = (work: Promise<unknown>): void => {
+        const pending = hungSnapshots.get(tools) ?? new Set();
+        hungSnapshots.set(tools, pending.add(work));
+        const settled = (): void => void pending.delete(work);
+        void work.then(settled, settled);
+      };
+      let now: WatchedSnapshot;
+      try {
+        if ((hungSnapshots.get(tools)?.size ?? 0) > 0) throw new Error('an earlier check of the watched files has not finished');
+        now = await within(take.call(tools, patterns), ms, hang);
+      } catch (err) {
+        const why = `the watched files could not be read: ${errorMessage(err)}`;
+        if (mark) this.#reportProtected(mark, [], why);
+        if (next) this.#reportProtected(next, [], why);
+        return;
+      }
+      if (mark) {
+        try {
+          const changed = await within(now.changedSince(mark.snapshot, policy?.isRoutineWatchedChange), ms, hang);
+          if (changed.length > 0) this.#reportProtected(mark, changed);
+        } catch (err) {
+          this.#reportProtected(mark, [], `the watched files could not be compared: ${errorMessage(err)}`);
+        }
+      }
+      if (next) this.#watchMark = { ...next, snapshot: now };
+    };
+    this.#watchTail = this.#watchTail.then(run);
+    return this.#watchTail;
+  }
+
+  /** Whether a write lands on a watched path: patterns name the session cwd as given, prepared paths are real. */
+  #isWatched(absPath: string, policy: PolicySnapshot<P>): boolean {
+    const patterns = policy.watchedPaths ?? [];
+    const rel = path.relative(this.#realCwd, absPath);
+    const asGiven = rel.startsWith('..') || path.isAbsolute(rel) ? absPath : path.join(this.#opts.ctx.cwd, rel);
+    return findMatchingPattern(absPath, patterns) !== undefined || findMatchingPattern(asGiven, patterns) !== undefined;
+  }
+
+  #reportProtected(window: WatchWindow, changed: readonly string[], unchecked?: string): void {
+    this.#protected.push({
+      call: window.call,
+      command: clip(window.command, 200),
+      when: window.when,
+      changed: changed.map((p) => relative(p, [this.#realCwd, this.#opts.ctx.cwd])),
+      ...(unchecked === undefined ? {} : { unchecked }),
+    });
   }
 
   #addChanged(absPath: string): void {

@@ -118,6 +118,12 @@ function hookControls(docs: readonly SettingsDoc[]) {
 export interface LoadedSettings {
   readonly docs: readonly SettingsDoc[];
   readonly plugins: readonly PluginHooks[];
+  /** Install directory of every enabled plugin, with or without hooks. */
+  readonly pluginRoots: readonly string[];
+  /** Every directory whose skills, subagents and commands were checked for hooks. */
+  readonly componentDirs: readonly string[];
+  /** The skill, subagent and command files read for that check. */
+  readonly componentFiles: readonly string[];
   readonly componentHooks: string | undefined;
   readonly hookControls: ReturnType<typeof hookControls>;
   readonly projectTrusted: boolean;
@@ -425,7 +431,11 @@ async function markdownFiles(dir: string, depth: number, found: string[]): Promi
   }
 }
 
-async function findComponentHooks(claudeDirs: readonly string[], pluginRoots: readonly string[], nestedSkillDirs: readonly string[]): Promise<string | undefined> {
+async function findComponentHooks(
+  claudeDirs: readonly string[],
+  pluginRoots: readonly string[],
+  nestedSkillDirs: readonly string[],
+): Promise<{ readonly hooks: string | undefined; readonly files: readonly string[] }> {
   const files: string[] = [];
   const skillsOf = async (dir: string): Promise<void> => {
     const skills: string[] = [];
@@ -441,9 +451,9 @@ async function findComponentHooks(claudeDirs: readonly string[], pluginRoots: re
   for (const file of files) {
     const text = (await readOptional(file)) ?? '';
     const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(text)?.[1];
-    if (frontmatter !== undefined && /^["']?hooks["']?\s*:/m.test(frontmatter)) return file;
+    if (frontmatter !== undefined && /^["']?hooks["']?\s*:/m.test(frontmatter)) return { hooks: file, files };
   }
-  return undefined;
+  return { hooks: undefined, files };
 }
 
 /** Most directories walked below a project root looking for nested `.claude` directories. */
@@ -554,8 +564,9 @@ export async function loadSettings(opts: LoadSettingsOptions): Promise<LoadedSet
       ...opts.extraDirs.map((dir) => path.join(dir, '.claude')),
     ];
     const nested = (await Promise.all(roots.map(({ root }) => nestedClaudeDirs(root)))).flat();
-    const componentHooks = await findComponentHooks(componentDirs, installed.map((p) => p.root), nested);
-    return { docs, plugins, projectTrusted, hookControls: controls, componentHooks };
+    const { hooks: componentHooks, files: componentFiles } = await findComponentHooks(componentDirs, installed.map((p) => p.root), nested);
+    const pluginRoots = installed.map((p) => p.root);
+    return { docs, plugins, pluginRoots, componentDirs: [...new Set([...componentDirs, ...pluginRoots, ...nested])], componentFiles, projectTrusted, hookControls: controls, componentHooks };
   } catch (err) {
     if (err instanceof SettingsError) throw err;
     throw new SettingsError(errorMessage(err));

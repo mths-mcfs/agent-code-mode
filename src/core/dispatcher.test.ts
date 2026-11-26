@@ -6,7 +6,7 @@ import { makeContext } from '../testing/context.js';
 import { MemoryToolRuntime } from '../testing/memory-tool-runtime.js';
 import { StaticHostAdapter, type StaticHostAdapterOptions } from '../testing/static-host-adapter.js';
 import { Dispatcher, summarize } from './dispatcher.js';
-import type { BashResult, CallReply, Decision, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, Transaction } from './types.js';
+import type { BashResult, CallReply, Decision, PolicyLoadError, PolicySnapshot, PreparedCall, PreparedCallOf, SearchLowering, Transaction, WatchedChange, WatchedSnapshot } from './types.js';
 import { ToolError } from './errors.js';
 
 async function setup(
@@ -552,5 +552,154 @@ describe('summarize', () => {
     bash(`${' '.repeat(1_000_000)}x`);
     bash(`${' \n'.repeat(500_000)}x`);
     expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe('Dispatcher protected-path watch', () => {
+  class FakeSnapshot implements WatchedSnapshot {
+    constructor(readonly files: ReadonlyMap<string, string>) {}
+    async changedSince(earlier: WatchedSnapshot, routine?: (change: WatchedChange) => Promise<boolean>): Promise<string[]> {
+      const before = (earlier as FakeSnapshot).files;
+      const out: string[] = [];
+      for (const p of new Set([...before.keys(), ...this.files.keys()])) {
+        if (before.get(p) === this.files.get(p)) continue;
+        if (routine && (await routine({ path: p, after: { type: 'file', mode: 0o600 } }))) continue;
+        out.push(p);
+      }
+      return out.sort();
+    }
+  }
+
+  async function watchSetup(
+    opts: { onBash?: (command: string) => void; failSnapshot?: () => boolean; hang?: () => boolean; hung?: ((snap: WatchedSnapshot) => void)[]; watchedPaths?: readonly string[]; routine?: (c: WatchedChange) => Promise<boolean>; tools?: MemoryToolRuntime } = {},
+  ) {
+    const ctx = makeContext('/ws');
+    const adapter = new StaticHostAdapter();
+    const files = new Map<string, string>([['/ws/.claude/settings.json', '{}']]);
+    const tools = Object.assign(
+      new MemoryToolRuntime({
+        root: '/ws',
+        bashResult: (effect) => {
+          opts.onBash?.(effect.command);
+          return { exitCode: 0, signal: null, stdout: '', stderr: '', truncated: false, timedOut: false };
+        },
+      }),
+      {
+        snapshots: 0,
+        async snapshotWatched(): Promise<WatchedSnapshot> {
+          tools.snapshots++;
+          if (opts.failSnapshot?.()) throw new Error('more than 5000 entries to check');
+          if (opts.hang?.()) return new Promise<WatchedSnapshot>((resolve) => opts.hung?.push(resolve));
+          return new FakeSnapshot(new Map(files));
+        },
+      },
+    );
+    const loaded = await adapter.loadPolicy(ctx);
+    if ('error' in loaded) throw new Error(loaded.error);
+    const policy = { ...loaded, watchedPaths: opts.watchedPaths ?? ['/ws/.claude/settings*.json'], ...(opts.routine ? { isRoutineWatchedChange: opts.routine } : {}) };
+    const dispatcher = new Dispatcher<null>({ adapter, tools, ctx, policy, watchTimeoutMs: 50 });
+    return { dispatcher, tools, files, again: () => new Dispatcher<null>({ adapter, tools, ctx, policy, watchTimeoutMs: 50 }) };
+  }
+
+  it('reports a change during a bash call, relative to the cwd, and nothing for a quiet one', async () => {
+    const w = await watchSetup({ onBash: (command) => command === 'edit' && w.files.set('/ws/.claude/settings.json', '{"x":1}') });
+    expect((await w.dispatcher.dispatch('bash', { command: 'quiet' })).ok).toBe(true);
+    expect((await w.dispatcher.dispatch('bash', { command: 'edit' })).ok).toBe(true);
+    await w.dispatcher.finishWatch();
+    expect(w.dispatcher.protectedChanges).toEqual([{ call: 'c2', command: 'bash edit', when: 'during', changed: ['.claude/settings.json'] }]);
+  });
+
+  it('reports a change after a bash call at the next bash call and at the end of the run', async () => {
+    const w = await watchSetup();
+    await w.dispatcher.dispatch('bash', { command: 'one' });
+    w.files.set('/ws/.claude/settings.local.json', '{}');
+    await w.dispatcher.dispatch('bash', { command: 'two' });
+    w.files.delete('/ws/.claude/settings.json');
+    await w.dispatcher.finishWatch();
+    expect(w.dispatcher.protectedChanges).toEqual([
+      { call: 'c1', command: 'bash one', when: 'after', changed: ['.claude/settings.local.json'] },
+      { call: 'c2', command: 'bash two', when: 'after', changed: ['.claude/settings.json'] },
+    ]);
+  });
+
+  it('reports both windows as unchecked when a snapshot fails, and the call still runs', async () => {
+    let fail = false;
+    const w = await watchSetup({ failSnapshot: () => fail });
+    await w.dispatcher.dispatch('bash', { command: 'one' });
+    fail = true;
+    const second = await w.dispatcher.dispatch('bash', { command: 'two' });
+    expect(second.ok).toBe(true);
+    fail = false;
+    await w.dispatcher.finishWatch();
+    const why = 'the watched files could not be read: more than 5000 entries to check';
+    expect(w.dispatcher.protectedChanges).toEqual([
+      { call: 'c1', command: 'bash one', when: 'after', changed: [], unchecked: why },
+      { call: 'c2', command: 'bash two', when: 'during', changed: [], unchecked: why },
+      { call: 'c2', command: 'bash two', when: 'after', changed: [], unchecked: why },
+    ]);
+  });
+
+  it('stops waiting for a snapshot that hangs, reports it unchecked, and starts no other while it hangs', async () => {
+    let hang = false;
+    const w = await watchSetup({ hang: () => hang });
+    await w.dispatcher.dispatch('bash', { command: 'one' });
+    hang = true;
+    const second = await w.dispatcher.dispatch('bash', { command: 'two' });
+    expect(second.ok).toBe(true);
+    await w.dispatcher.finishWatch();
+    const timedOut = 'the watched files could not be read: the check did not finish within 50 ms';
+    const busy = 'the watched files could not be read: an earlier check of the watched files has not finished';
+    expect(w.dispatcher.protectedChanges).toEqual([
+      { call: 'c1', command: 'bash one', when: 'after', changed: [], unchecked: timedOut },
+      { call: 'c2', command: 'bash two', when: 'during', changed: [], unchecked: timedOut },
+      { call: 'c2', command: 'bash two', when: 'after', changed: [], unchecked: busy },
+    ]);
+    const taken = w.tools.snapshots;
+    const next = w.again();
+    await next.dispatch('bash', { command: 'three' });
+    expect(w.tools.snapshots).toBe(taken);
+    expect(next.protectedChanges.map((c) => c.unchecked)).toEqual([busy, busy]);
+  });
+
+  it('keeps refusing while any timed-out snapshot of a shared runtime still hangs, whichever settles first', async () => {
+    const hung: ((snap: WatchedSnapshot) => void)[] = [];
+    const w = await watchSetup({ hang: () => true, hung });
+    const [a, b] = [w.again(), w.again()];
+    await Promise.all([a.dispatch('bash', { command: 'a' }), b.dispatch('bash', { command: 'b' })]);
+    expect(hung).toHaveLength(2);
+    hung[0]?.(new FakeSnapshot(new Map()));
+    await new Promise((r) => setTimeout(r, 10));
+    const taken = w.tools.snapshots;
+    const c = w.again();
+    await c.dispatch('bash', { command: 'c' });
+    expect(w.tools.snapshots).toBe(taken);
+    expect(c.protectedChanges.map((x) => x.unchecked)).toEqual([
+      'the watched files could not be read: an earlier check of the watched files has not finished',
+      'the watched files could not be read: an earlier check of the watched files has not finished',
+    ]);
+    hung[1]?.(new FakeSnapshot(new Map()));
+    await new Promise((r) => setTimeout(r, 10));
+    await w.again().dispatch('bash', { command: 'd' });
+    expect(w.tools.snapshots).toBeGreaterThan(taken);
+  });
+
+  it('leaves routine changes out, and checks nothing after the end of the run, in a run without bash or without watched paths', async () => {
+    const w = await watchSetup({ onBash: () => w.files.set('/ws/.claude/settings.local.json', '{}'), routine: async (c) => c.path.endsWith('.local.json') });
+    await w.dispatcher.dispatch('bash', { command: 'one' });
+    await w.dispatcher.finishWatch();
+    const taken = w.tools.snapshots;
+    await w.dispatcher.finishWatch();
+    expect(w.tools.snapshots).toBe(taken);
+    expect(w.dispatcher.protectedChanges).toEqual([]);
+
+    const readOnly = await watchSetup();
+    await readOnly.dispatcher.dispatch('glob', { pattern: '*' });
+    await readOnly.dispatcher.finishWatch();
+    expect(readOnly.tools.snapshots).toBe(0);
+
+    const none = await watchSetup({ watchedPaths: [] });
+    await none.dispatcher.dispatch('bash', { command: 'one' });
+    await none.dispatcher.finishWatch();
+    expect(none.tools.snapshots).toBe(0);
   });
 });

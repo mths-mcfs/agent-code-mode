@@ -1,10 +1,10 @@
 import { constants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { lstat, open, rename, rm } from 'node:fs/promises';
+import { lstat, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { stateDirPath } from '../../core/state-dir.js';
-import type { ContextInput, ContextProvider, ContextSource, HookContextRecord, HookContextStore, HostKind, SessionContext } from '../../core/types.js';
+import type { ContextInput, ContextProvider, ContextSource, HookContextRecord, HookContextStore, HostKind, SessionContext, WatchedChange } from '../../core/types.js';
 
 /**
  * Verified on Claude Code 2.1.325: the hook's `tool_use_id` equals the
@@ -32,6 +32,35 @@ export type ContextFile = z.infer<typeof ContextFileSchema>;
 
 export function contextDir(stateDir: string): string {
   return path.join(stateDir, 'ctx');
+}
+
+const HELPER_FILE = /^\.[A-Za-z0-9_-]+\.[0-9a-f]{12}\.(tmp|claimed)$/;
+const RECORD_FILE = /^([A-Za-z0-9_-]+)\.json$/;
+
+async function recordNamesItsOwnId(file: string): Promise<boolean> {
+  const id = RECORD_FILE.exec(path.basename(file))?.[1];
+  if (id === undefined) return false;
+  try {
+    const text = await readFile(file, 'utf8');
+    if (Buffer.byteLength(text) > MAX_CONTEXT_FILE_BYTES) return false;
+    const parsed = ContextFileSchema.safeParse(JSON.parse(text));
+    return parsed.success && parsed.data.tool_use_id === id;
+  } catch {
+    return false;
+  }
+}
+
+export function routineContextChange(ctxDir: string, platform: NodeJS.Platform = process.platform): (change: WatchedChange) => Promise<boolean> {
+  // Windows has no POSIX modes, so the private modes can be checked only elsewhere.
+  const isPrivate = (side: WatchedChange['after'], type: 'dir' | 'file', mode: number): boolean =>
+    side?.type === type && (platform === 'win32' || (side.mode & 0o777) === mode);
+  return async ({ path: p, before, after }) => {
+    if (p === ctxDir) return before === undefined && isPrivate(after, 'dir', 0o700);
+    if (path.dirname(p) !== ctxDir) return false;
+    const removed = after === undefined && before?.type === 'file';
+    const created = before === undefined && isPrivate(after, 'file', 0o600);
+    return removed || (created && (HELPER_FILE.test(path.basename(p)) || (await recordNamesItsOwnId(p))));
+  };
 }
 
 export async function isPrivateDir(dir: string, uid: number): Promise<boolean> {

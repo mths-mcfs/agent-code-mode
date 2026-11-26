@@ -341,6 +341,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       }
     }
 
+    await active.finishWatch();
+    const protectedChanges = active.protectedChanges;
     const base = {
       logs: logs.finish(),
       calls: active.calls,
@@ -348,6 +350,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       diff: active.diff,
       warnings,
       ...(rolledBack ? { rolledBack } : {}),
+      ...(protectedChanges.length > 0 ? { protectedChanges } : {}),
     };
     if (error) return { ok: false, error, ...base };
     return { ok: true, result: outcome.ok ? (outcome.value ?? null) : null, ...base };
@@ -361,6 +364,8 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       journalBusy = rollback.done;
       rolledBack = rollback.report;
     }
+    await dispatcher?.finishWatch();
+    const protectedChanges = dispatcher?.protectedChanges ?? [];
     return {
       ok: false,
       error: { kind: 'internal', name: 'InternalError', message: errorMessage(err) },
@@ -370,6 +375,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       diff: dispatcher?.diff ?? '',
       warnings,
       ...(rolledBack ? { rolledBack } : {}),
+      ...(protectedChanges.length > 0 ? { protectedChanges } : {}),
     };
   } finally {
     if (timer) clearTimeout(timer);
