@@ -164,7 +164,7 @@ export class McpUpstreams implements McpRuntime {
     const deadline = Date.now() + spec.startupTimeoutMs;
     const left = (): number => Math.max(1, deadline - Date.now());
     try {
-      await withTimeout(client.connect(transport, { timeout: spec.startupTimeoutMs }), spec.startupTimeoutMs, `did not start and initialize within ${spec.startupTimeoutMs} ms`);
+      await withTimeout(client.connect(transport), spec.startupTimeoutMs, `did not start and initialize within ${spec.startupTimeoutMs} ms`);
       const tools = new Set<string>();
       let cursor: string | undefined;
       for (let page = 0; page < LIST_PAGES && tools.size < MAX_LISTED_TOOLS; page++) {

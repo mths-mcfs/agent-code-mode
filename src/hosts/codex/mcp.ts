@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { z } from 'zod';
+import { formatIssues } from '../../core/schemas.js';
 import type { Decision, McpPolicy, McpServerSpec, PreparedMcpCall } from '../../core/types.js';
 import { mcpNameProblem, shownName } from '../../mcp/names.js';
 import { getPath, isTable, type ApprovalPolicy, type TomlTable } from './config.js';
@@ -22,7 +24,22 @@ const DEFAULT_ENV_VARS =
     ? ['PATH', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'SYSTEMDRIVE', 'USERNAME', 'USERDOMAIN', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'POWERSHELL', 'PWSH']
     : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'USER', '__CF_USER_TEXT_ENCODING', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ'];
 
-const KNOWN_KEYS = new Set(['command', 'args', 'env', 'env_vars', 'cwd', 'enabled', 'required', 'enabled_tools', 'disabled_tools', 'startup_timeout_sec', 'startup_timeout_ms', 'tool_timeout_sec', 'tools']);
+const Seconds = z.number().positive();
+const StdioEntry = z.strictObject({
+  command: z.string().min(1),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  env_vars: z.array(z.string()).optional(),
+  cwd: z.string().optional(),
+  enabled: z.boolean().optional(),
+  required: z.boolean().optional(),
+  enabled_tools: z.array(z.string()).optional(),
+  disabled_tools: z.array(z.string()).optional(),
+  startup_timeout_sec: Seconds.optional(),
+  startup_timeout_ms: Seconds.optional(),
+  tool_timeout_sec: Seconds.optional(),
+  tools: z.record(z.string(), z.looseObject({ approval_mode: z.string().optional() })).optional(),
+});
 
 /** How Codex gates the tools of one server. */
 export interface CodexMcpRules {
@@ -30,14 +47,6 @@ export interface CodexMcpRules {
   readonly disabledTools: readonly string[];
   /** `tools.<tool>.approval_mode`, as written. */
   readonly approval: Readonly<Record<string, string>>;
-}
-
-function strings(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((v): v is string => typeof v === 'string') ? value : undefined;
-}
-
-function positive(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 export function discoverCodexMcp(
@@ -66,56 +75,34 @@ export function discoverCodexMcp(
       notes.push(`${where}: only stdio servers are reachable from scripts`);
       continue;
     }
-    const unknown = Object.keys(entry).find((k) => !KNOWN_KEYS.has(k));
-    if (unknown !== undefined) {
-      notes.push(`${where}: the key ${unknown} is not applied by this server`);
+    const parsed = StdioEntry.safeParse(entry);
+    if (!parsed.success) {
+      notes.push(`${where}: not a stdio entry this server runs exactly (${formatIssues(parsed.error)})`);
       continue;
     }
-    const command = entry['command'];
-    const args = entry['args'] === undefined ? [] : strings(entry['args']);
-    const ownEnv = entry['env'] === undefined ? {} : isTable(entry['env']) ? entry['env'] : undefined;
-    const envVars = entry['env_vars'] === undefined ? [] : strings(entry['env_vars']);
-    const enabledTools = entry['enabled_tools'] === undefined ? undefined : strings(entry['enabled_tools']);
-    const disabledTools = entry['disabled_tools'] === undefined ? [] : strings(entry['disabled_tools']);
-    const tools = entry['tools'] === undefined ? {} : isTable(entry['tools']) ? entry['tools'] : undefined;
-    if (
-      typeof command !== 'string' ||
-      command === '' ||
-      args === undefined ||
-      ownEnv === undefined ||
-      !Object.values(ownEnv).every((v) => typeof v === 'string') ||
-      envVars === undefined ||
-      (entry['enabled_tools'] !== undefined && enabledTools === undefined) ||
-      disabledTools === undefined ||
-      tools === undefined ||
-      (entry['cwd'] !== undefined && typeof entry['cwd'] !== 'string')
-    ) {
-      notes.push(`${where}: not a stdio entry this server runs exactly`);
-      continue;
-    }
+    const e = parsed.data;
+    const envVars = e.env_vars ?? [];
     const missing = envVars.find((v) => env[v] === undefined);
     if (missing !== undefined) {
       notes.push(`${where}: env_vars names ${missing}, which this server's environment does not have`);
       continue;
     }
-    const approval: Record<string, string> = {};
-    for (const [tool, t] of Object.entries(tools)) {
-      const mode = isTable(t) ? t['approval_mode'] : undefined;
-      if (typeof mode === 'string') approval[tool] = mode;
-    }
-    const pass = (keys: readonly string[]): [string, string][] => keys.flatMap((k) => (env[k] === undefined ? [] : [[k, env[k]] as [string, string]]));
-    const startupMs = positive(entry['startup_timeout_ms']) ?? (positive(entry['startup_timeout_sec']) ?? CODEX_MCP_STARTUP_TIMEOUT_SEC) * 1000;
-    const configuredCwd = entry['cwd'];
+    const passed = [...DEFAULT_ENV_VARS, ...envVars].flatMap((k) => {
+      const v = env[k];
+      return v === undefined ? [] : [[k, v] as const];
+    });
     servers.push({
       name,
-      command,
-      args,
-      env: { ...Object.fromEntries([...pass(DEFAULT_ENV_VARS), ...pass(envVars)]), ...(ownEnv as Record<string, string>) },
-      cwd: typeof configuredCwd === 'string' ? path.resolve(cwd, configuredCwd) : cwd,
-      startupTimeoutMs: startupMs,
-      toolTimeoutMs: (positive(entry['tool_timeout_sec']) ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
+      command: e.command,
+      args: e.args ?? [],
+      env: { ...Object.fromEntries(passed), ...e.env },
+      cwd: e.cwd === undefined ? cwd : path.resolve(cwd, e.cwd),
+      startupTimeoutMs: e.startup_timeout_ms ?? (e.startup_timeout_sec ?? CODEX_MCP_STARTUP_TIMEOUT_SEC) * 1000,
+      toolTimeoutMs: (e.tool_timeout_sec ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
       origin,
     });
+    const approval = Object.fromEntries(Object.entries(e.tools ?? {}).flatMap(([tool, t]) => (t.approval_mode === undefined ? [] : [[tool, t.approval_mode] as const])));
+    const { enabled_tools: enabledTools, disabled_tools: disabledTools = [] } = e;
     rules[name] = { ...(enabledTools === undefined ? {} : { enabledTools }), disabledTools, approval };
   }
   return { mcp: { servers, notes }, rules };

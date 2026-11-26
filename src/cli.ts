@@ -2,10 +2,10 @@
 import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { OverflowStore } from './core/overflow.js';
 import type { HostKind } from './core/types.js';
 import { runContextHook } from './hosts/claude/context-hook.js';
 import { applyPlan, parseInstallArgs, planDiff, planInstall } from './install.js';
-import { OverflowStore } from './core/overflow.js';
 import { McpUpstreams } from './mcp/upstream.js';
 import { createMcpServer } from './server/mcp.js';
 
