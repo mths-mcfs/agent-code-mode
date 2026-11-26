@@ -40,14 +40,16 @@ function missing(err: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
-function patternRoot(pattern: string): { readonly root: string; readonly depth: number } {
+const WILD = /[*?]/;
+
+/** The literal directory a pattern starts from, and the segments below it. */
+function patternRoot(pattern: string): { readonly root: string; readonly rest: readonly string[] } {
   const parts = pattern.split(/[\\/]/);
-  const at = parts.findIndex((seg) => /[*?]/.test(seg));
-  if (at === -1) return { root: pattern, depth: 0 };
+  const at = parts.findIndex((seg) => WILD.test(seg));
+  if (at === -1) return { root: pattern, rest: [] };
   const root = parts.slice(0, at).join(path.sep) || path.sep;
   if (!path.isAbsolute(root) || path.dirname(root) === root) throw new Error(`watched pattern ${pattern} does not start with a literal directory`);
-  const rest = parts.slice(at);
-  return { root, depth: rest.some((seg) => seg.includes('**')) ? Number.POSITIVE_INFINITY : rest.length };
+  return { root, rest: parts.slice(at) };
 }
 
 class Walk {
@@ -88,15 +90,22 @@ class Walk {
     };
   }
 
-  async visit(shown: string, entry: Entry, pattern: string, depth: number, ancestors: ReadonlySet<string>): Promise<void> {
+  async visit(shown: string, entry: Entry, pattern: string, rest: readonly string[], ancestors: ReadonlySet<string>): Promise<void> {
     if (matchesPathPattern(shown, pattern)) this.entries.set(shown, entry);
-    if (depth <= 0) return;
-    if (entry.type === 'dir') await this.#walk(shown, shown, pattern, depth, ancestors);
-    else if (entry.targetType === 'dir' && typeof entry.target === 'string' && !ancestors.has(entry.target)) await this.#walk(shown, entry.target, pattern, depth, ancestors);
-  }
-
-  async #walk(shownDir: string, realDir: string, pattern: string, depth: number, ancestors: ReadonlySet<string>): Promise<void> {
+    const [next, ...after] = rest;
+    if (next === undefined) return;
+    const realDir = entry.type === 'dir' ? shown : entry.targetType === 'dir' && typeof entry.target === 'string' ? entry.target : undefined;
+    if (realDir === undefined || ancestors.has(realDir)) return;
     const inner = new Set(ancestors).add(realDir);
+    // A literal segment names one entry: look it up instead of reading the whole directory.
+    if (!WILD.test(next)) {
+      this.spend();
+      const child = await this.entryAt(path.join(realDir, next));
+      if (child !== undefined) await this.visit(path.join(shown, next), child, pattern, after, inner);
+      return;
+    }
+    // `**` matches any depth, so it stays for the levels below.
+    const below = next.includes('**') ? rest : after;
     let dir: Dir;
     try {
       dir = await fs.opendir(realDir);
@@ -106,10 +115,10 @@ class Walk {
     }
     for await (const { name } of dir) {
       this.spend();
-      const shown = path.join(shownDir, name);
-      if (depth === 1 && !matchesPathPattern(shown, pattern)) continue;
+      const child = path.join(shown, name);
+      if (below.length === 0 && !matchesPathPattern(child, pattern)) continue;
       const entry = await this.entryAt(path.join(realDir, name));
-      if (entry !== undefined) await this.visit(shown, entry, pattern, depth - 1, inner);
+      if (entry !== undefined) await this.visit(child, entry, pattern, below, inner);
     }
     this.#inTime();
   }
@@ -145,10 +154,10 @@ class Snapshot implements WatchedSnapshot {
 export async function snapshotWatched(patterns: readonly string[]): Promise<WatchedSnapshot> {
   const w = new Walk();
   for (const pattern of patterns) {
-    const { root, depth } = patternRoot(pattern);
+    const { root, rest } = patternRoot(pattern);
     w.spend();
     const top = await w.entryAt(root);
-    if (top !== undefined) await w.visit(root, top, pattern, depth, new Set());
+    if (top !== undefined) await w.visit(root, top, pattern, rest, new Set());
   }
   return new Snapshot(w.entries);
 }

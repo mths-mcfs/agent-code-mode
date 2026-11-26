@@ -64,6 +64,16 @@ describe.runIf(process.platform !== 'win32')('snapshotWatched', () => {
     expect(moved).toContain(shown);
   });
 
+  it('looks a literal segment up instead of reading the directory around it', async () => {
+    const skill = path.join(claude, 'skills', 'big');
+    mkdirSync(skill, { recursive: true });
+    for (let i = 0; i <= WATCH_MAX_ENTRIES; i++) writeFileSync(path.join(skill, `asset${i}`), '');
+    writeFileSync(path.join(skill, 'SKILL.md'), '---\nname: big\n---\n');
+    const pattern = path.join(claude, 'skills', '*', 'SKILL.md');
+    expect(await changes([pattern], () => writeFileSync(path.join(skill, 'asset1'), 'x'))).toEqual([]);
+    expect(await changes([pattern], () => writeFileSync(path.join(skill, 'SKILL.md'), '---\nhooks: {}\n---\n'))).toEqual([path.join(skill, 'SKILL.md')]);
+  });
+
   it('passes each change to the routine filter, which can leave it out', async () => {
     const before = await snapshotWatched([settings()]);
     writeFileSync(path.join(claude, 'settings.local.json'), '{}');
