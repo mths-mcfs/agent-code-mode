@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ToolError, errorMessage } from '../core/errors.js';
@@ -61,35 +62,31 @@ function readFilterOf(policy: PolicySnapshot): { readonly readFilter?: (realAbsP
   return policy.readFilter ? { readFilter: policy.readFilter } : {};
 }
 
-function bothAllow(a: (realAbsPath: string) => boolean, b: ((realAbsPath: string) => boolean) | undefined): (realAbsPath: string) => boolean {
-  return b === undefined ? a : (p) => a(p) && b(p);
-}
-
 function metaKey(prepared: PreparedCall): string {
   return sha256(JSON.stringify([prepared.id, prepared.tool, prepared.effect]));
 }
 
 class MetaStore {
-  readonly #map = new Map<string, CallMeta>();
+  readonly #map = new Map<string, { readonly content: string; readonly meta: CallMeta }>();
 
-  put(prepared: PreparedCall, meta: CallMeta): void {
-    const key = metaKey(prepared);
-    const earlier = this.#map.get(key);
-    this.#map.delete(key);
-    // Two runs can prepare the same call with different Read rules; whichever commits gets the stricter filter.
-    this.#map.set(key, earlier?.readFilter ? { ...meta, readFilter: bothAllow(earlier.readFilter, meta.readFilter) } : meta);
+  /** Records `meta` under a new `prepareId`, and returns the call carrying it. */
+  put<T extends PreparedCall>(prepared: T, meta: CallMeta): T {
+    const prepareId = randomUUID();
+    this.#map.set(prepareId, { content: metaKey(prepared), meta });
     while (this.#map.size > MAX_PENDING_META) {
       const oldest = this.#map.keys().next();
       if (oldest.done === true) break;
       this.#map.delete(oldest.value);
     }
+    return { ...prepared, prepareId };
   }
 
+  /** The metadata of this very preparation, once; none when the call was changed since. */
   take(prepared: PreparedCall): CallMeta | undefined {
-    const key = metaKey(prepared);
-    const meta = this.#map.get(key);
-    this.#map.delete(key);
-    return meta;
+    if (prepared.prepareId === undefined) return undefined;
+    const entry = this.#map.get(prepared.prepareId);
+    this.#map.delete(prepared.prepareId);
+    return entry !== undefined && entry.content === metaKey(prepared) ? entry.meta : undefined;
   }
 }
 
@@ -200,8 +197,7 @@ export class NodeToolRuntime implements ToolRuntime {
           args: { command, timeoutMs },
           effect: { command, shell: { path: shellPath, args: ['-c'] }, cwd: jail.cwd, timeoutMs, containment },
         };
-        this.#meta.put(prepared, meta(jail.cwd, denyWrite));
-        return prepared;
+        return this.#meta.put(prepared, meta(jail.cwd, denyWrite));
       }
       case 'read': {
         const absPath = await jail.resolve(call.args.path);
@@ -214,8 +210,7 @@ export class NodeToolRuntime implements ToolRuntime {
           args: { path: absPath, offset, limit },
           effect: { absPath, offset, limit },
         };
-        this.#meta.put(prepared, meta(absPath));
-        return prepared;
+        return this.#meta.put(prepared, meta(absPath));
       }
       case 'write': {
         const absPath = await jail.resolveForWrite(call.args.path);
@@ -236,8 +231,7 @@ export class NodeToolRuntime implements ToolRuntime {
             diff,
           },
         };
-        this.#meta.put(prepared, m);
-        return prepared;
+        return this.#meta.put(prepared, m);
       }
       case 'edit': {
         const absPath = await jail.resolveForWrite(call.args.path);
@@ -270,8 +264,7 @@ export class NodeToolRuntime implements ToolRuntime {
             replacements: outcome.count,
           },
         };
-        this.#meta.put(prepared, m);
-        return prepared;
+        return this.#meta.put(prepared, m);
       }
       case 'grep': {
         const absRoot = await jail.resolveSearchRoot(call.args.path ?? '.');
@@ -286,8 +279,7 @@ export class NodeToolRuntime implements ToolRuntime {
           maxResults: call.args.maxResults ?? DEFAULT_GREP_MAX_RESULTS,
         };
         const prepared: PreparedCallOf<'grep'> = { id: call.id, tool: 'grep', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot), ...readFilterOf(policy) });
-        return prepared;
+        return this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot), ...readFilterOf(policy) });
       }
       case 'glob': {
         const absRoot = await jail.resolveSearchRoot(call.args.path ?? '.');
@@ -296,8 +288,7 @@ export class NodeToolRuntime implements ToolRuntime {
         normalizeGlob(call.args.pattern, absRoot);
         const effect = { absRoot, pattern: call.args.pattern, maxResults: call.args.maxResults ?? DEFAULT_GLOB_MAX_RESULTS };
         const prepared: PreparedCallOf<'glob'> = { id: call.id, tool: 'glob', args: { ...call.args, path: absRoot }, effect };
-        this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot), ...readFilterOf(policy) });
-        return prepared;
+        return this.#meta.put(prepared, { ...meta(absRoot), searchTop: searchTop(jail.rootOf(absRoot) ?? jail.cwd, absRoot), ...readFilterOf(policy) });
       }
     }
   }

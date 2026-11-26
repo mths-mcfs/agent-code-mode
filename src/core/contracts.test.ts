@@ -90,15 +90,35 @@ describe.skipIf(ROOTED_OPS_REFUSED)('PolicySnapshot.readFilter and additionalRoo
     expect(glob.filtered).toBe(2);
   });
 
-  it('gives two pending preparations of the same search the stricter of their Read filters', async () => {
-    const { ws, ctx } = workspace();
+  it.each([['strict first', true], ['open first', false]])(
+    'commits each of two pending preparations of the same search with its own Read filter (%s)',
+    async (_order, strictFirst) => {
+      const { ws, ctx } = workspace();
+      const tools = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
+      const call: ToolCall = { id: 'c1', tool: 'grep', args: { pattern: 'token' } };
+      const strict = await tools.prepare(call, ctx, { ...plain, readFilter: (p) => path.basename(p) !== '.env' });
+      const open = await tools.prepare(call, ctx, plain);
+      const files = async (prepared: PreparedCall): Promise<string[]> =>
+        ((await tools.commit(prepared, new AbortController().signal)) as GrepResult).matches.map((m) => path.relative(ws, m.file)).sort();
+      const all = ['.env', path.join('src', 'a.ts'), path.join('src', 'b.secret')];
+      const withoutEnv = all.filter((f) => f !== '.env');
+      if (strictFirst) {
+        expect(await files(strict)).toEqual(withoutEnv);
+        expect(await files(open)).toEqual(all);
+      } else {
+        expect(await files(open)).toEqual(all);
+        expect(await files(strict)).toEqual(withoutEnv);
+      }
+    },
+  );
+
+  it('refuses to commit a prepared call whose effect changed after prepare', async () => {
+    const { ctx } = workspace();
     const tools = new NodeToolRuntime({ stateDir: path.join(base, 'state') });
-    const call: ToolCall = { id: 'c1', tool: 'grep', args: { pattern: 'token' } };
-    const filtered = await tools.prepare(call, ctx, { ...plain, readFilter: (p) => path.basename(p) !== '.env' });
-    await tools.prepare(call, ctx, plain);
-    const grep = (await tools.commit(filtered, new AbortController().signal)) as GrepResult;
-    expect(grep.matches.map((m) => path.relative(ws, m.file)).sort()).toEqual([path.join('src', 'a.ts'), path.join('src', 'b.secret')]);
-    expect(grep.filtered).toBe(1);
+    const prepared = await tools.prepare({ id: 'c1', tool: 'grep', args: { pattern: 'token' } }, ctx, plain);
+    if (prepared.tool !== 'grep') throw new Error('expected grep');
+    const altered = { ...prepared, effect: { ...prepared.effect, pattern: 'secret' } };
+    await expect(tools.commit(altered, new AbortController().signal)).rejects.toThrow(/not prepared/);
   });
 
   it('reports filtered 0 without a filter', async () => {

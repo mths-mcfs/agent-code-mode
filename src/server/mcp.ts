@@ -163,6 +163,8 @@ export function createMcpServer(opts: McpServerOptions): Server {
     return policy !== undefined && !('error' in policy) ? policy : undefined;
   };
   const recoveries = new Map<string, Promise<RecoveryLog | undefined>>();
+  /** Every recovery pass started; a run waits for all of them, whatever roots its policy turns out to grant. */
+  const passes: Promise<RecoveryLog | undefined>[] = [];
   const recover = (trigger: RecoveryLog['trigger'], known: readonly string[], policy: () => Promise<PolicySnapshot | undefined>): Promise<RecoveryLog | undefined> => {
     const pass: Promise<RecoveryLog | undefined> = Promise.resolve().then(async () => {
       const snapshot = await policy().catch(() => undefined);
@@ -176,6 +178,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
       return log;
     });
     for (const root of known) recoveries.set(root, pass);
+    passes.push(pass);
     return pass;
   };
   if (recoverJournals) {
@@ -199,7 +202,7 @@ export function createMcpServer(opts: McpServerOptions): Server {
     const startup = recoveries.get(serverCwd);
     if (!startupReported && startup !== undefined) reported.push(startup);
     startupReported = true;
-    await Promise.all(recoveries.values());
+    await Promise.all(passes);
     return [...new Set(await Promise.all(reported))].filter((l): l is RecoveryLog => l !== undefined);
   };
 

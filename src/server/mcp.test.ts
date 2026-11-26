@@ -317,4 +317,111 @@ return { content: r.content, w };`;
     expect(first.result).toBe('original');
     expect(first.warnings.join('\n')).toContain(`restored: ${path.join(extra, 'a.txt')}`);
   });
+  it('restores additional roots outside all declared MCP roots', async () => {
+    const declared = path.join(base, 'declared');
+    const extra = path.join(base, 'custom');
+    mkdirSync(declared);
+    mkdirSync(extra);
+    const file = path.join(extra, 'document.txt');
+    writeFileSync(file, 'original');
+    await crashedWrite('document.txt', 'half-done', extra);
+
+    const createTestRuntime: RuntimeFactory = (host) => {
+      const runtime = createRuntime(host, { env: {}, serverCwd: workspace, stateDir });
+      const generic = new GenericHostAdapter({ stateDir });
+      return {
+        ...runtime,
+        adapter: {
+          host: 'generic',
+          loadPolicy: async (ctx) => ({ ...(await generic.loadPolicy(ctx)), additionalRoots: [extra] }),
+          checkStatic: (prepared) => generic.checkStatic(prepared),
+          authorize: () => generic.authorize(),
+        },
+      };
+    };
+    const client = await connectReal({ serverCwd: workspace, stateDir, roots: [declared], createRuntime: createTestRuntime });
+    const first = await client.callTool({
+      name: 'run',
+      arguments: { code: `return (await read({ path: ${JSON.stringify(file)} })).content;` },
+    });
+    expect(JSON.parse(textOf(first))).toMatchObject({ ok: true, result: 'original' });
+    expect(readFileSync(file, 'utf8')).toBe('original');
+  });
+
+  it('leaves a journal entry for a host-protected file untouched', async () => {
+    const declared = path.join(base, 'declared');
+    mkdirSync(declared);
+    const file = path.join(declared, 'protected.txt');
+    writeFileSync(file, 'original');
+    await crashedWrite('protected.txt', 'current', declared);
+
+    const createTestRuntime: RuntimeFactory = (host) => {
+      const runtime = createRuntime(host, { env: {}, serverCwd: workspace, stateDir });
+      const generic = new GenericHostAdapter({ stateDir });
+      return {
+        ...runtime,
+        adapter: {
+          host: 'generic',
+          loadPolicy: async (ctx) => ({ ...(await generic.loadPolicy(ctx)), protectedPaths: [file] }),
+          checkStatic: (prepared) => generic.checkStatic(prepared),
+          authorize: () => generic.authorize(),
+        },
+      };
+    };
+    const client = await connectReal({ serverCwd: workspace, stateDir, roots: [declared], createRuntime: createTestRuntime });
+    const first = await client.callTool({ name: 'run', arguments: { code: 'return 1;' } });
+    expect(textOf(first)).toContain('a protected host policy path');
+    expect(readFileSync(file, 'utf8')).toBe('current');
+  });
+
+  it('makes concurrent first runs wait for recovery of the extra root', async () => {
+    const extra = path.join(base, 'extra');
+    mkdirSync(extra);
+    const file = path.join(extra, 'document.txt');
+    writeFileSync(file, 'original');
+    await crashedWrite('document.txt', 'half-done', extra);
+
+    let releasePolicy = () => {};
+    let policyStarted = () => {};
+    const pending = new Promise<void>((resolve) => { releasePolicy = resolve; });
+    const started = new Promise<void>((resolve) => { policyStarted = resolve; });
+    let policyCalls = 0;
+    const createTestRuntime: RuntimeFactory = (host) => {
+      const runtime = createRuntime(host, { env: {}, serverCwd: workspace, stateDir });
+      const generic = new GenericHostAdapter({ stateDir });
+      return {
+        ...runtime,
+        adapter: {
+          host: 'generic',
+          loadPolicy: async (ctx) => {
+            if (++policyCalls === 1) {
+              policyStarted();
+              await pending;
+            }
+            return { ...(await generic.loadPolicy(ctx)), additionalRoots: [extra] };
+          },
+          checkStatic: (prepared) => generic.checkStatic(prepared),
+          authorize: () => generic.authorize(),
+        },
+      };
+    };
+    const client = await connectReal({ serverCwd: workspace, stateDir, createRuntime: createTestRuntime });
+    const request = {
+      name: 'run',
+      arguments: { code: `return (await read({ path: ${JSON.stringify(file)} })).content;` },
+    };
+    const first = client.callTool(request);
+    await started;
+    const second = client.callTool(request);
+    const releaseTimer = setTimeout(releasePolicy, 2_000);
+    try {
+      const result = await second;
+      expect(JSON.parse(textOf(result))).toMatchObject({ ok: true, result: 'original' });
+    } finally {
+      clearTimeout(releaseTimer);
+      releasePolicy();
+      await first;
+    }
+  });
+
 });

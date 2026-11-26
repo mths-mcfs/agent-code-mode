@@ -355,6 +355,12 @@ export type PreparedCall = {
      * prepared and replaces any value the tool runtime returns.
      */
     readonly requestedPath?: string;
+    /**
+     * Opaque id the tool runtime gives this preparation, so `commit` finds
+     * what `prepare` recorded for exactly this call and no other call with the
+     * same content. The dispatcher keeps it on its frozen copy.
+     */
+    readonly prepareId?: string;
   };
 }[ToolName];
 
