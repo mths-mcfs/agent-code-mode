@@ -635,6 +635,7 @@ describe('CodexContextProvider', () => {
   });
 });
 
+// memoryIo keys files by POSIX paths, which the adapter's win32 path joins never reach; the allowlist logic itself runs on every platform in mcp.test.ts.
 describe.runIf(posix)('Codex requirements.toml mcp_servers allowlist, through the adapter', () => {
   const tools = ['[mcp_servers.ok.tools.t]', 'approval_mode = "approve"', '[mcp_servers.blocked.tools.t]', 'approval_mode = "approve"'].join('\n');
   const files = {
