@@ -73,7 +73,7 @@ export const WATCH_TIMEOUT_MS = 3_000;
  * hangs, no other starts, so a stuck mount ties up one walk's file-system
  * calls and not one per bash call.
  */
-const hungSnapshots = new WeakMap<object, Promise<unknown>>();
+const hungSnapshots = new WeakMap<object, Set<Promise<unknown>>>();
 
 /** `work`, or a rejection after `ms`; `work` keeps running, and `onLate` gets it. */
 async function within<T>(work: Promise<T>, ms: number, onLate: (work: Promise<T>) => void): Promise<T> {
@@ -664,15 +664,14 @@ export class Dispatcher<P = unknown> {
       const tools = this.#opts.tools;
       const ms = this.#opts.watchTimeoutMs ?? WATCH_TIMEOUT_MS;
       const hang = (work: Promise<unknown>): void => {
-        hungSnapshots.set(tools, work);
-        void work.then(
-          () => hungSnapshots.delete(tools),
-          () => hungSnapshots.delete(tools),
-        );
+        const pending = hungSnapshots.get(tools) ?? new Set();
+        hungSnapshots.set(tools, pending.add(work));
+        const settled = (): void => void pending.delete(work);
+        void work.then(settled, settled);
       };
       let now: WatchedSnapshot;
       try {
-        if (hungSnapshots.has(tools)) throw new Error('an earlier check of the watched files has not finished');
+        if ((hungSnapshots.get(tools)?.size ?? 0) > 0) throw new Error('an earlier check of the watched files has not finished');
         now = await within(take.call(tools, patterns), ms, hang);
       } catch (err) {
         const why = `the watched files could not be read: ${errorMessage(err)}`;

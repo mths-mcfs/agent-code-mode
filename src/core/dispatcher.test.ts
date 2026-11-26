@@ -571,7 +571,7 @@ describe('Dispatcher protected-path watch', () => {
   }
 
   async function watchSetup(
-    opts: { onBash?: (command: string) => void; failSnapshot?: () => boolean; hang?: () => boolean; watchedPaths?: readonly string[]; routine?: (c: WatchedChange) => Promise<boolean>; tools?: MemoryToolRuntime } = {},
+    opts: { onBash?: (command: string) => void; failSnapshot?: () => boolean; hang?: () => boolean; hung?: ((snap: WatchedSnapshot) => void)[]; watchedPaths?: readonly string[]; routine?: (c: WatchedChange) => Promise<boolean>; tools?: MemoryToolRuntime } = {},
   ) {
     const ctx = makeContext('/ws');
     const adapter = new StaticHostAdapter();
@@ -589,7 +589,7 @@ describe('Dispatcher protected-path watch', () => {
         async snapshotWatched(): Promise<WatchedSnapshot> {
           tools.snapshots++;
           if (opts.failSnapshot?.()) throw new Error('more than 5000 entries to check');
-          if (opts.hang?.()) return new Promise<WatchedSnapshot>(() => undefined);
+          if (opts.hang?.()) return new Promise<WatchedSnapshot>((resolve) => opts.hung?.push(resolve));
           return new FakeSnapshot(new Map(files));
         },
       },
@@ -659,6 +659,28 @@ describe('Dispatcher protected-path watch', () => {
     await next.dispatch('bash', { command: 'three' });
     expect(w.tools.snapshots).toBe(taken);
     expect(next.protectedChanges.map((c) => c.unchecked)).toEqual([busy, busy]);
+  });
+
+  it('keeps refusing while any timed-out snapshot of a shared runtime still hangs, whichever settles first', async () => {
+    const hung: ((snap: WatchedSnapshot) => void)[] = [];
+    const w = await watchSetup({ hang: () => true, hung });
+    const [a, b] = [w.again(), w.again()];
+    await Promise.all([a.dispatch('bash', { command: 'a' }), b.dispatch('bash', { command: 'b' })]);
+    expect(hung).toHaveLength(2);
+    hung[0]?.(new FakeSnapshot(new Map()));
+    await new Promise((r) => setTimeout(r, 10));
+    const taken = w.tools.snapshots;
+    const c = w.again();
+    await c.dispatch('bash', { command: 'c' });
+    expect(w.tools.snapshots).toBe(taken);
+    expect(c.protectedChanges.map((x) => x.unchecked)).toEqual([
+      'the watched files could not be read: an earlier check of the watched files has not finished',
+      'the watched files could not be read: an earlier check of the watched files has not finished',
+    ]);
+    hung[1]?.(new FakeSnapshot(new Map()));
+    await new Promise((r) => setTimeout(r, 10));
+    await w.again().dispatch('bash', { command: 'd' });
+    expect(w.tools.snapshots).toBeGreaterThan(taken);
   });
 
   it('leaves routine changes out, and checks nothing after the end of the run, in a run without bash or without watched paths', async () => {

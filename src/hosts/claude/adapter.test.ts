@@ -8,6 +8,9 @@ import { Dispatcher } from '../../core/dispatcher.js';
 import type { Decision, PolicySnapshot, PreparedCall, SessionContext } from '../../core/types.js';
 import { MemoryToolRuntime, makeContext } from '../../testing/index.js';
 import { ClaudeHostAdapter, type ClaudePolicy } from './adapter.js';
+import { matchesPathPattern } from '../../core/paths.js';
+import { parseClaudeFlags } from './parent-args.js';
+import { loadSettings } from './settings.js';
 
 const posix = process.platform !== 'win32';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -727,6 +730,22 @@ describe('policy snapshot', () => {
     expect(watched).toContain(path.join(s.home, '.claude.json'));
     expect(watched).not.toContain(path.join(s.base, 'state', '**'));
     expect(s.policy.isRoutineWatchedChange).toBeTypeOf('function');
+  });
+
+  it('watches every file the component hook check reads', async () => {
+    const md = '---\nname: x\n---\n';
+    const files = ['skills/SKILL.md', 'skills/a/SKILL.md', 'agents/x.md', 'agents/d/e/y.md', 'commands/c.md', 'commands/d/e.md'];
+    const s = await setup({ files: Object.fromEntries([...files.map((f) => [`.claude/${f}`, md]), ...files.map((f) => [`sub/.claude/${f}`, md])]) });
+    for (const f of files) {
+      await mkdir(path.dirname(path.join(s.home, '.claude', f)), { recursive: true });
+      await writeFile(path.join(s.home, '.claude', f), md);
+    }
+    const policy = await s.adapter.loadPolicy(s.ctx);
+    if ('error' in policy) throw new Error(policy.error);
+    const loaded = await loadSettings({ projectRoots: [s.project], home: s.home, configDir: path.join(s.home, '.claude'), managedDir: undefined, env: {}, flags: parseClaudeFlags(['claude']), parentCwd: undefined, extraDirs: [] });
+    expect(loaded.componentFiles.length).toBeGreaterThanOrEqual(files.length * 2);
+    const unwatched = loaded.componentFiles.filter((f) => !(policy.watchedPaths ?? []).some((p) => matchesPathPattern(f, p)));
+    expect(unwatched).toEqual([]);
   });
 
   it('returns a sandbox containment when Claude sandboxing is enabled', async () => {
