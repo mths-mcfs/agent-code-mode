@@ -260,7 +260,7 @@ export interface TestResult {
 
 /** What `undo()` resolves to. Paths are relative to the session cwd when inside it. */
 export interface UndoResult {
-  /** Files put back to their content before the run, or removed again when the run created them. */
+  /** Files that hold their content from before the run again (or are gone again when the run created them). */
   readonly restored: readonly string[];
   /** Files left as they are, with the reason (another writer changed them since, or a protected path). */
   readonly skipped: readonly { readonly path: string; readonly reason: string }[];

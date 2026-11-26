@@ -163,6 +163,16 @@ describe.runIf(posix)('scratch directory, undo and test() through run', () => {
       expect(readFileSync(path.join(lab.ws, 'a.txt'), 'utf8')).toBe('from another process');
     });
 
+    it('drops a file another process already put back from changedFiles and diff', async () => {
+      lab = makeLab({ 'a.txt': 'a0', 'w.js': '' });
+      writeFileSync(path.join(lab.ws, 'w.js'), "require('fs').writeFileSync('a.txt', 'a0');\n");
+      server = await claudeServer(lab, { sandbox: { enabled: false }, permissions: { allow: ['Bash(node w.js)'] } });
+      const out = await server.run(`await write({ path: 'a.txt', content: 'a1' }); await bash({ command: 'node w.js' }); return await undo();`, { transaction: true });
+      expect(out.result).toMatchObject({ restored: ['a.txt'], skipped: [] });
+      expect(out.changedFiles).toBeUndefined();
+      expect(readFileSync(path.join(lab.ws, 'a.txt'), 'utf8')).toBe('a0');
+    });
+
     it('needs a transaction', async () => {
       lab = makeLab({ 'a.txt': 'a0' });
       server = await claudeServer(lab, {});
@@ -184,7 +194,8 @@ describe.runIf(posix)('scratch directory, undo and test() through run', () => {
       server = await claudeServer(lab, settings);
       const out = await server.run(`return await test({ command: 'node --test math.test.mjs' });`);
       expect(out.ok).toBe(true);
-      expect(out.result).toMatchObject({ ok: false, exitCode: 1, runner: 'node:test', passed: 1, failed: 1, failures: [{ name: 'subtracts' }] });
+      // Node 22 reports in TAP when stdout is not a terminal, later versions with the spec reporter.
+      expect(out.result).toMatchObject({ ok: false, exitCode: 1, runner: expect.stringMatching(/^(node:test|tap)$/), passed: 1, failed: 1, failures: [expect.objectContaining({ name: 'subtracts' })] });
       expect(callAt(out, 1)).toMatchObject({ decision: 'allowed' });
       expect(out.calls).toEqual([expect.objectContaining({ tool: 'test' })]);
     });

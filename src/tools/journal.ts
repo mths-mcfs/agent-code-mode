@@ -357,7 +357,8 @@ export class FileTransaction implements Transaction {
         if (!accept(live.entry.path)) continue;
         const outcome = await restoreLive(live);
         if (outcome === 'restored' || outcome === 'unchanged') {
-          if (outcome === 'restored') restored.push(live.entry.path);
+          // Unchanged: the file already holds its original again (another writer put it back), so nothing is written.
+          restored.push(live.entry.path);
           this.#entries.delete(live.entry.path);
           this.#bytes -= live.bytes?.length ?? 0;
         } else {

@@ -97,6 +97,16 @@ describe.skipIf(ROOTED_OPS_REFUSED)('FileTransaction.undo', () => {
     expect(read('a.txt')).toBe('someone else\n');
   });
 
+  it('writes nothing when someone else already put the original back, and reports the file as back', async () => {
+    const tx = begin();
+    await write('a.txt', 'a1\n', tx);
+    writeFileSync(at('a.txt'), 'a0\n');
+    const before = statSync(at('a.txt')).ino;
+    expect(await tx.undo()).toEqual({ restored: [at('a.txt')], skipped: [] });
+    expect(statSync(at('a.txt')).ino).toBe(before);
+    expect(read('a.txt')).toBe('a0\n');
+  });
+
   it('leaves a file the run created alone when someone else rewrote it', async () => {
     const tx = begin();
     await write('c.txt', 'mine\n', tx);
