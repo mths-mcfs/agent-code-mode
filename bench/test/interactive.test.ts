@@ -49,6 +49,16 @@ describe('interactive Claude transcript parser', () => {
     expect(total).toBeCloseTo(cost?.totalUsd ?? -1, 9);
   });
 
+  it('keeps the 1-hour writes of the other responses when one response has no TTL split', () => {
+    const text = read('claude-D.jsonl');
+    const split = '"cache_creation":{"ephemeral_1h_input_tokens":210,"ephemeral_5m_input_tokens":0}';
+    const unsplit = text.replace(split, '"cache_creation":null');
+    const p = parseClaudeInteractiveTranscript(unsplit).parsed;
+    expect(p.usage).toMatchObject({ cacheCreation: 4104, cacheCreation1h: 3894, cacheCreation5m: 0 });
+    // Only the 210 unsplit tokens fall back to the 5-minute price: 210 x (8 - 5) per million less.
+    expect(costFromUsage(loadPricing(), 'claude-opus-5-5', p.usage ?? NO_USAGE)).toBeCloseTo(0.0533492 - (210 * 3) / 1_000_000, 9);
+  });
+
   it('counts one request per message id, however many entries a response is written as', () => {
     const text = read('claude-D.jsonl');
     const real = text.split('\n').filter((l) => l.includes('"type":"assistant"') && !l.includes('<synthetic>'));

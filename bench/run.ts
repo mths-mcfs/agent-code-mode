@@ -558,7 +558,6 @@ async function runClaudeCodeMode(ctx: Context, p: PlannedRun, runWork: string, w
     'command.txt': `env -i ${Object.keys(env).sort().join(' ')} claude ${args.join(' ')}\n# driven in tmux: ${INTERACTIVE_DRIVER}\n`,
   };
   if (ctx.opts.dryRun) return { ...(await cannedTranscript('claude', 'D')), stderr: '', exitCode: 0, timedOut: false, wallMs: 0, configs };
-  if (!(await exists(path.join(sourceClaudeConfig(), '.credentials.json')))) throw new Error('arm D needs a Claude credentials file to copy into a temporary config dir');
   const realWs = realpathSync(ws);
   const claudeJson = `${JSON.stringify(seededClaudeJson(realWs, claudeSemver(ctx.versions['claude'])), null, 2)}\n`;
   configs['claude-json-seed.json'] = claudeJson;
@@ -960,6 +959,10 @@ export async function main(argv: readonly string[]): Promise<number> {
   const codeModeArm = plan.some((p) => p.host === 'claude' && p.arm === 'D');
   let tmux: string | null = null;
   if (codeModeArm && !opts.dryRun) {
+    if (!(await exists(path.join(sourceClaudeConfig(), '.credentials.json')))) {
+      process.stderr.write(`arm D (Claude Code Mode) needs ${path.join(sourceClaudeConfig(), '.credentials.json')} to copy into a temporary config dir\n`);
+      return 2;
+    }
     tmux = tmuxVersion();
     if (tmux === null) {
       process.stderr.write('arm D (Claude Code Mode) needs tmux on PATH\n');

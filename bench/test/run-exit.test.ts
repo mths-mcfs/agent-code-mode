@@ -75,6 +75,17 @@ describe('exit code', () => {
     expect(r.errors).toMatch(/claude-T1-A-r1: dry run invalid: tool surface not observed/);
   }, 120_000);
 
+  it('is 2 before any host call when arm D has no credentials file to copy', async () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', work);
+    try {
+      const r = await quiet(() => main(args.filter((a) => a !== '--dry-run').map((a) => (a === 'A' ? 'D' : a))));
+      expect(r.value).toBe(2);
+      expect(r.errors).toMatch(/arm D \(Claude Code Mode\) needs .*\.credentials\.json/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('is 2 before any host call when a real agent-code-mode arm is planned on Windows', async () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'win32' });

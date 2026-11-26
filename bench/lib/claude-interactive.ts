@@ -239,8 +239,9 @@ function addUsage(a: Usage, b: Usage): Usage {
     cacheRead: a.cacheRead + b.cacheRead,
     reasoning: a.reasoning === null && b.reasoning === null ? null : (a.reasoning ?? 0) + (b.reasoning ?? 0),
   };
-  if (a.cacheCreation1h !== undefined && b.cacheCreation1h !== undefined) sum.cacheCreation1h = a.cacheCreation1h + b.cacheCreation1h;
-  if (a.cacheCreation5m !== undefined && b.cacheCreation5m !== undefined) sum.cacheCreation5m = a.cacheCreation5m + b.cacheCreation5m;
+  // A response without the split keeps the others' split: its own writes stay outside it, priced at 5 minutes.
+  if (a.cacheCreation1h !== undefined || b.cacheCreation1h !== undefined) sum.cacheCreation1h = (a.cacheCreation1h ?? 0) + (b.cacheCreation1h ?? 0);
+  if (a.cacheCreation5m !== undefined || b.cacheCreation5m !== undefined) sum.cacheCreation5m = (a.cacheCreation5m ?? 0) + (b.cacheCreation5m ?? 0);
   return sum;
 }
 

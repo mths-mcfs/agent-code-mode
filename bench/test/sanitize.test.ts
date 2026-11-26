@@ -1,5 +1,7 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sanitize, type SanitizeContext } from '../lib/sanitize.ts';
+import { defaultSanitizeContext, sanitize, type SanitizeContext } from '../lib/sanitize.ts';
 
 const ctx: SanitizeContext = {
   paths: [
@@ -97,5 +99,20 @@ describe('environment os label', () => {
     expect(osLabel('linux', '7.2.15-1-somedistro', 'x64')).toBe('linux 7.2 x64');
     expect(osLabel('darwin', '25.1.0', 'arm64')).toBe('darwin 25.1 arm64');
     expect(osLabel('win32', 'weird', 'x64')).toBe('win32 unknown x64');
+  });
+});
+
+describe('committed parser fixtures', () => {
+  const dir = path.join(import.meta.dirname, '..', 'parser-fixtures');
+  const value = (line: string): unknown => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return line;
+    }
+  };
+  it.each(readdirSync(dir))('%s is already sanitized: no real id, path, user or secret', (name) => {
+    const text = readFileSync(path.join(dir, name), 'utf8');
+    expect(sanitize(text, defaultSanitizeContext([])).split('\n').map(value)).toEqual(text.split('\n').map(value));
   });
 });
