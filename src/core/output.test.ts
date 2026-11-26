@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DIFF_INLINE_CHARS, ERROR_CAP_CHARS, RESULT_IN_NEXT_BLOCK, SUCCESS_CAP_CHARS, diffStat, formatRunResult, safeStringify, type McpToolResponse } from './output.js';
 import { OverflowStore } from './overflow.js';
 import type { CallLogEntry, RunResult } from './types.js';
+import { binaryDiff, unifiedDiff } from '../tools/diff.js';
 
 const base: RunResult = { ok: true, result: null, logs: [], calls: [], changedFiles: [], diff: '', warnings: [] };
 
@@ -105,10 +106,22 @@ describe('formatRunResult', () => {
     const calls = Array.from({ length: 30_000 }, (_, i) => call(i, 'denied', i % 3 === 0 ? 'rule: a' : i % 3 === 1 ? 'rule: b' : 'hook: c', i % 2 ? 'bash' : 'read'));
     const out = formatRunResult({ ...base, ok: false, error: { kind: 'denied', name: 'PermissionDenied', message: 'x' }, calls }, { overflow: new OverflowStore() });
     expect(size(out)).toBeLessThanOrEqual(ERROR_CAP_CHARS);
-    const denied = (json(out)['calls'] as { denied: { tool: string; reason: string; count: number }[] }).denied;
+    const denied = (json(out)['calls'] as { denied: { tool: string; reason: string; count: number; calls: string[] }[] }).denied;
     expect(denied).toHaveLength(6);
     expect(denied.reduce((n, g) => n + g.count, 0)).toBe(30_000);
-    expect(denied).toContainEqual({ tool: 'read', reason: 'rule: a', count: 5_000, first: 'read f0.txt' });
+    for (const g of denied) {
+      const listed = g.calls.filter((c) => !c.startsWith('…'));
+      const more = Number(/^…\[(\d+) more in readOverflow\]$/.exec(g.calls.at(-1) ?? '')?.[1] ?? 0);
+      expect(listed.length + more).toBe(g.count);
+    }
+    expect(denied.find((g) => g.tool === 'read' && g.reason === 'rule: a')?.calls[0]).toBe('read f0.txt');
+  });
+
+  it('names every denied target when a group still fits, even among allowed calls', () => {
+    const calls = Array.from({ length: 1_000 }, (_, i) => (i % 2 ? call(i, 'denied', 'rule: denied by Write(./f*) from project settings', 'write') : call(i, 'allowed', undefined, 'write')));
+    const body = json(formatRunResult({ ...base, calls }, { overflow: new OverflowStore() }));
+    const denied = (body['calls'] as { denied: { count: number; calls: string[] }[] }).denied;
+    expect(denied).toEqual([{ tool: 'write', reason: 'rule: denied by Write(./f*) from project settings', count: 500, calls: calls.filter((c) => c.decision === 'denied').map((c) => c.summary) }]);
   });
 
   it('marks how many reasons and calls it leaves out when even the groups do not fit', () => {
@@ -137,5 +150,17 @@ describe('diffStat', () => {
   it('counts hunk lines from the header, so a removed `--` line is not a file header', () => {
     const diff = '--- a/x.md\n+++ b/x.md\n@@ -1,2 +1,1 @@\n--- not a header\n keep\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hi\n';
     expect(diffStat(diff)).toEqual({ files: { 'x.md': '+0 -1', 'new.txt': '+1 -0' }, total: '2 files +1 -1' });
+  });
+
+  it('counts empty new files, binary files and quoted names', () => {
+    const diff = [
+      ...Array.from({ length: 50 }, (_, i) => unifiedDiff(`empty-file-${i}`, null, '')),
+      binaryDiff('img.png', false),
+      unifiedDiff('a b ', 'x\n', 'y\n'),
+    ].join('');
+    const stat = diffStat(diff);
+    expect(stat.total).toBe('52 files +1 -1');
+    expect(stat.files['empty-file-0']).toBe('+0 -0');
+    expect(diffStat(unifiedDiff('a b ', 'x\n', 'y\n')).files).toEqual({ 'a b ': '+1 -1' });
   });
 });

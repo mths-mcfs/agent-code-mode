@@ -89,7 +89,7 @@ describe('MCP server', () => {
       inputSchema: { type: 'object', required: ['code'] },
     });
     expect(tools[0]?.description).toBe(RUN_DESCRIPTION);
-    expect(tools[0]?.description).toContain('declare function readOverflow');
+    expect(tools[0]?.description).toContain('readOverflow(id, offset?, limit?)');
     expect(tools[0]?.description).toContain(CODEX_SEARCH_NOTE);
     expect(client.getInstructions()).toBe(CODEX_SEARCH_NOTE);
   });
@@ -98,6 +98,20 @@ describe('MCP server', () => {
     const { client } = await connect({ hybrid: true });
     const { tools } = await client.listTools();
     expect(tools[0]?.description).toBe(`${RUN_DESCRIPTION}\n${HYBRID_GUIDANCE}`);
+  });
+
+  it('returns a default readOverflow page whole, so paging needs no further overflow', async () => {
+    const { client } = await connect({ sandbox: new QuickJsSandbox() });
+    const first = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return '"'.repeat(120000);` } }))) as { overflow: { id: string } };
+    const page = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `return await readOverflow(${JSON.stringify(first.overflow.id)});` } })));
+    expect(page).not.toHaveProperty('truncated');
+    expect(page).toMatchObject({ ok: true, result: { offset: 0, truncated: true } });
+  });
+
+  it('logs a readOverflow failure the script caught', async () => {
+    const { client } = await connect({ sandbox: new QuickJsSandbox() });
+    const body = JSON.parse(textOf(await client.callTool({ name: 'run', arguments: { code: `try { await readOverflow('unknown'); } catch (e) { return e.name; }` } })));
+    expect(body).toMatchObject({ ok: true, result: 'ToolError', calls: { total: 1, byTool: { readOverflow: 1 }, errors: [{ tool: 'readOverflow', summary: 'readOverflow unknown' }] } });
   });
 
   it('reads back with readOverflow what a response cut', async () => {

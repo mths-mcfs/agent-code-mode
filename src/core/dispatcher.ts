@@ -43,7 +43,11 @@ export interface DispatcherOptions<P> {
   readonly checkDeadline?: () => void;
   /** Clock, for tests. */
   readonly now?: () => number;
+  /** Serves `readOverflow` from this server's memory; it never reaches the host. */
+  readonly readOverflow?: (args: unknown) => CallReply;
 }
+
+const NO_OVERFLOW: CallReply = { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
 
 type Failure =
   | { readonly kind: 'deny'; readonly source: DenySource; readonly reason: string }
@@ -282,6 +286,7 @@ export class Dispatcher<P = unknown> {
     if (this.#hasStopped()) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, this.#stoppedFailure()));
     }
+    if (tool === 'readOverflow') return Promise.resolve(this.#readOverflow(id, slot, args, started));
     const parsed = parseToolCall(tool, args, id);
     if (parsed instanceof ToolError) {
       return Promise.resolve(this.#fail(slot, id, toolLabel, toolLabel, started, { kind: 'error', error: parsed }));
@@ -539,6 +544,15 @@ export class Dispatcher<P = unknown> {
         ? 'the script already finished; calls made after it returned are refused'
         : `the run was stopped (${reason}); the call was not executed`;
     return { kind: 'error', error: new ToolError('cancelled', message) };
+  }
+
+  #readOverflow(id: string, slot: number, args: unknown, started: number): CallReply {
+    const target = args !== null && typeof args === 'object' && 'id' in args && typeof args.id === 'string' ? args.id.slice(0, 40) : '?';
+    const summary = `readOverflow ${target}`;
+    const reply = this.#opts.readOverflow?.(args) ?? NO_OVERFLOW;
+    if (!reply.ok) return this.#fail(slot, id, 'readOverflow', summary, started, { kind: 'error', error: new ToolError(reply.error.name === 'ToolError' ? reply.error.code : 'tool-error', reply.error.message) });
+    this.#calls[slot] = { id, tool: 'readOverflow', summary, decision: 'allowed', durationMs: this.#elapsed(started) };
+    return reply;
   }
 
   #fail(slot: number, id: string, tool: string, summary: string, started: number, failure: Failure): CallReply {

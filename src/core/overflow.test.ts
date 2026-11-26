@@ -9,6 +9,21 @@ describe('OverflowStore', () => {
     expect(store.read({ id, offset: 8 })).toEqual({ ok: true, value: { text: 'ij', offset: 8, totalChars: 10, truncated: false } });
   });
 
+  it('never ends a page inside a surrogate pair, and the pages join back exactly', () => {
+    const store = new OverflowStore();
+    const text = 'a😀b😀c';
+    const id = store.put(text) ?? '';
+    const pages: string[] = [];
+    for (let offset = 0; offset < text.length; ) {
+      const r = store.read({ id, offset, limit: 2 });
+      if (!r.ok || !('totalChars' in r.value)) throw new Error('expected a slice');
+      expect(r.value.text).not.toMatch(/[\uD800-\uDBFF]$/);
+      pages.push(r.value.text);
+      offset += r.value.text.length;
+    }
+    expect(pages.join('')).toBe(text);
+  });
+
   it('refuses invalid arguments and unknown or expired ids', () => {
     let now = 0;
     const store = new OverflowStore({ ttlMs: 1_000, now: () => now });

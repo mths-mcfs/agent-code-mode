@@ -48,8 +48,6 @@ export interface RunDeps<P = unknown> {
   readonly overflow?: { read(args: unknown): CallReply };
 }
 
-const NO_OVERFLOW: CallReply = { ok: false, error: { name: 'ToolError', code: 'not-found', message: 'readOverflow: this server keeps no cut results' } };
-
 type Bounded<T> = { readonly done: true; readonly value: T } | { readonly done: false; readonly why: 'aborted' | 'timeout' };
 
 /**
@@ -250,6 +248,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
     checkDeadline();
     if (req.transaction && stopReason === undefined) tx = releasingClaims(deps.tools.beginTransaction());
 
+    const overflow = deps.overflow;
     const leftMs = deadline - now();
     if (leftMs <= 0) stop('timeout');
     dispatcher = new Dispatcher<P>({
@@ -258,6 +257,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
       ctx: deps.ctx,
       policy,
       checkDeadline,
+      ...(overflow ? { readOverflow: (args: unknown) => overflow.read(args) } : {}),
       ...(tx ? { transaction: tx, onDeny: (entry: CallLogEntry) => ((denied = entry), stop('denied')) } : {}),
     });
     const active = dispatcher;
@@ -273,7 +273,7 @@ export async function runScript<P>(req: RunRequest, deps: RunDeps<P>): Promise<R
           timeoutMs: Math.ceil(leftMs),
           memoryBytes: deps.memoryBytes ?? DEFAULT_MEMORY_BYTES,
           signal: controller.signal,
-          onCall: (tool, args) => (tool === 'readOverflow' ? Promise.resolve(deps.overflow?.read(args) ?? NO_OVERFLOW) : active.dispatch(tool, args)),
+          onCall: (tool, args) => active.dispatch(tool, args),
           onLog: (level, text) => logs.add(level, text),
         });
       } catch (err) {

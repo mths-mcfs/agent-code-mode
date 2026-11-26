@@ -53,7 +53,8 @@ interface FailedGroup {
   readonly tool: string;
   readonly reason?: string;
   readonly count: number;
-  readonly first: string;
+  /** Summary of each call, with a marker counting the ones left out. */
+  readonly calls: readonly string[];
 }
 
 export interface CompactCalls {
@@ -97,9 +98,11 @@ export function diffStat(diff: string): DiffStat {
       else if (!line.startsWith('\\')) (oldLeft--, newLeft--);
     } else if (line.startsWith('--- ')) {
       oldName = line.slice(4);
-    } else if (line.startsWith('+++ ')) {
-      const newName = line.slice(4);
-      const name = (newName === '/dev/null' ? oldName : newName).replace(/^[ab]\//, '');
+    } else if (line.startsWith('+++ ') || line.startsWith('diff --git ')) {
+      // An empty new file has no hunk, only `diff --git <a/name> <b/name>`; both halves have the same length.
+      const rest = line.startsWith('+++ ') ? line.slice(4) : line.slice(11);
+      const newName = line.startsWith('+++ ') ? rest : rest.slice((rest.length + 1) / 2);
+      const name = (newName === '/dev/null' ? oldName : newName).replace(/^"(.*)"$/, '$1').replace(/^[ab]\//, '');
       current = counts.get(name) ?? { added: 0, removed: 0 };
       counts.set(name, current);
     } else {
@@ -200,17 +203,18 @@ function clipStrings<T>(value: T, max: number): T {
   return value;
 }
 
-function grouped(list: CompactCalls['denied'], textMax: number, keep: number, where: string): CompactCalls['denied'] {
+function grouped(list: CompactCalls['denied'], textMax: number, perGroup: number, keep: number, where: string): CompactCalls['denied'] {
   if (list === undefined) return undefined;
-  const groups = new Map<string, { tool: string; reason?: string; count: number; first: string }>();
+  const groups = new Map<string, { tool: string; reason?: string; count: number; summaries: string[] }>();
   for (const c of list) {
     if (typeof c === 'string' || !('id' in c)) continue;
     const key = JSON.stringify([c.tool, c.reason ?? null]);
-    const g = groups.get(key);
-    if (g) g.count++;
-    else groups.set(key, { tool: clip(c.tool, textMax), ...(c.reason === undefined ? {} : { reason: clip(c.reason, textMax) }), count: 1, first: clip(c.summary, textMax) });
+    const g = groups.get(key) ?? { tool: clip(c.tool, textMax), ...(c.reason === undefined ? {} : { reason: clip(c.reason, textMax) }), count: 0, summaries: [] };
+    g.count++;
+    g.summaries.push(clip(c.summary, textMax));
+    groups.set(key, g);
   }
-  const all = [...groups.values()];
+  const all: FailedGroup[] = [...groups.values()].map(({ summaries, ...g }) => ({ ...g, calls: cutList(summaries, perGroup, where) ?? [] }));
   if (all.length <= keep) return all;
   const left = all.slice(keep);
   const n = left.reduce((a, g) => a + g.count, 0);
@@ -236,17 +240,17 @@ function capped(view: View, compact: CompactCalls, cap: number, isError: boolean
       ...(clipped.warnings ? { warnings: cutList(clipped.warnings, lists, where) } : {}),
     };
   };
-  const groupedCalls = (textMax: number, keep: number): CompactCalls => ({
+  const groupedCalls = (textMax: number, perGroup: number, keep: number): CompactCalls => ({
     ...compact,
-    ...(compact.denied ? { denied: grouped(compact.denied, textMax, keep, where) } : {}),
-    ...(compact.errors ? { errors: grouped(compact.errors, textMax, keep, where) } : {}),
+    ...(compact.denied ? { denied: grouped(compact.denied, textMax, perGroup, keep, where) } : {}),
+    ...(compact.errors ? { errors: grouped(compact.errors, textMax, perGroup, keep, where) } : {}),
   });
   const ladder: (() => View)[] = [
     () => withCalls(compact, Infinity, Infinity),
-    () => withCalls(groupedCalls(Infinity, Infinity), Infinity, Infinity),
-    ...[200, 20, 0].map((n) => () => withCalls(groupedCalls(Infinity, Infinity), n, Infinity)),
-    () => withCalls(groupedCalls(200, Infinity), 0, 200),
-    ...[1000, 100, 10, 1, 0].map((k) => () => withCalls(groupedCalls(200, k), 0, 200)),
+    () => withCalls(groupedCalls(Infinity, Infinity, Infinity), Infinity, Infinity),
+    ...[200, 20, 0].map((n) => () => withCalls(groupedCalls(Infinity, Infinity, Infinity), n, Infinity)),
+    ...[100, 10, 1].map((per) => () => withCalls(groupedCalls(200, per, Infinity), 0, 200)),
+    ...[1000, 100, 10, 1, 0].map((k) => () => withCalls(groupedCalls(200, 1, k), 0, 200)),
   ];
   let env: View = { ok: view.ok, calls: { total: compact.total, byTool: {} }, ...(view.overflow ? { overflow: view.overflow } : {}), truncated: true };
   for (const step of ladder) {

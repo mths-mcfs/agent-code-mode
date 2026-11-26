@@ -5,7 +5,8 @@ import type { CallReply } from './types.js';
 
 export const OVERFLOW_TTL_MS = 30 * 60_000;
 export const OVERFLOW_MAX_CHARS = 32_000_000;
-export const READ_OVERFLOW_DEFAULT_LIMIT = 100_000;
+// The kept text is JSON, so returning a page escapes at most every character twice: a default page fits a response.
+export const READ_OVERFLOW_DEFAULT_LIMIT = 15_000;
 export const READ_OVERFLOW_MAX_LIMIT = 1_000_000;
 
 const ReadOverflowArgsSchema = z.strictObject({
@@ -55,7 +56,10 @@ export class OverflowStore {
     if (entry === undefined) {
       return { ok: false, error: { name: 'ToolError', code: 'not-found', message: `readOverflow: no kept result with id ${JSON.stringify(id)} (unknown, expired, or from another server process)` } };
     }
-    const text = entry.text.slice(offset, offset + limit);
+    let end = Math.min(entry.text.length, offset + limit);
+    // Never end a page inside a surrogate pair, so each page is a whole string.
+    if (end < entry.text.length && end > offset + 1 && /[\uD800-\uDBFF]/.test(entry.text.charAt(end - 1))) end--;
+    const text = entry.text.slice(offset, end);
     return { ok: true, value: { text, offset, totalChars: entry.text.length, truncated: offset + text.length < entry.text.length } };
   }
 

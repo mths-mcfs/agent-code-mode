@@ -27,7 +27,7 @@ User scope prints the registration command and the companion hook for `~/.claude
 claude mcp add --scope user agent-code-mode -- npx -y agent-code-mode serve --host claude --hybrid
 ```
 
-Claude Code keeps its own file and shell tools next to `run`. `--hybrid` adds one line to the `run` description that says when to use each: a native tool for one read, edit or command, and `run` for three or more calls, a loop over files, or filtering a large output. Without `--hybrid`, the description is the same as before. Remove the flag from the server entry if you turn Claude Code's own tools off.
+Claude Code keeps its own file and shell tools next to `run`. `--hybrid` adds one line to the `run` description that says when to use each: a native tool for one read, edit or command, and `run` for three or more calls, a loop over files, or filtering a large output. Without `--hybrid` that line is left out. Remove the flag from the server entry if you turn Claude Code's own tools off.
 
 ```json
 {

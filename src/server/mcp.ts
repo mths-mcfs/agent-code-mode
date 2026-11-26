@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { errorMessage } from '../core/errors.js';
-import { DIFF_INLINE_CHARS, TEXT_BLOCK_MIN_CHARS, formatRunResult, type McpToolResponse } from '../core/output.js';
+import { formatRunResult, type McpToolResponse } from '../core/output.js';
 import { OverflowStore } from '../core/overflow.js';
 import { runScript, toRunRequest } from '../core/run.js';
 import { RUN_INPUT_JSON_SCHEMA, parseRunArgs } from '../core/schemas.js';
@@ -25,16 +25,15 @@ export const SERVER_NAME = 'agent-code-mode';
  */
 export const SERVER_INSTRUCTIONS = CODEX_SEARCH_NOTE;
 
-export const RUN_DESCRIPTION = `Run a JavaScript script (the body of an async function; return a value to get it back) that batches calls to these globals. Each call is checked against the host's permission rules and hooks; a denied call rejects with an Error named PermissionDenied, other failures with ToolError. Paths in results are relative to the working directory.
-declare function bash(a: {command: string; cwd?: string; timeoutMs?: number}): Promise<{exitCode: number | null; signal: string | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean}>;
-declare function read(a: {path: string; offset?: number; limit?: number}): Promise<{path: string; content: string /* exact text */; startLine: number; totalLines: number; truncated: boolean}>;
-declare function write(a: {path: string; content: string}): Promise<{path: string; created: boolean; diff: string}>;
-declare function edit(a: {path: string; oldString: string; newString: string; replaceAll?: boolean}): Promise<{path: string; replacements: number; matchStrategy: string; diff: string}>;
-declare function grep(a: {pattern: string; path?: string; glob?: string; ignoreCase?: boolean; maxResults?: number}): Promise<{columns: ['file', 'line', 'text']; rows: [string, number, string][]; count: number; truncated: boolean; filtered: number}>;
-declare function glob(a: {pattern: string; path?: string; maxResults?: number}): Promise<{files: string[]; truncated: boolean; filtered: number}>;
-declare function readOverflow(id: string, offset?: number, limit?: number): Promise<{text: string; offset: number; totalChars: number; truncated: boolean}>; // the whole result JSON of a response that left something out
-Response: {ok, result | error, logs?, calls: {total, byTool, denied?, errors?}, changedFiles?, diff? | diffStat?, warnings?, overflow?: {id, chars}, truncated?}. Every denied and failed call is listed (grouped by tool and reason with a count when there are too many). A diff over ${DIFF_INLINE_CHARS} chars comes as diffStat; a multi-line string result over ${TEXT_BLOCK_MIN_CHARS} chars as a second text block; anything cut is in readOverflow(overflow.id). verbose: true returns every call and the whole diff (counts again above the cap, with the full log in readOverflow). transaction: true rolls back file changes if the script fails or a call is denied (never bash effects).
-QuickJS ES2023; no require, process or fs.
+export const RUN_DESCRIPTION = `Run a JavaScript script (the body of an async function; return a value) that calls these async globals. Each call goes through the host's permission rules and hooks; a denied call rejects with PermissionDenied, other failures with ToolError. Paths are relative to the working directory. QuickJS, no require/process/fs.
+bash({command, cwd?, timeoutMs?}) -> {exitCode, signal, stdout, stderr, truncated, timedOut}
+read({path, offset?, limit?}) -> {path, content (exact text), startLine, totalLines, truncated}
+write({path, content}) -> {path, created, diff}
+edit({path, oldString, newString, replaceAll?}) -> {path, replacements, matchStrategy, diff}
+grep({pattern, path?, glob?, ignoreCase?, maxResults?}) -> {columns: [file, line, text], rows, count, truncated, filtered}
+glob({pattern, path?, maxResults?}) -> {files, truncated, filtered}
+readOverflow(id, offset?, limit?) -> {text, offset, totalChars, truncated}: a page of the result JSON a response cut (its overflow.id)
+The response counts calls per tool and lists the denied and failed ones (verbose: true lists all). A large diff comes as diffStat. transaction: true rolls back file changes if the script fails.
 ${CODEX_SEARCH_NOTE}`;
 
 export const HYBRID_GUIDANCE =
