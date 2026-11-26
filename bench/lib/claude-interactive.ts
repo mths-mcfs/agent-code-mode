@@ -14,11 +14,11 @@ import type { ParsedRun, ToolCalls, Usage } from './record.ts';
  * `api-request` its parameters, and `system/turn_duration` closes a turn.
  */
 
-export const CODE_MODE_ENV = 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE';
-export const REPL_TOOL = 'REPL';
+const CODE_MODE_ENV = 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE';
+const REPL_TOOL = 'REPL';
 const SYNTHETIC_MODEL = '<synthetic>';
 
-export interface InteractiveArgsOptions {
+interface InteractiveArgsOptions {
   readonly model: string;
   readonly effort: string;
   readonly settingsFile: string;
@@ -46,7 +46,7 @@ export function claudeInteractiveArgs(o: InteractiveArgsOptions): string[] {
   ];
 }
 
-export const INTERACTIVE_ENV_PASSTHROUGH = ['HOME', 'PATH', 'LANG', 'LC_ALL', 'USER', 'SHELL', 'TMPDIR'];
+const INTERACTIVE_ENV_PASSTHROUGH = ['HOME', 'PATH', 'LANG', 'LC_ALL', 'USER', 'SHELL', 'TMPDIR'];
 
 /**
  * An allowlist: a session started with `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` or another `CLAUDE_CODE_*` of
@@ -125,7 +125,7 @@ const ModelCost = z.object({
   costUSD: z.number().nonnegative(),
 }).passthrough();
 const CostState = z.object({ type: z.literal('cost-state'), totalCostUSD: z.number().nonnegative(), modelUsage: z.record(z.string(), ModelCost) }).passthrough();
-export type SessionModelCost = z.infer<typeof ModelCost>;
+type SessionModelCost = z.infer<typeof ModelCost>;
 
 function parseJson(line: string): unknown {
   try {

@@ -20,7 +20,7 @@ const SERVER_PREFIX = 'acmb-';
 const WIDTH = 200;
 const HEIGHT = 50;
 
-export interface ScreenState {
+interface ScreenState {
   readonly codeModeOn: string | null;
   readonly codeModeUnavailable: string | null;
   /** A first-run or other blocking dialog the seeded config should have answered. */
@@ -105,7 +105,7 @@ export function sweepStaleTmuxServers(): string[] {
 }
 
 /** Kills a private server and removes the socket file tmux leaves behind. */
-export function killServer(name: string): void {
+function killServer(name: string): void {
   try {
     execFileSync('tmux', ['-L', name, 'kill-server'], { stdio: 'ignore', timeout: 10_000, env: tmuxClientEnv() });
   } catch {
@@ -123,7 +123,7 @@ export function serverAlive(name: string): boolean {
   }
 }
 
-export interface InteractiveSpec {
+interface InteractiveSpec {
   readonly cwd: string;
   /** Run as `env -i <env> <command...>`. */
   readonly command: readonly string[];
@@ -141,9 +141,9 @@ export interface InteractiveSpec {
   readonly pollMs?: number;
 }
 
-export type InteractiveStop = 'finished' | 'timeout' | 'max-turns' | 'not-ready' | 'host-exited' | 'not-submitted';
+type InteractiveStop = 'finished' | 'timeout' | 'max-turns' | 'not-ready' | 'host-exited' | 'not-submitted';
 
-export interface InteractiveOutcome {
+interface InteractiveOutcome {
   readonly stop: InteractiveStop;
   /** Why the run is unusable, when it is. */
   readonly problem: string | null;
