@@ -31,8 +31,8 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('C
     const bash = await d.dispatch('bash', { command: 'echo hello > out.txt && cat out.txt' });
     expect(bash).toMatchObject({ ok: true, value: { exitCode: 0, stdout: 'hello\n' } });
     if (hasRg) {
-      expect(await d.dispatch('grep', { pattern: 'needle' })).toEqual({ ok: true, value: { matches: [{ file: path.join(ws, 'a.ts'), line: 1, text: 'needle' }], truncated: false, filtered: 0 } });
-      expect(await d.dispatch('glob', { pattern: '*.ts' })).toEqual({ ok: true, value: { files: [path.join(ws, 'a.ts')], truncated: false, filtered: 0 } });
+      expect(await d.dispatch('grep', { pattern: 'needle' })).toEqual({ ok: true, value: { columns: ['file', 'line', 'text'], rows: [['a.ts', 1, 'needle']], count: 1, truncated: false, filtered: 0 } });
+      expect(await d.dispatch('glob', { pattern: '*.ts' })).toEqual({ ok: true, value: { files: ['a.ts'], truncated: false, filtered: 0 } });
     } else {
       // Without ripgrep a Codex search fails and says why.
       expect(await d.dispatch('grep', { pattern: 'needle' })).toMatchObject({ ok: false, error: { code: 'tool-error', message: expect.stringMatching(/^rg is not installed/) } });

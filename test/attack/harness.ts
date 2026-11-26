@@ -28,9 +28,12 @@ export const RunOutputSchema = z.looseObject({
   result: z.unknown().optional(),
   error: z.looseObject({ name: z.string(), message: z.string(), kind: z.string() }).optional(),
   logs: z.array(z.string()).optional(),
+  // Above the response cap even a verbose run comes back as counts, with nothing listed per allowed call.
   calls: z
-    .array(z.union([z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() }), z.string()]))
-    .transform((xs) => xs.filter((x) => typeof x !== 'string'))
+    .union([
+      z.array(z.looseObject({ id: z.string(), tool: z.string(), decision: z.string(), reason: z.string().optional() })),
+      z.looseObject({ total: z.number() }).transform(() => []),
+    ])
     .optional(),
   changedFiles: z.array(z.string()).optional(),
   warnings: z.array(z.string()).optional(),
