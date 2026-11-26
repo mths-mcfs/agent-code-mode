@@ -1,11 +1,42 @@
 import { z } from 'zod';
 
-export const HOST_ARMS = { claude: ['A', 'B'], codex: ['A', 'B', 'C'] } as const;
+export const HOST_ARMS = { claude: ['A', 'B', 'C'], codex: ['A', 'B', 'C'] } as const;
 export type ArmId = 'A' | 'B' | 'C';
+/**
+ * Baseline arms: the strict agent-code-mode arm of a host (Claude B, Codex C) run against another build of
+ * agent-code-mode (`--acm-ref` / `--acm-dist`), so two versions are measured in the same matrix.
+ */
+export const BASELINE_ARMS = { claude: 'B0', codex: 'C0' } as const;
+export type BenchArm = ArmId | 'B0' | 'C0';
+export const BENCH_ARMS: readonly BenchArm[] = ['A', 'B', 'C', 'B0', 'C0'];
+
+/**
+ * The arm whose tool surface a bench arm uses (a baseline arm is its host's strict agent-code-mode arm).
+ * `C0` is Codex only: `planRuns` never pairs it with Claude, whose `C` is the hybrid arm.
+ */
+export function surfaceArm(arm: BenchArm): ArmId {
+  return arm === 'B0' ? 'B' : arm === 'C0' ? 'C' : arm;
+}
+
+/** True for the arms that run an agent-code-mode build (Claude B and C, Codex C). */
+export function isAcmArm(host: 'claude' | 'codex', arm: BenchArm): boolean {
+  const s = surfaceArm(arm);
+  return host === 'claude' ? s === 'B' || s === 'C' : s === 'C';
+}
+
+/** True for the arm where the model may mix native tools and `run` (Claude C). */
+export function isHybridArm(host: 'claude' | 'codex', arm: ArmId): boolean {
+  return host === 'claude' && arm === 'C';
+}
+
+/** Arms a host runs: its own arms plus, with a baseline build, its baseline arm. */
+export function hostArms(host: 'claude' | 'codex', withBaseline: boolean): BenchArm[] {
+  return withBaseline ? [...HOST_ARMS[host], BASELINE_ARMS[host]] : [...HOST_ARMS[host]];
+}
 
 export const ARM_LABELS: Readonly<Record<'claude' | 'codex', Readonly<Record<string, string>>>> = {
-  claude: { A: 'native tools', B: 'agent-code-mode (strict)' },
-  codex: { A: 'native tools (direct)', B: 'Codex code mode', C: 'agent-code-mode (strict)' },
+  claude: { A: 'native tools', B: 'agent-code-mode (strict)', C: 'agent-code-mode hybrid (native + run, batching guidance)', B0: 'agent-code-mode baseline build (strict)' },
+  codex: { A: 'native tools (direct)', B: 'Codex code mode', C: 'agent-code-mode (strict)', C0: 'agent-code-mode baseline build (strict)' },
 };
 
 const Counts = z.record(z.string(), z.number().int().nonnegative());
@@ -31,6 +62,7 @@ export type ToolCalls = z.infer<typeof ToolCallsSchema>;
 
 export const ParsedRunSchema = z.object({
   turns: z.number().int().nonnegative().nullable(),
+  requests: z.number().int().nonnegative().nullable().default(null),
   hostDurationMs: z.number().nonnegative().nullable(),
   usage: UsageSchema.nullable(),
   hostCostUsd: z.number().nonnegative().nullable(),
@@ -52,8 +84,10 @@ export const RunRecordSchema = z.object({
   configHash: z.string().regex(/^[0-9a-f]{12}$/),
   config: z.record(z.string(), z.unknown()),
   host: z.enum(['claude', 'codex']),
-  arm: z.enum(['A', 'B', 'C']),
+  arm: z.enum(['A', 'B', 'C', 'B0', 'C0']),
   armLabel: z.string(),
+  /** A warmup run: made before the matrix to warm the prompt cache, kept apart and out of every statistic. */
+  warmup: z.boolean().default(false),
   task: z.string(),
   run: z.number().int().positive(),
   round: z.number().int().positive(),
@@ -85,6 +119,12 @@ export interface ArmCheck {
 export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls): ArmCheck {
   const reasons: string[] = [];
   const total = calls.native + calls.run + calls.codeMode + calls.other;
+  if (isHybridArm(host, arm)) {
+    // The model picks per call: native only, run only and any mix are all the arm as labeled.
+    if (calls.codeMode > 0) reasons.push('hybrid agent-code-mode arm used Codex code mode');
+    if (calls.other > 0) reasons.push(`hybrid agent-code-mode arm made ${calls.other} call(s) to tools outside its surface`);
+    return { fallback: false, reasons };
+  }
   const acm = (host === 'claude' && arm === 'B') || (host === 'codex' && arm === 'C');
   if (acm) {
     if (calls.run === 0) reasons.push('agent-code-mode arm made no run call');
@@ -103,9 +143,10 @@ export function checkArm(host: 'claude' | 'codex', arm: ArmId, calls: ToolCalls)
 }
 
 
-export const CLAUDE_ARM_SURFACE: Readonly<Record<'A' | 'B', readonly string[]>> = {
+export const CLAUDE_ARM_SURFACE: Readonly<Record<ArmId, readonly string[]>> = {
   A: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
   B: ['mcp__agent-code-mode__run'],
+  C: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__agent-code-mode__run'],
 };
 export const CODEX_COMMON_NON_FILE = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource', 'request_user_input'];
 const CODEX_FILE_SHELL = ['exec_command', 'write_stdin', 'apply_patch'];
@@ -121,7 +162,7 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
 export function checkSurface(host: 'claude' | 'codex', arm: ArmId, tools: readonly string[]): string[] {
   const reasons: string[] = [];
   if (host === 'claude') {
-    const expected = arm === 'B' ? CLAUDE_ARM_SURFACE.B : CLAUDE_ARM_SURFACE.A;
+    const expected = CLAUDE_ARM_SURFACE[arm];
     if (!sameSet(tools, expected)) reasons.push(`Claude arm ${arm} tools are [${[...tools].sort().join(', ')}], expected exactly [${[...expected].sort().join(', ')}]`);
     return reasons;
   }
