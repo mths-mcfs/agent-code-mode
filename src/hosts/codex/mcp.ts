@@ -91,6 +91,8 @@ export function discoverCodexMcp(
       const v = env[k];
       return v === undefined ? [] : [[k, v] as const];
     });
+    const approval = Object.fromEntries(Object.entries(e.tools ?? {}).flatMap(([tool, t]) => (t.approval_mode === undefined ? [] : [[tool, t.approval_mode] as const])));
+    const { enabled_tools: enabledTools, disabled_tools: disabledTools = [] } = e;
     servers.push({
       name,
       command: e.command,
@@ -100,9 +102,8 @@ export function discoverCodexMcp(
       startupTimeoutMs: e.startup_timeout_ms ?? (e.startup_timeout_sec ?? CODEX_MCP_STARTUP_TIMEOUT_SEC) * 1000,
       toolTimeoutMs: (e.tool_timeout_sec ?? CODEX_MCP_TOOL_TIMEOUT_SEC) * 1000,
       origin,
+      autostart: Object.entries(approval).some(([tool, mode]) => mode === 'approve' && !disabledTools.includes(tool) && (enabledTools === undefined || enabledTools.includes(tool))),
     });
-    const approval = Object.fromEntries(Object.entries(e.tools ?? {}).flatMap(([tool, t]) => (t.approval_mode === undefined ? [] : [[tool, t.approval_mode] as const])));
-    const { enabled_tools: enabledTools, disabled_tools: disabledTools = [] } = e;
     rules[name] = { ...(enabledTools === undefined ? {} : { enabledTools }), disabledTools, approval };
   }
   return { mcp: { servers, notes }, rules };

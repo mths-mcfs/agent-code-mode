@@ -29,9 +29,11 @@ function setup(env: Record<string, string> = {}, opts: { startupTimeoutMs?: numb
     cwd: dir,
     startupTimeoutMs: opts.startupTimeoutMs ?? 10_000,
     origin: 'test config',
+    autostart: true,
   };
   const pool = new McpUpstreams({ ...(opts.overflow ? { overflow: opts.overflow } : {}), ...(opts.maxResultChars ? { maxResultChars: opts.maxResultChars } : {}) });
   pools.push(pool);
+  pool.start(Promise.resolve([spec]));
   const events = (): { pid: number; event: string; tool?: string }[] => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
   return { spec, pool, events };
 }
@@ -49,9 +51,8 @@ const alive = (pid: number): boolean => {
 };
 
 describe('McpUpstreams', () => {
-  it('starts the server at the first call, keeps it for the next, and passes the configured environment', async () => {
+  it('starts the server with the session, keeps it for every call, and passes the configured environment', async () => {
     const { spec, pool, events } = setup({ FIXTURE_SECRET: 's3cret' });
-    expect(events()).toEqual([]);
     expect(await pool.call(spec, effect('echo', { a: 1 }), signal())).toEqual({ isError: false, structuredContent: { echoed: { a: 1 } } });
     expect(await pool.call(spec, effect('env'), signal())).toEqual({ isError: false, text: 'set' });
     expect(events().filter((e) => e.event === 'start')).toHaveLength(1);
@@ -65,22 +66,29 @@ describe('McpUpstreams', () => {
     expect(events().filter((e) => e.event === 'call')).toEqual([]);
   });
 
-  it('times out a hung call, and the next call gets a fresh process', async () => {
+  it('times out a hung call and keeps the server for the next call', async () => {
     const { spec, pool, events } = setup();
     const t0 = Date.now();
     const err = await failure(pool.call(spec, effect('hang', {}, 300), signal()));
     expect(err.message).toMatch(/did not answer within 300 ms; its effect is unknown/);
     expect(Date.now() - t0).toBeLessThan(5_000);
-    await pool.call(spec, effect('echo'), signal());
-    const starts = events().filter((e) => e.event === 'start');
-    expect(starts).toHaveLength(2);
+    expect(await pool.call(spec, effect('echo'), signal())).toMatchObject({ isError: false });
+    expect(events().filter((e) => e.event === 'start')).toHaveLength(1);
   });
 
-  it('reports a server that exits during a call, and starts it again on the next call', async () => {
+  it('reports a server that exits during a call, and never starts it again', async () => {
     const { spec, pool, events } = setup();
     expect((await failure(pool.call(spec, effect('crash'), signal()))).message).toMatch(/exited or closed its pipes during mcp__fx__crash/);
-    expect(await pool.call(spec, effect('echo'), signal())).toMatchObject({ isError: false });
-    expect(events().filter((e) => e.event === 'start')).toHaveLength(2);
+    expect((await failure(pool.call(spec, effect('echo'), signal()))).message).toMatch(/no longer running .*not started again/);
+    expect(events().filter((e) => e.event === 'start')).toHaveLength(1);
+  });
+
+  it('refuses a server that was not started with the session, even one whose config changed since', async () => {
+    const { spec, pool, events } = setup();
+    await pool.call(spec, effect('echo'), signal());
+    const changed = { ...spec, args: [...spec.args, '--other'] };
+    expect((await failure(pool.call(changed, effect('echo'), signal()))).message).toMatch(/was not started with this session/);
+    expect(events().filter((e) => e.event === 'start')).toHaveLength(1);
   });
 
   it('bounds a server that never initializes, and says nothing of its environment', async () => {
@@ -111,7 +119,7 @@ describe('McpUpstreams', () => {
     const stopped = new AbortController();
     stopped.abort();
     expect((await failure(pool.call(spec, effect('echo'), stopped.signal))).code).toBe('cancelled');
-    expect(events()).toEqual([]);
+    expect(events().filter((e) => e.event === 'call')).toEqual([]);
     const later = new AbortController();
     const pending = failure(pool.call(spec, effect('echo'), later.signal));
     setTimeout(() => later.abort(), 200);
@@ -124,7 +132,7 @@ describe('McpUpstreams', () => {
     const pidA = a.events()[0]?.pid ?? 0;
     await a.pool.close();
     expect(alive(pidA)).toBe(false);
-    await expect(a.pool.call(a.spec, effect('echo'), signal())).rejects.toThrow(/shutting down/);
+    await expect(a.pool.call(a.spec, effect('echo'), signal())).rejects.toThrow(/no longer running/);
 
     const b = setup();
     await b.pool.call(b.spec, effect('echo'), signal());

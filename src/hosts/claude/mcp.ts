@@ -58,6 +58,8 @@ export interface ClaudeMcpInput {
   readonly projectTrusted: boolean;
   /** The environment Claude Code started this server with, close to its own: servers get it, and `${VAR}` reads it. */
   readonly env: Readonly<Record<string, string | undefined>>;
+  /** Whether a rule or the permission mode can allow some tool of a server without asking. */
+  readonly mayAllow: (server: string) => boolean;
 }
 
 interface Candidate {
@@ -119,6 +121,7 @@ function toSpec(name: string, c: Candidate, input: ClaudeMcpInput): McpServerSpe
       startupTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : CLAUDE_MCP_STARTUP_TIMEOUT_MS,
       ...(Number.isFinite(toolTimeout) && toolTimeout > 0 ? { toolTimeoutMs: toolTimeout } : {}),
       origin: c.origin,
+      autostart: input.mayAllow(name),
     };
   } catch (err) {
     return `server ${shownName(name)} (${c.origin}): ${errorMessage(err)}`;

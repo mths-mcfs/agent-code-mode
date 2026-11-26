@@ -6,7 +6,7 @@ import { Dispatcher } from './dispatcher.js';
 import { ToolError } from './errors.js';
 import type { CallReply, McpEffect, McpPolicy, McpResult, McpRuntime, McpServerSpec } from './types.js';
 
-const spec: McpServerSpec = { name: 'srv', command: 'node', args: [], env: { TOKEN: 'secret' }, cwd: '/ws', startupTimeoutMs: 1_000, toolTimeoutMs: 5_000, origin: 'test' };
+const spec: McpServerSpec = { name: 'srv', command: 'node', args: [], env: { TOKEN: 'secret' }, cwd: '/ws', startupTimeoutMs: 1_000, toolTimeoutMs: 5_000, origin: 'test', autostart: true };
 const MCP: McpPolicy = { servers: [spec], notes: ['server "other" (test): only stdio servers are reachable from scripts'] };
 
 class FakeRuntime implements McpRuntime {

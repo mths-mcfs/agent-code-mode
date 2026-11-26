@@ -19,7 +19,7 @@ describe('Codex MCP servers', () => {
       'config.toml',
     );
     expect(policy.servers).toEqual([
-      { name: 'a', command: 'node', args: ['s.js'], env: { HOME: '/home/u', PATH: '/usr/bin', TOKEN: 't-1', MODE: 'x' }, cwd: path.join(cwd, 'sub'), startupTimeoutMs: 3_000, toolTimeoutMs: 9_000, origin: 'config.toml' },
+      { name: 'a', command: 'node', args: ['s.js'], env: { HOME: '/home/u', PATH: '/usr/bin', TOKEN: 't-1', MODE: 'x' }, cwd: path.join(cwd, 'sub'), startupTimeoutMs: 3_000, toolTimeoutMs: 9_000, origin: 'config.toml', autostart: false },
     ]);
   });
 
@@ -57,6 +57,22 @@ describe('Codex MCP servers', () => {
     const tools = mode === undefined ? {} : { t: { approval_mode: mode } };
     const { rules } = discoverCodexMcp({ mcp_servers: { s: { command: 'node', tools, ...extra } } }, cwd, env, 'config.toml');
     expect(codexMcpDecision(mcp('s', 't'), rules, approvalPolicy).kind).toBe(kind);
+  });
+
+  it('starts with the session only a server with an approved tool it may call', () => {
+    const { mcp: policy } = discoverCodexMcp(
+      {
+        mcp_servers: {
+          yes: { command: 'node', tools: { t: { approval_mode: 'approve' } } },
+          prompt: { command: 'node', tools: { t: { approval_mode: 'prompt' } } },
+          off: { command: 'node', disabled_tools: ['t'], tools: { t: { approval_mode: 'approve' } } },
+        },
+      },
+      cwd,
+      env,
+      'config.toml',
+    );
+    expect(Object.fromEntries(policy.servers.map((s) => [s.name, s.autostart]))).toEqual({ yes: true, prompt: false, off: false });
   });
 
   it('refuses a server Codex does not configure', () => {

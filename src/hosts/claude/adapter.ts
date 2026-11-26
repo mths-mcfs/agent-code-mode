@@ -716,7 +716,18 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const mcp: McpPolicy =
       parent === undefined
         ? { servers: [], notes: ['the Claude Code process could not be read, so its MCP servers are unknown'] }
-        : await discoverClaudeMcp({ flags, projectDir: primaryDir, parentCwd, configDir, home, managedDir, docs, projectTrusted: settings.projectTrusted, env });
+        : await discoverClaudeMcp({
+            flags,
+            projectDir: parentCwd ?? projectRoot,
+            parentCwd,
+            configDir,
+            home,
+            managedDir,
+            docs,
+            projectTrusted: settings.projectTrusted,
+            env,
+            mayAllow: (server) => mode === 'bypassPermissions' || rules.allow.some((r) => r.matcher.type === 'all' && (r.tool === `mcp__${server}` || r.tool.startsWith(`mcp__${server}__`))),
+          });
 
     const readRestrictions = [...rules.deny, ...rules.ask].filter((r) => governs(r, 'Read'));
     const isReadRestricted = (absPath: string): boolean =>

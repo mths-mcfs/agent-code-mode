@@ -228,6 +228,18 @@ export function createMcpServer(opts: McpServerOptions): Server {
     instructions: SERVER_INSTRUCTIONS,
   });
   const upstreams = opts.upstreams ?? new McpUpstreams({ overflow, clientVersion: opts.version });
+  // The host starts its MCP servers when the session starts, and so does this server, with the policy it has then.
+  const sessionHost = detectHost({ flag: opts.host, env, meta: undefined });
+  if (sessionHost !== 'generic') {
+    upstreams.start(
+      (async () => {
+        const runtime = runtimeFor(sessionHost);
+        const policy = await runtime.adapter.loadPolicy(await runtime.contextProvider.resolve({ env, meta: undefined, roots: [], serverCwd }));
+        if ('error' in policy || policy.mcp === undefined || policy.mcp.unsupported !== undefined) return [];
+        return policy.mcp.servers.filter((s) => s.autostart);
+      })(),
+    );
+  }
   server.onclose = () => {
     overflow.clear();
     void upstreams.close();

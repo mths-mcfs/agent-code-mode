@@ -7,13 +7,10 @@ import type { McpEffect, McpResult, McpRuntime, McpServerSpec } from '../core/ty
 import { shownName } from './names.js';
 
 /**
- * The upstream MCP server processes of one `serve` process. A server starts at
- * the first authorized call to it, with exactly the command, arguments,
- * environment and directory the host config gives, and is kept for later
- * calls with the same spec. A call that times out, or a server that exits,
- * drops the connection; the next call starts the server again. The server's
- * stderr is discarded and its environment never appears in a message: both
- * can hold credentials.
+ * The upstream MCP server processes of one `serve` process, started with the
+ * session with exactly the command, arguments, environment and directory the
+ * host config gives. The server's stderr is discarded and its environment
+ * never appears in a message: both can hold credentials.
  */
 
 /** Largest result (characters of its JSON) handed back whole, as for bash output. */
@@ -36,7 +33,7 @@ export interface McpUpstreamsOptions {
 interface Connection {
   readonly client: Client;
   readonly transport: StdioClientTransport;
-  readonly tools: ReadonlySet<string>;
+  readonly tools: Set<string>;
   closed: string | undefined;
 }
 
@@ -60,23 +57,50 @@ function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<
 export class McpUpstreams implements McpRuntime {
   readonly #opts: McpUpstreamsOptions;
   readonly #connections = new Map<string, Promise<Connection>>();
-  readonly #live = new Set<Connection>();
+  /** Every server process spawned and not yet closed, connected or still starting. */
+  readonly #processes = new Set<StdioClientTransport>();
+  /** Settles once `start` has spawned the session's servers. */
+  #started: Promise<void> = Promise.resolve();
   #closed = false;
 
   constructor(opts: McpUpstreamsOptions = {}) {
     this.#opts = opts;
   }
 
+  /**
+   * Starts the servers of the session, once, as the host does when the session starts. A server is never
+   * started later, nor started again after it exits: a process spawned from files a script may have
+   * changed since would run that script's code outside the host's limits.
+   */
+  start(specs: Promise<readonly McpServerSpec[]>): void {
+    this.#started = specs.then(
+      (list) => {
+        for (const spec of list) {
+          const key = specKey(spec);
+          if (this.#closed || this.#connections.has(key) || this.#connections.size >= MAX_SERVERS) continue;
+          const pending = this.#start(spec);
+          pending.catch(() => undefined);
+          this.#connections.set(key, pending);
+        }
+      },
+      () => undefined,
+    );
+  }
+
   async call(spec: McpServerSpec, effect: McpEffect, signal: AbortSignal, onSent?: () => void): Promise<McpResult> {
     const what = effect.qualifiedName;
     if (signal.aborted) throw new ToolError('cancelled', `the run was stopped; ${what} was not sent`);
-    const key = specKey(spec);
-    const conn = await this.#connection(key, spec, signal);
+    await untilAborted(this.#started, signal, `the run was stopped while the session's MCP servers were starting`);
+    const pending = this.#connections.get(specKey(spec));
+    if (pending === undefined) {
+      throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} was not started with this session: servers start once, when the session starts, as the host starts them (restart the session after a config change)`);
+    }
+    const conn = await untilAborted(pending, signal, `the run was stopped while MCP server ${shownName(spec.name)} was starting`);
+    if (conn.closed !== undefined) throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} is no longer running (${conn.closed}); it is not started again in this session`);
     if (!conn.tools.has(effect.tool)) {
       const names = [...conn.tools].slice(0, 20).map(shownName).join(', ');
       throw new ToolError('invalid-args', `MCP server ${shownName(spec.name)} has no tool ${shownName(effect.tool)} (tools: ${names || 'none'}${conn.tools.size > 20 ? ', …' : ''})`);
     }
-    if (signal.aborted) throw new ToolError('cancelled', `the run was stopped; ${what} was not sent`);
     let raw: unknown;
     try {
       onSent?.();
@@ -84,14 +108,9 @@ export class McpUpstreams implements McpRuntime {
     } catch (err) {
       if (signal.aborted) throw new ToolError('cancelled', `${what} was cancelled while it ran; its effect is unknown`);
       const code = McpErrorLike.safeParse(err).data?.code;
-      if (code === -32001) {
-        // A server that missed its deadline may be stuck: the next call gets a fresh process.
-        this.#drop(key, conn, 'a call timed out');
-        throw new ToolError('tool-error', `${what} did not answer within ${effect.timeoutMs} ms; its effect is unknown (the server may have run it) and it was not retried`);
-      }
+      if (code === -32001) throw new ToolError('tool-error', `${what} did not answer within ${effect.timeoutMs} ms; its effect is unknown (the server may have run it) and it was not retried`);
       if (conn.closed !== undefined || code === -32000) {
-        this.#drop(key, conn, conn.closed ?? 'the connection closed');
-        throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} exited or closed its pipes during ${what}; its effect is unknown and it was not retried`);
+        throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} exited or closed its pipes during ${what}; its effect is unknown, and the server is not started again in this session`);
       }
       throw new ToolError('tool-error', `${what} failed: ${errorMessage(err)}`);
     }
@@ -101,106 +120,73 @@ export class McpUpstreams implements McpRuntime {
   /** Ends every server process: stdin closed, then SIGTERM, then SIGKILL. */
   async close(): Promise<void> {
     this.#closed = true;
-    const all = [...this.#connections.values()];
-    this.#connections.clear();
-    await Promise.allSettled(all.map(async (pending) => (await pending).client.close()));
+    await Promise.allSettled([...this.#processes].map((t) => t.close()));
   }
 
-  /** For process exit and fatal signals, when no async cleanup can run: SIGKILL every live server process. */
+  /** For process exit and fatal signals, when no async cleanup can run: SIGKILL every server process. */
   killAll(): void {
     this.#closed = true;
-    for (const conn of this.#live) {
-      const pid = conn.transport.pid;
-      if (pid !== null) {
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // Already gone.
-        }
+    for (const transport of this.#processes) {
+      const pid = transport.pid;
+      if (pid === null) continue;
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone.
       }
     }
-  }
-
-  #connection(key: string, spec: McpServerSpec, signal: AbortSignal): Promise<Connection> {
-    if (this.#closed) return Promise.reject(new ToolError('tool-error', 'the server is shutting down; no MCP server is started'));
-    let pending = this.#connections.get(key);
-    if (pending === undefined) {
-      if (this.#connections.size >= MAX_SERVERS) {
-        return Promise.reject(new ToolError('tool-error', `more than ${MAX_SERVERS} upstream MCP server processes would run at once`));
-      }
-      pending = this.#start(spec);
-      this.#connections.set(key, pending);
-      pending.catch(() => {
-        if (this.#connections.get(key) === pending) this.#connections.delete(key);
-      });
-    }
-    // The start goes on when the run stops (the next call can use it); this call stops waiting.
-    return new Promise<Connection>((resolve, reject) => {
-      const onAbort = (): void => reject(new ToolError('cancelled', `the run was stopped while MCP server ${shownName(spec.name)} was starting`));
-      if (signal.aborted) return onAbort();
-      signal.addEventListener('abort', onAbort, { once: true });
-      pending.then(
-        (conn) => {
-          signal.removeEventListener('abort', onAbort);
-          resolve(conn);
-        },
-        (err: unknown) => {
-          signal.removeEventListener('abort', onAbort);
-          reject(err);
-        },
-      );
-    });
   }
 
   async #start(spec: McpServerSpec): Promise<Connection> {
     const transport = new StdioClientTransport({ command: spec.command, args: [...spec.args], env: { ...spec.env }, cwd: spec.cwd, stderr: 'ignore' });
     const client = new Client({ name: 'agent-code-mode', version: this.#opts.clientVersion ?? '0.0.0' }, { capabilities: {} });
-    let closed: string | undefined;
+    const conn: Connection = { client, transport, tools: new Set(), closed: undefined };
     client.onclose = () => {
-      closed ??= 'the server process exited or closed its pipes';
+      conn.closed ??= 'the server process exited or closed its pipes';
+      this.#processes.delete(transport);
     };
     // A line that is not JSON-RPC is not fatal by itself.
     client.onerror = () => undefined;
+    this.#processes.add(transport);
     const deadline = Date.now() + spec.startupTimeoutMs;
     const left = (): number => Math.max(1, deadline - Date.now());
     try {
       await withTimeout(client.connect(transport), spec.startupTimeoutMs, `did not start and initialize within ${spec.startupTimeoutMs} ms`);
-      const tools = new Set<string>();
       let cursor: string | undefined;
-      for (let page = 0; page < LIST_PAGES && tools.size < MAX_LISTED_TOOLS; page++) {
+      for (let page = 0; page < LIST_PAGES && conn.tools.size < MAX_LISTED_TOOLS; page++) {
         const raw = await client.request({ method: 'tools/list', params: cursor === undefined ? {} : { cursor } }, RawResult, { timeout: left() });
         const parsed = ListPage.safeParse(raw);
         if (!parsed.success) throw new Error('tools/list returned an invalid result');
-        for (const t of parsed.data.tools) tools.add(t.name);
+        for (const t of parsed.data.tools) conn.tools.add(t.name);
         cursor = parsed.data.nextCursor;
         if (cursor === undefined) break;
       }
-      if (closed !== undefined) throw new Error(closed);
-      const conn: Connection = { client, transport, tools, closed: undefined };
-      client.onclose = () => {
-        conn.closed ??= 'the server process exited or closed its pipes';
-        this.#live.delete(conn);
-      };
-      this.#live.add(conn);
-      if (this.#closed) {
-        await client.close().catch(() => undefined);
-        throw new Error('the server is shutting down');
-      }
+      if (conn.closed !== undefined) throw new Error(conn.closed);
       return conn;
     } catch (err) {
       await client.close().catch(() => undefined);
       throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} (${spec.origin}) could not be started: ${errorMessage(err)}`);
     }
   }
+}
 
-  #drop(key: string, conn: Connection, why: string): void {
-    conn.closed ??= why;
-    void this.#connections.get(key)?.then((current) => {
-      if (current === conn) this.#connections.delete(key);
-    }, () => undefined);
-    this.#live.delete(conn);
-    void conn.client.close().catch(() => undefined);
-  }
+/** `pending`, or a cancel error once `signal` aborts; the work itself goes on. */
+function untilAborted<T>(pending: Promise<T>, signal: AbortSignal, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new ToolError('cancelled', message));
+    if (signal.aborted) return onAbort();
+    signal.addEventListener('abort', onAbort, { once: true });
+    pending.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 // Content blocks as the MCP spec defines them; another shape makes the result invalid.

@@ -138,6 +138,13 @@ describe('Claude MCP servers come from where Claude Code keeps them', () => {
     expect(names(orphan.policy)).toEqual([]);
   });
 
+  it('starts with the session only a server some rule or the mode can allow without asking', async () => {
+    const argv = ['--mcp-config', JSON.stringify({ mcpServers: { a: server(), b: server(), c: server() } })];
+    const autostart = (p: PolicySnapshot<ClaudePolicy>) => Object.fromEntries((p.mcp?.servers ?? []).map((s) => [s.name, s.autostart]));
+    expect(autostart((await load({ argv, local: { permissions: { allow: ['mcp__a', 'mcp__b__one', 'mcp__*'] } } })).policy)).toEqual({ a: true, b: true, c: false });
+    expect(autostart((await load({ argv, mode: 'bypassPermissions' })).policy)).toEqual({ a: true, b: true, c: true });
+  });
+
   it('expands ${VAR} and ${VAR:-default} like Claude Code', () => {
     expect(expandVars('a${X}b${Y:-d}', { X: '1' })).toBe('a1bd');
     expect(expandVars('${Z}', {})).toEqual({ missing: 'Z' });

@@ -21,8 +21,8 @@
  * `mcpCall` (binding `mcp`) takes the same path with the upstream servers of
  * the host's configuration (`PolicySnapshot.mcp`) in place of the tool
  * runtime: prepared into a `PreparedMcpCall`, authorized by the same adapter
- * methods, then sent by `McpRuntime.call`. Nothing reaches the upstream server
- * before the call is authorized.
+ * methods, then sent by `McpRuntime.call` to a server started with the
+ * session. Nothing reaches the upstream server before the call is authorized.
  */
 
 /** Names of the bindings a script can call. */
@@ -256,6 +256,12 @@ export interface McpServerSpec {
   readonly toolTimeoutMs?: number;
   /** Where the host keeps it, e.g. `.mcp.json` or `config.toml`. */
   readonly origin: string;
+  /**
+   * Some call to it can pass the host's rules without asking (an allow rule
+   * or permission mode names it under Claude, an `approve` tool under
+   * Codex): only such a server starts with the session.
+   */
+  readonly autostart: boolean;
 }
 
 /** The upstream servers a host session can reach. */
@@ -317,11 +323,12 @@ export interface McpResult {
   readonly warning?: string;
 }
 
-/** Sends authorized `mcpCall`s to their servers, started on first use. */
+/** Sends authorized `mcpCall`s to the servers started with the session. */
 export interface McpRuntime {
   /**
-   * Starts `spec` when it is not running, checks that it lists `effect.tool`,
-   * sends the call and shapes the result. Throws `ToolError` on a failure, a
+   * Sends the call to the running server of `spec`, after checking that it
+   * lists `effect.tool`, and shapes the result. Throws `ToolError` when that
+   * server was not started with the session or has exited, on a failure, a
    * timeout (effect unknown, never retried) or a cancel. `onSent` runs once,
    * when the request is written to the server.
    */
