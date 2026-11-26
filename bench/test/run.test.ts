@@ -53,7 +53,7 @@ describe('paired schedule', () => {
       expect(bs).toHaveLength(c.runs * c.hosts.length * c.tasks.length);
       for (const b of bs) {
         const host = b[0]?.host ?? 'claude';
-        const expected = host === 'claude' ? (c.baseline ? ['A', 'B', 'B0', 'C'] : ['A', 'B', 'C']) : c.baseline ? ['A', 'B', 'C', 'C0'] : ['A', 'B', 'C'];
+        const expected = host === 'claude' ? (c.baseline ? ['A', 'B', 'B0', 'C', 'D'] : ['A', 'B', 'C', 'D']) : c.baseline ? ['A', 'B', 'C', 'C0'] : ['A', 'B', 'C'];
         expect(b.map((p) => p.arm).sort()).toEqual(expected);
         expect(b.map((p) => p.position)).toEqual(expected.map((_a, i) => i));
       }
@@ -100,7 +100,7 @@ describe('paired schedule', () => {
   it('warms every host x arm of the plan once, on the warmup task', () => {
     const plan = planRuns(['claude', 'codex'], ['T5', 'T9'], undefined, 3, 7, true);
     const warm = planWarmup(plan, 7);
-    expect(warm.map((p) => `${p.host}${p.arm}`).sort()).toEqual(['claudeA', 'claudeB', 'claudeB0', 'claudeC', 'codexA', 'codexB', 'codexC', 'codexC0']);
+    expect(warm.map((p) => `${p.host}${p.arm}`).sort()).toEqual(['claudeA', 'claudeB', 'claudeB0', 'claudeC', 'claudeD', 'codexA', 'codexB', 'codexC', 'codexC0']);
     expect(warm.every((p) => p.task === WARMUP_TASK && p.warmup === true)).toBe(true);
   });
 });

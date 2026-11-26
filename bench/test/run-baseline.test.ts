@@ -26,7 +26,7 @@ describe('baseline build arm', () => {
       // A baseline cell carries its build, so runs of two builds would never share one.
       const b0 = (summary.arms as { arm: string }[]).map((a) => a.arm).find((a) => a.startsWith('B0@')) ?? '';
       expect(b0).toMatch(/^B0@dist:[0-9a-f]{12}$/);
-      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', `B-${b0}`, `${b0}-A`, 'C-A']);
+      expect(summary.comparisons.map((c: { arm: string; reference: string }) => `${c.arm}-${c.reference}`).sort()).toEqual(['B-A', `B-${b0}`, `${b0}-A`, 'C-A', 'D-A', 'D-B']);
       // Canned transcripts: B and B0 are identical, so the cost difference is exactly 0 and the interval says so.
       const bb0 = summary.comparisons.find((c: { arm: string; reference: string }) => c.arm === 'B' && c.reference === b0);
       expect(bb0.costUsd).toMatchObject({ estimate: 0, lo: 0, hi: 0, crossesZero: true, tasks: 3 });

@@ -1,14 +1,15 @@
 {
   "currency": "USD",
   "unit": "per 1M tokens",
-  "note": "Used only for Codex runs (Claude reports total_cost_usd itself). Uncached input at `input`, cached input at `cachedInput`, cache writes at `input` (no separate OpenAI price), output (reasoning included) at `output`. Prices for prompts up to 272K tokens.",
+  "note": "Codex: uncached input at `input`, cached input at `cachedInput`, cache writes at `input` (no separate OpenAI price), output (reasoning included) at `output`; prices for prompts up to 272K tokens. Claude `-p` runs report total_cost_usd, which equals these prices with cache writes split by TTL. Claude interactive runs (arm D) report none: their cost is computed from the transcript usage with the same prices and split.",
   "models": {
     "gpt-6.1-terra": { "input": 1.0, "cachedInput": 0.05, "output": 5.0, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra" },
     "gpt-6.1-sol": { "input": 2.0, "cachedInput": 0.1, "output": 10.0, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol" },
     "gpt-6-luna": { "input": 0.1, "cachedInput": 0.01, "output": 0.5, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-6-luna" },
     "gpt-5.6-luna": { "input": 0.2, "cachedInput": 0.02, "output": 1.2, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna" },
     "gpt-5.6-terra": { "input": 2.0, "cachedInput": 0.2, "output": 12.0, "date": "2026-11-15", "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra" },
-    "claude-sonnet-5-5": { "input": 2.0, "cachedInput": 0.1, "cacheWrite5m": 2.5, "output": 10.0, "date": "2026-11-15", "source": "https://platform.claude.com/docs/en/about-claude/pricing" },
-    "claude-haiku-5-5": { "input": 0.1, "cachedInput": 0.01, "cacheWrite5m": 0.125, "output": 0.5, "date": "2026-11-15", "source": "https://platform.claude.com/docs/en/about-claude/pricing" }
+    "claude-sonnet-5-5": { "input": 2.0, "cachedInput": 0.1, "cacheWrite5m": 2.5, "cacheWrite1h": 4.0, "output": 10.0, "date": "2026-11-15", "source": "https://platform.claude.com/docs/en/about-claude/pricing" },
+    "claude-haiku-5-5": { "input": 0.1, "cachedInput": 0.01, "cacheWrite5m": 0.125, "cacheWrite1h": 0.2, "output": 0.5, "date": "2026-11-15", "source": "https://platform.claude.com/docs/en/about-claude/pricing" },
+    "claude-opus-5-5": { "input": 4.0, "cachedInput": 0.2, "cacheWrite5m": 5.0, "cacheWrite1h": 8.0, "output": 20.0, "date": "2026-11-17", "source": "https://platform.claude.com/docs/en/about-claude/pricing" }
   }
 }

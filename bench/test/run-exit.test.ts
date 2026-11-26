@@ -41,6 +41,14 @@ describe('exit code', () => {
     expect(r.errors).toMatch(/claude-T1-A-r1: dry run failed verification/);
   }, 120_000);
 
+  it('is 1 when a reference answer is off by one on arm D (Claude Code Mode)', async () => {
+    const solve = TASKS.T1.solution;
+    vi.spyOn(TASKS.T1, 'solution').mockImplementation(async (ws, facts) => (await solve(ws, facts)).replace(`ANSWER: ${facts.retryLimit}`, `ANSWER: ${facts.retryLimit + 1}`));
+    const r = await quiet(() => main(args.map((a) => (a === 'A' ? 'D' : a))));
+    expect(r.value).toBe(1);
+    expect(r.errors).toMatch(/claude-T1-D-r1: dry run failed verification/);
+  }, 120_000);
+
   it('is 1 when a planned run leaves no record', async () => {
     vi.spyOn(TASKS.T1, 'solution').mockRejectedValue(new Error('solution crashed'));
     const r = await quiet(() => main(args));
@@ -66,6 +74,18 @@ describe('exit code', () => {
     expect(r.value).toBe(1);
     expect(r.errors).toMatch(/claude-T1-A-r1: dry run invalid: tool surface not observed/);
   }, 120_000);
+
+  it('is 2, with that as the only error, before any host call when arm D has no credentials file to copy', async () => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', work);
+    try {
+      // --host all: the Claude and Codex version and catalog calls come after this check.
+      const r = await quiet(() => main(args.filter((a) => a !== '--dry-run' && a !== 'claude' && a !== '--host').map((a) => (a === 'A' ? 'B,D' : a))));
+      expect(r.value).toBe(2);
+      expect(r.errors.trim()).toMatch(/^arm D \(Claude Code Mode\) needs .*\.credentials\.json to copy into a temporary config dir$/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('is 2 before any host call when a real agent-code-mode arm is planned on Windows', async () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');

@@ -1,5 +1,7 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sanitize, type SanitizeContext } from '../lib/sanitize.ts';
+import { defaultSanitizeContext, sanitize, type SanitizeContext } from '../lib/sanitize.ts';
 
 const ctx: SanitizeContext = {
   paths: [
@@ -56,11 +58,13 @@ describe('sanitizer', () => {
       JSON.stringify({ type: 'system', session_id: session, uuid: '87654321-4321-4321-8321-210987654321' }),
       JSON.stringify({ type: 'assistant', message: { id: 'msg_FAKEfakeFAKEfake01', content: [{ type: 'tool_use', id: 'toolu_FAKEfakeFAKEfake01' }] }, request_id: 'req_FAKEfakeFAKEfake01', session_id: session }),
       JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_FAKEfakeFAKEfake01' }] }, session_id: session }),
+      JSON.stringify({ type: 'assistant', isVirtual: true, message: { content: [{ type: 'tool_use', id: 'repl_FAKEfake01' }] }, querySource: 'repl_main_thread' }),
     ].join('\n');
     const lines = sanitize(transcript, run).split('\n').map((l) => JSON.parse(l));
     expect(lines[0]).toEqual({ type: 'system', session_id: '00000000-0000-4000-8000-000000000001', uuid: '00000000-0000-4000-8000-000000000002' });
     expect(lines[1]).toEqual({ type: 'assistant', message: { id: 'msg_000000000000000000000001', content: [{ type: 'tool_use', id: 'toolu_000000000000000000000001' }] }, request_id: 'req_000000000000000000000001', session_id: '00000000-0000-4000-8000-000000000001' });
     expect(lines[2].message.content[0].tool_use_id).toBe('toolu_000000000000000000000001');
+    expect(lines[3]).toEqual({ type: 'assistant', isVirtual: true, message: { content: [{ type: 'tool_use', id: 'repl_000000000000000000000001' }] }, querySource: 'repl_main_thread' });
     expect(sanitize(`stderr: session ${session} ended`, run)).toBe('stderr: session 00000000-0000-4000-8000-000000000001 ended');
     expect(sanitize(sanitize(transcript, run), { ...ctx, ids: new Map() })).toBe(sanitize(transcript, run));
   });
@@ -97,5 +101,20 @@ describe('environment os label', () => {
     expect(osLabel('linux', '7.2.15-1-somedistro', 'x64')).toBe('linux 7.2 x64');
     expect(osLabel('darwin', '25.1.0', 'arm64')).toBe('darwin 25.1 arm64');
     expect(osLabel('win32', 'weird', 'x64')).toBe('win32 unknown x64');
+  });
+});
+
+describe('committed parser fixtures', () => {
+  const dir = path.join(import.meta.dirname, '..', 'parser-fixtures');
+  const value = (line: string): unknown => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return line;
+    }
+  };
+  it.each(readdirSync(dir))('%s is already sanitized: no real id, path, user or secret', (name) => {
+    const text = readFileSync(path.join(dir, name), 'utf8');
+    expect(sanitize(text, defaultSanitizeContext([])).split('\n').map(value)).toEqual(text.split('\n').map(value));
   });
 });

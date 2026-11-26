@@ -7,6 +7,7 @@ const PriceSchema = z.object({
   input: z.number().nonnegative(),
   cachedInput: z.number().nonnegative(),
   cacheWrite5m: z.number().nonnegative().optional(),
+  cacheWrite1h: z.number().nonnegative().optional(),
   output: z.number().nonnegative(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   source: z.string().url(),
@@ -23,6 +24,20 @@ export function loadPricing(file: string = PRICING_FILE): Pricing {
 export function costFromUsage(pricing: Pricing, model: string, usage: Usage): number | null {
   const p = pricing.models[model];
   if (p === undefined) return null;
-  const write = p.cacheWrite5m ?? p.input;
-  return (usage.input * p.input + usage.cacheRead * p.cachedInput + usage.cacheCreation * write + usage.output * p.output) / 1_000_000;
+  const write5m = p.cacheWrite5m ?? p.input;
+  const write1h = usage.cacheCreation1h ?? 0;
+  if (write1h > 0 && p.cacheWrite1h === undefined) return null;
+  const writes = write1h * (p.cacheWrite1h ?? 0) + Math.max(0, usage.cacheCreation - write1h) * write5m;
+  return (usage.input * p.input + usage.cacheRead * p.cachedInput + writes + usage.output * p.output) / 1_000_000;
+}
+
+/** Each model's usage at that model's price. Null when any of them has no price. */
+export function costByModel(pricing: Pricing, usageByModel: Readonly<Record<string, Usage>>): number | null {
+  let total = 0;
+  for (const [model, usage] of Object.entries(usageByModel)) {
+    const cost = costFromUsage(pricing, model, usage);
+    if (cost === null) return null;
+    total += cost;
+  }
+  return total;
 }
