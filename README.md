@@ -92,7 +92,7 @@ The response is one JSON block, `{ok, result | error, logs, calls, changedFiles,
 - A diff over 1,500 characters becomes `diffStat`, the lines added and removed for up to 10 files plus the totals.
 - A multi-line string result longer than 200 characters comes as plain text in a second block.
 - A response stays under about 10,000 tokens (40,000 characters, 9,500 for an error). Past that, the result, the logs and the diff keep their start and end, `truncated: true` is set, and each cut is marked. Denied and failed calls that do not fit one by one are grouped by tool and reason, with exact counts.
-- Whenever a response leaves something out, the whole result stays in the server's memory for 30 minutes, and the response carries `overflow: {id, chars}`. A later script reads it back with `readOverflow(id)`. The id works only in the same server process, and nothing is written to disk.
+- Whenever a response cuts something (a diff turned into `diffStat`, or anything past the cap), it carries `overflow: {id, chars}`. A later script reads the whole result back with `readOverflow(id)`. Allowed calls shown only as counts are not a cut; `verbose: true` lists them. The server keeps cut results in memory for 30 minutes, the oldest go first once it holds 32 million characters, and a result larger than that gets no id. The id works only in the same server process, and nothing is written to disk.
 - `verbose: true` returns every call and the whole diff. Above the cap, the calls come back as counts again, and the full log is kept for `readOverflow`.
 
 Edits that do not match exactly fall back through tolerant rungs (line endings, copied line numbers, trailing whitespace, indentation, typographic punctuation). `matchStrategy` names the rung that matched.
