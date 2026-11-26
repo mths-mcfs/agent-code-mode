@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -310,13 +311,13 @@ export function claudeVersion(): string {
  * temporary directory holding a copy of the credentials file (written back if
  * refreshed, as the benchmark does).
  */
-export async function hostRun(setup: Setup, commands: readonly string[], maxTurns: number): Promise<{ parsed: ParsedHostRun; world: World; transcript: string }> {
-  const world = await makeWorld(setup);
-  const configDir = path.join(world.base, 'claude-config');
-  const isolated = await readFile(path.join(sourceClaudeConfig(), '.credentials.json')).then(() => true, () => false);
+export const hostRun: HostRunner = async (setup, commands, maxTurns) => {
+  const credentials = path.join(sourceClaudeConfig(), '.credentials.json');
   // A trusted workspace, as the adapter's world is: project allow rules apply only there. Trust is written into a
   // temporary config dir, so recording needs a credentials file to copy (not the macOS keychain).
-  if (!isolated) throw new Error(`recording needs ${path.join(sourceClaudeConfig(), '.credentials.json')}: the workspace trust is written into a temporary config dir holding a copy of it`);
+  if (!(await readFile(credentials).then(() => true, () => false))) throw new Error(`recording needs ${credentials}: the workspace trust is written into a temporary config dir holding a copy of it`);
+  const world = await makeWorld(setup);
+  const configDir = path.join(world.base, 'claude-config');
   createCodexHome(configDir, sourceClaudeConfig(), '.credentials.json');
   await writeFile(path.join(configDir, '.claude.json'), JSON.stringify({ projects: { [world.project]: { hasTrustDialogAccepted: true } } }));
   const list = commands.map((c, i) => `${i + 1}. ${fill(c, world)}`).join('\n');
@@ -338,11 +339,111 @@ export async function hostRun(setup: Setup, commands: readonly string[], maxTurn
   const stderrFile = path.join(world.base, 'stderr.txt');
   try {
     const outcome = await runProcess({ command: 'claude', args, cwd: world.project, env: hostEnv(configDir), timeoutMs: 15 * 60_000, stdoutFile, stderrFile, stdin: `Run these commands:\n${list}\n` });
-    const transcript = await readFile(stdoutFile, 'utf8');
-    if (outcome.exitCode !== 0) throw new Error(`${setup.id}: claude exited ${String(outcome.exitCode)}: ${(await readFile(stderrFile, 'utf8')).slice(0, 2000)}`);
-    return { parsed: parseHostTranscript(transcript, commands.map((c) => fill(c, world))), world, transcript };
+    const transcript = await readFile(stdoutFile, 'utf8').catch(() => '');
+    const failure = outcome.exitCode === 0 ? undefined : `${setup.id}: claude exited ${String(outcome.exitCode)}: ${(await readFile(stderrFile, 'utf8').catch(() => '')).slice(0, 2000)}`;
+    return { world, transcript, failure };
   } finally {
     removeCodexHome(configDir);
+  }
+};
+
+export interface HostAttempt {
+  readonly world: World;
+  readonly transcript: string;
+  /** Set when `claude` did not exit cleanly: the transcript may still hold the cost of what it ran. */
+  readonly failure: string | undefined;
+}
+
+export type HostRunner = (setup: Setup, commands: readonly string[], maxTurns: number) => Promise<HostAttempt>;
+
+export interface Fixture {
+  readonly header: HostHeader | undefined;
+  readonly rows: readonly HostRow[];
+}
+
+export function readFixture(file: string): Fixture {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return { header: undefined, rows: [] };
+  }
+  const [first, ...rest] = text.trim().split('\n');
+  return { header: HostHeaderSchema.parse(JSON.parse(first ?? '')), rows: rest.map((l) => HostRowSchema.parse(JSON.parse(l))) };
+}
+
+function writeFixture(file: string, header: HostHeader, rows: readonly HostRow[]): void {
+  const order = (r: HostRow): number => SETUPS.findIndex((s) => s.id === r.setup) * COMMANDS.length + COMMANDS.indexOf(r.command);
+  const sorted = [...rows].sort((a, b) => order(a) - order(b));
+  writeFileSync(file, `${[header, ...sorted].map((v) => JSON.stringify(v)).join('\n')}\n`);
+}
+
+const CostSchema = z.object({ type: z.literal('result'), total_cost_usd: z.number() });
+
+/** What a transcript says the run cost, 0 when it never reached its result. */
+function costOf(transcript: string): number {
+  let cost = 0;
+  for (const line of transcript.split('\n')) {
+    let json: unknown;
+    try {
+      json = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = CostSchema.safeParse(json);
+    if (parsed.success) cost = parsed.data.total_cost_usd;
+  }
+  return cost;
+}
+
+export interface RecordOptions {
+  readonly file: string;
+  readonly setups: readonly Setup[];
+  readonly maxUsd: number;
+  readonly version: string;
+  readonly run?: HostRunner;
+  readonly log?: (line: string) => void;
+}
+
+/**
+ * Runs the setups through the host and merges their rows into the fixture.
+ * The running cost is written after every paid response, rows or not, so an
+ * interrupted recording still counts what it spent against the cap.
+ */
+export async function recordHost(o: RecordOptions): Promise<void> {
+  const run = o.run ?? hostRun;
+  const log = o.log ?? ((line: string): void => void process.stdout.write(`${line}\n`));
+  const old = readFixture(o.file);
+  if (old.header !== undefined && old.header.claudeCode !== o.version) throw new Error(`the fixture was recorded on ${old.header.claudeCode}, this is ${o.version}: record every setup again from an empty fixture`);
+  let cost = old.header?.costUsd ?? 0;
+  const rows = old.rows.filter((r) => !o.setups.some((s) => s.id === r.setup));
+  const persist = (): void =>
+    writeFixture(o.file, { claudeCode: o.version, model: HOST_MODEL, platform: process.platform, recorded: new Date().toISOString().slice(0, 10), costUsd: Number(cost.toFixed(4)) }, rows);
+  for (const setup of o.setups) {
+    let pending = [...COMMANDS];
+    for (let attempt = 0; attempt < 3 && pending.length > 0; attempt++) {
+      if (cost >= o.maxUsd) throw new Error(`stopped before ${setup.id}: US$${cost.toFixed(4)} spent, the cap is US$${o.maxUsd}`);
+      const { world, transcript, failure } = await run(setup, pending, pending.length * 2 + 4);
+      try {
+        const spent = costOf(transcript);
+        cost += spent;
+        persist();
+        if (failure !== undefined) throw new Error(failure);
+        const parsed = parseHostTranscript(transcript, pending.map((c) => fill(c, world)));
+        const missing: string[] = [];
+        for (const [i, command] of pending.entries()) {
+          const got = parsed.rows[i];
+          if (got === undefined) missing.push(command);
+          else rows.push({ setup: setup.id, command, host: got.verdict, ...(got.message === undefined ? {} : { message: scrub(got.message, world).slice(0, 300) }) });
+        }
+        persist();
+        log(`${setup.id} attempt ${attempt + 1}: ${pending.length - missing.length}/${pending.length} recorded, US$${spent.toFixed(4)} (total US$${cost.toFixed(4)})`);
+        pending = missing;
+      } finally {
+        await removeWorld(world);
+      }
+    }
+    if (pending.length > 0) throw new Error(`${setup.id}: the model never ran ${JSON.stringify(pending)} as written`);
   }
 }
 

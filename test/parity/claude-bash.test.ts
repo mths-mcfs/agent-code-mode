@@ -1,21 +1,20 @@
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   COMMANDS,
   HOST_MODEL,
-  HostHeaderSchema,
-  HostRowSchema,
   SETUPS,
   adapterVerdicts,
   claudeVersion,
-  hostRun,
   looser,
+  makeWorld,
   matrix,
-  removeWorld,
+  readFixture,
+  recordHost,
   scrub,
-  type HostHeader,
-  type HostRow,
+  type HostRunner,
   type Row,
 } from './claude-bash.ts';
 
@@ -25,61 +24,13 @@ const RECORD = process.env['ACM_PARITY_RECORD'] === '1';
 const ONLY = process.env['ACM_PARITY_SETUPS']?.split(',').filter((s) => s !== '');
 const MAX_USD = Number(process.env['ACM_PARITY_MAX_USD'] ?? '2');
 
-function readFixture(): { header: HostHeader | undefined; rows: HostRow[] } {
-  let text: string;
-  try {
-    text = readFileSync(FIXTURE, 'utf8');
-  } catch {
-    return { header: undefined, rows: [] };
-  }
-  const [first, ...rest] = text.trim().split('\n');
-  return { header: HostHeaderSchema.parse(JSON.parse(first ?? '')), rows: rest.map((l) => HostRowSchema.parse(JSON.parse(l))) };
-}
-
-function writeFixture(header: HostHeader, rows: readonly HostRow[]): void {
-  const order = (r: HostRow): number => SETUPS.findIndex((s) => s.id === r.setup) * COMMANDS.length + COMMANDS.indexOf(r.command);
-  const sorted = [...rows].sort((a, b) => order(a) - order(b));
-  writeFileSync(FIXTURE, `${[header, ...sorted].map((v) => JSON.stringify(v)).join('\n')}\n`);
-}
-
-async function record(): Promise<void> {
-  const version = claudeVersion();
-  const old = readFixture();
-  if (old.header !== undefined && old.header.claudeCode !== version) throw new Error(`the fixture was recorded on ${old.header.claudeCode}, this is ${version}: record every setup again from an empty fixture`);
-  const setups = SETUPS.filter((s) => ONLY === undefined || ONLY.includes(s.id));
-  let cost = old.header?.costUsd ?? 0;
-  const rows = old.rows.filter((r) => !setups.some((s) => s.id === r.setup));
-  for (const setup of setups) {
-    let pending = [...COMMANDS];
-    for (let attempt = 0; attempt < 3 && pending.length > 0; attempt++) {
-      if (cost >= MAX_USD) throw new Error(`stopped before ${setup.id}: US$${cost.toFixed(4)} spent, the cap is US$${MAX_USD}`);
-      const { parsed, world } = await hostRun(setup, pending, pending.length * 2 + 4);
-      try {
-        cost += parsed.costUsd;
-        const missing: string[] = [];
-        for (const [i, command] of pending.entries()) {
-          const got = parsed.rows[i];
-          if (got === undefined) missing.push(command);
-          else rows.push({ setup: setup.id, command, host: got.verdict, ...(got.message === undefined ? {} : { message: scrub(got.message, world).slice(0, 300) }) });
-        }
-        process.stdout.write(`${setup.id} attempt ${attempt + 1}: ${pending.length - missing.length}/${pending.length} recorded, US$${parsed.costUsd.toFixed(4)} (total US$${cost.toFixed(4)})\n`);
-        pending = missing;
-      } finally {
-        await removeWorld(world);
-      }
-    }
-    if (pending.length > 0) throw new Error(`${setup.id}: the model never ran ${JSON.stringify(pending)} as written`);
-    writeFixture({ claudeCode: version, model: HOST_MODEL, platform: process.platform, recorded: new Date().toISOString().slice(0, 10), costUsd: Number(cost.toFixed(4)) }, rows);
-  }
-}
-
 describe.skipIf(process.platform === 'win32')('Claude bash parity with the installed Claude Code', () => {
   it('records the host when ACM_PARITY_RECORD=1', { timeout: 3 * 60 * 60_000 }, async () => {
-    if (RECORD) await record();
+    if (RECORD) await recordHost({ file: FIXTURE, setups: SETUPS.filter((s) => ONLY === undefined || ONLY.includes(s.id)), maxUsd: MAX_USD, version: claudeVersion() });
   });
 
   it('the fixture covers every setup and command, recorded once', () => {
-    const { header, rows } = readFixture();
+    const { header, rows } = readFixture(FIXTURE);
     expect(header?.model).toBe(HOST_MODEL);
     const keys = rows.map((r) => `${r.setup}\t${r.command}`);
     expect(new Set(keys).size).toBe(keys.length);
@@ -87,7 +38,7 @@ describe.skipIf(process.platform === 'win32')('Claude bash parity with the insta
   });
 
   it('the adapter is never looser than the host', { timeout: 120_000 }, async () => {
-    const { header, rows: host } = readFixture();
+    const { header, rows: host } = readFixture(FIXTURE);
     const rows: Row[] = [];
     for (const setup of SETUPS) {
       const verdicts = await adapterVerdicts(setup);
@@ -107,6 +58,25 @@ describe.skipIf(process.platform === 'win32')('Claude bash parity with the insta
       expect(scrub(text, undefined), name).toBe(text);
       // Host messages are free text: no machine path may survive outside the {project}, {outside} and {base} placeholders.
       expect(text.match(/\/(home|Users|tmp|var|private)\/[^\s"']*/g) ?? [], name).toEqual([]);
+    }
+  });
+
+  it('an interrupted recording keeps what it spent, so the cap holds across runs', async () => {
+    const file = path.join(mkdtempSync(path.join(os.tmpdir(), 'acm-parity-record-')), 'host.jsonl');
+    const paid = `${JSON.stringify({ type: 'result', total_cost_usd: 0.5, permission_denials: [] })}\n`;
+    let calls = 0;
+    const run: HostRunner = async (setup) => {
+      calls++;
+      return { world: await makeWorld(setup), transcript: paid, failure: calls === 2 ? 'claude was killed' : undefined };
+    };
+    const setups = SETUPS.slice(0, 1);
+    try {
+      await expect(recordHost({ file, setups, maxUsd: 2, version: 'v', run, log: () => {} })).rejects.toThrow('claude was killed');
+      expect(readFixture(file).header?.costUsd).toBe(1);
+      await expect(recordHost({ file, setups, maxUsd: 1, version: 'v', run, log: () => {} })).rejects.toThrow('US$1.0000 spent, the cap is US$1');
+      expect(calls).toBe(2);
+    } finally {
+      rmSync(path.dirname(file), { recursive: true, force: true });
     }
   });
 });

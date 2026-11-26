@@ -231,6 +231,19 @@ describe('Bash parity with the host', () => {
     expect(await authorize(s, bash('cat a.txt', s.project))).toMatchObject({ kind: 'allow' });
   });
 
+  it.skipIf(!posix)('a file named like an option, after `--`, in a redirection or as ./-x, is checked through its symlink too', async () => {
+    const commands = ['echo x > -out', 'echo x >> -out', 'echo x 2> -out', 'echo x &> -out', 'touch -- -out', 'cat ./-out', 'echo x > -rc'];
+    const s = await setup({ user: { permissions: { allow: commands.map((c) => `Bash(${c})`) } }, mode: 'default' });
+    const outside = path.join(s.base, 'outside');
+    await mkdir(outside, { recursive: true });
+    await symlink(path.join(outside, 'target'), path.join(s.project, '-out'));
+    await symlink(path.join(s.project, '.bashrc'), path.join(s.project, '-rc'));
+    for (const command of commands) {
+      expect(check(s, bash(command, s.project)), command).toBe('allow');
+      expect(await authorize(s, bash(command, s.project)), command).toMatchObject({ kind: 'ask', reason: expect.stringContaining('through a symlink') });
+    }
+  });
+
   it.skipIf(!posix)('a hook rewrite into a command whose path resolves outside through a symlink asks', async () => {
     const s = await setup({
       user: {
