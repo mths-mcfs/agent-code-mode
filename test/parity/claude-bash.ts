@@ -411,6 +411,7 @@ export interface RecordOptions {
  * interrupted recording still counts what it spent against the cap.
  */
 export async function recordHost(o: RecordOptions): Promise<void> {
+  if (!Number.isFinite(o.maxUsd) || o.maxUsd < 0) throw new Error(`the spending cap must be a number of US dollars, 0 or more (ACM_PARITY_MAX_USD), not ${String(o.maxUsd)}`);
   const run = o.run ?? hostRun;
   const log = o.log ?? ((line: string): void => void process.stdout.write(`${line}\n`));
   const old = readFixture(o.file);

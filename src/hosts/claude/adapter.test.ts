@@ -244,6 +244,15 @@ describe('Bash parity with the host', () => {
     }
   });
 
+  it.skipIf(!posix)('a word with a backslash asks, since it names one file whose symlink the path check would miss', async () => {
+    const command = "echo x > 'safe\\out'";
+    const s = await setup({ user: { permissions: { allow: [`Bash(${command})`] } }, mode: 'default' });
+    const outside = path.join(s.base, 'outside');
+    await mkdir(outside, { recursive: true });
+    await symlink(path.join(outside, 'target'), path.join(s.project, 'safe\\out'));
+    expect(check(s, bash(command, s.project))).toBe('ask');
+  });
+
   it.skipIf(!posix)('a hook rewrite into a command whose path resolves outside through a symlink asks', async () => {
     const s = await setup({
       user: {

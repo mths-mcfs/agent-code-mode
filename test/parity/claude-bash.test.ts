@@ -61,6 +61,17 @@ describe.skipIf(process.platform === 'win32')('Claude bash parity with the insta
     }
   });
 
+  it.each([Number('abc'), Number('0,50'), Number.POSITIVE_INFINITY, -1])('refuses the spending cap %s before any paid call', async (maxUsd) => {
+    let calls = 0;
+    const run: HostRunner = async () => {
+      calls++;
+      throw new Error('the runner must not be called');
+    };
+    const file = path.join(os.tmpdir(), 'acm-parity-cap-never-written.jsonl');
+    await expect(recordHost({ file, setups: SETUPS.slice(0, 1), maxUsd, version: 'v', run, log: () => {} })).rejects.toThrow('spending cap');
+    expect(calls).toBe(0);
+  });
+
   it('an interrupted recording keeps what it spent, so the cap holds across runs', async () => {
     const file = path.join(mkdtempSync(path.join(os.tmpdir(), 'acm-parity-record-')), 'host.jsonl');
     const paid = `${JSON.stringify({ type: 'result', total_cost_usd: 0.5, permission_denials: [] })}\n`;
