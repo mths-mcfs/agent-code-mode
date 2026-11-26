@@ -11,7 +11,7 @@ import { McpUpstreams, shapeResult } from './upstream.js';
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'upstream-server.mjs');
 const dir = mkdtempSync(path.join(os.tmpdir(), 'acm-upstream-'));
-afterAll(() => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 let n = 0;
 let pools: McpUpstreams[] = [];
@@ -191,6 +191,13 @@ describe('McpUpstreams', () => {
     await a.pool.close();
     expect(alive(pidA)).toBe(false);
     await expect(a.pool.call(a.spec, effect('echo'), signal())).rejects.toThrow(/no longer running/);
+
+    const c = setup();
+    await c.pool.call(c.spec, effect('echo'), signal());
+    const pidC = c.events()[0]?.pid ?? 0;
+    void c.pool.close();
+    await c.pool.close();
+    expect(alive(pidC)).toBe(false);
 
     const b = setup();
     await b.pool.call(b.spec, effect('echo'), signal());

@@ -312,11 +312,14 @@ describe('MCP server and the session\'s upstream servers', () => {
       await client.close();
       await server.close();
       await upstreams.close();
-      // Windows releases the exited server's working directory a moment later.
-      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      rmSync(dir, { recursive: true, force: true });
     });
     await client.callTool({ name: 'run', arguments: { code: JSON.stringify([{ log: 'ran' }]) } });
     expect(readFileSync(log, 'utf8')).toContain('"listed"');
+    // Shutdown waits for the server process itself, so nothing holds its working directory afterwards.
+    const pid = Number(/"pid":(\d+)/.exec(readFileSync(log, 'utf8'))?.[1]);
+    await upstreams.close();
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 
   it('runs no script before the session\'s upstream servers are spawned', async () => {

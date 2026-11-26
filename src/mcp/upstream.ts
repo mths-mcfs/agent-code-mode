@@ -54,6 +54,7 @@ export class McpUpstreams implements McpRuntime {
   readonly #processes = new Set<StdioClientTransport>();
   #started: Promise<void> = Promise.resolve();
   #closed = false;
+  #closing: Promise<void> | undefined;
 
   constructor(opts: McpUpstreamsOptions = {}) {
     this.#opts = opts;
@@ -119,9 +120,18 @@ export class McpUpstreams implements McpRuntime {
   }
 
   /** Ends every server process: stdin closed, then SIGTERM, then SIGKILL. */
-  async close(): Promise<void> {
+  close(): Promise<void> {
     this.#closed = true;
-    await Promise.allSettled([...this.#processes].map((t) => t.close()));
+    // Every caller waits for the same close: a second transport.close() returns at once, before the process exits.
+    this.#closing ??= Promise.allSettled(
+      [...this.#processes].map(async (t) => {
+        const pid = t.pid;
+        // The SDK closes stdin, then sends SIGTERM, then SIGKILL, each bounded; it does not wait for the last one to land.
+        await t.close();
+        if (pid !== null) await gone(pid, EXIT_WAIT_MS);
+      }),
+    ).then(() => undefined);
+    return this.#closing;
   }
 
   /** For process exit and fatal signals, when no async cleanup can run: SIGKILL every server process. */
@@ -167,6 +177,21 @@ export class McpUpstreams implements McpRuntime {
       await client.close().catch(() => undefined);
       throw new ToolError('tool-error', `MCP server ${shownName(spec.name)} (${spec.origin}) could not be started: ${upstreamText(errorMessage(err), spec)}`);
     }
+  }
+}
+
+const EXIT_WAIT_MS = 2_000;
+
+/** Resolves once no process has `pid`, or after `ms`. */
+async function gone(pid: number, ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 20));
   }
 }
 
