@@ -24,7 +24,7 @@ export function hookCommand(protectedFile: string): string {
 }
 
 export function claudeProjectSettings(task: TaskDef, fixture: Fixture, companionHook?: string): unknown {
-  const settings: Record<string, unknown> = { permissions: { allow: CLAUDE_ALLOWED_TOOLS }, sandbox: { enabled: true }, autoMemoryEnabled: false };
+  const settings: Record<string, unknown> = { permissions: { allow: CLAUDE_ALLOWED_TOOLS }, sandbox: { enabled: true, autoAllowBashIfSandboxed: true }, autoMemoryEnabled: false };
   const preToolUse: unknown[] = [];
   if (task.protectedHook) preToolUse.push({ matcher: CLAUDE_HOOK_MATCHER, hooks: [{ type: 'command', command: hookCommand(fixture.facts.protectedFile), timeout: 30 }] });
   if (companionHook !== undefined) preToolUse.push({ matcher: CLAUDE_RUN_TOOL, hooks: [{ type: 'command', command: companionHook }] });

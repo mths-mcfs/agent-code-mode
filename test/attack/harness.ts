@@ -149,7 +149,7 @@ async function serve(runtime: Runtime, lab: Lab, meta: () => Promise<Record<stri
  */
 export async function claudeServer(lab: Lab, settings: Record<string, unknown>, opts: { mode?: string } = {}): Promise<Server> {
   mkdirSync(path.join(lab.ws, '.claude'), { recursive: true });
-  writeFileSync(path.join(lab.ws, '.claude', 'settings.json'), JSON.stringify({ sandbox: { enabled: true }, ...settings }));
+  writeFileSync(path.join(lab.ws, '.claude', 'settings.json'), JSON.stringify({ sandbox: { enabled: true, autoAllowBashIfSandboxed: true }, ...settings }));
   mkdirSync(path.join(lab.home, '.claude'), { recursive: true });
   writeFileSync(path.join(lab.home, '.claude.json'), JSON.stringify({ projects: { [lab.ws]: { hasTrustDialogAccepted: true } } }));
   const runtime: Runtime = {

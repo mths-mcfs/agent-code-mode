@@ -25,7 +25,8 @@
     "test": "vitest run",
     "verify": "npm run typecheck && npm test && npm run build",
     "bench": "node bench/run.ts",
-    "bench:report": "node bench/report.ts"
+    "bench:report": "node bench/report.ts",
+    "parity:claude": "vitest run test/parity/claude-bash.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.81",

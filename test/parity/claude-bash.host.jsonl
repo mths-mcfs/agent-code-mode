@@ -1,0 +1,901 @@
+{"claudeCode":"2.1.332 (Claude Code)","model":"claude-haiku-5-5","platform":"linux","recorded":"2026-11-26","costUsd":0.1531}
+{"setup":"none","command":"echo hi","host":"allow"}
+{"setup":"none","command":"ls","host":"allow"}
+{"setup":"none","command":"cat a.txt","host":"allow"}
+{"setup":"none","command":"cat {outside}/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"none","command":"git status","host":"allow"}
+{"setup":"none","command":"cat link-out/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"none","command":"cat /etc/hostname","host":"ask","message":"cat in '/etc/hostname' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"none","command":"pwd","host":"allow"}
+{"setup":"none","command":"wc -l a.txt","host":"allow"}
+{"setup":"none","command":"grep a a.txt","host":"allow"}
+{"setup":"none","command":"sort a.txt","host":"allow"}
+{"setup":"none","command":"find . -name a.txt","host":"allow"}
+{"setup":"none","command":"git log -1","host":"allow"}
+{"setup":"none","command":"ls {outside}","host":"ask","message":"ls in '{outside}' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '{project}'."}
+{"setup":"none","command":"head -n1 {outside}/secret.txt","host":"ask","message":"head in '{outside}/secret.txt' was blocked. For security, Claude Code may only read the beginning of files from the allowed working directories for this session: '{project}'."}
+{"setup":"none","command":"echo $HOME","host":"allow"}
+{"setup":"none","command":"echo $(pwd)","host":"ask","message":"A nested command in this command can't be checked before it runs"}
+{"setup":"none","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"none","command":"ls | grep a","host":"allow"}
+{"setup":"none","command":"node -e 0","host":"ask","message":"This command requires approval"}
+{"setup":"none","command":"python3 -c 0","host":"ask","message":"This command requires approval"}
+{"setup":"none","command":"git add a.txt","host":"ask","message":"This command requires approval"}
+{"setup":"none","command":"chmod +x j.txt","host":"ask","message":"This command requires approval"}
+{"setup":"none","command":"ln -s a.txt ln.txt","host":"ask","message":"This command requires approval"}
+{"setup":"none","command":"touch new.txt","host":"ask","message":"touch in '{project}/new.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"mkdir -p d/e","host":"ask","message":"mkdir in '{project}/d/e' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"echo x > out.txt","host":"ask","message":"Output redirection to '{project}/out.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"cp a.txt b.txt","host":"ask","message":"cp in '{project}/a.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"mv c.txt moved.txt","host":"ask","message":"mv in '{project}/c.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"rm -f f.txt","host":"ask","message":"rm in '{project}/f.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"sed -i s/a/b/ e.txt","host":"ask","message":"sed in '{project}/e.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"printf %s hi > {project}/abs.txt","host":"ask","message":"Output redirection to '{project}/abs.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"mkdir -p {outside}/m","host":"ask","message":"mkdir in '{outside}/m' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"none","command":"touch {outside}/t.txt","host":"ask","message":"touch in '{outside}/t.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"none","command":"echo x > {outside}/w.txt","host":"ask","message":"Output redirection to '{outside}/w.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"none","command":"rm -f {outside}/r.txt","host":"ask","message":"rm in '{outside}/r.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"none","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"none","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"none","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"none","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"none","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"none","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"none","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"none","command":"X={outside}/v.txt; echo x > \"$X\"","host":"ask","message":"Output redirection to '{outside}/v.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"none","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"ask","message":"Redirect target contains $(cmd) output — path is runtime-determined"}
+{"setup":"none","command":"cd {outside} && echo x > rel.txt","host":"ask","message":"This Bash command contains multiple operations. The following parts require approval: cd {outside}, echo x"}
+{"setup":"none","command":"cd sub && touch made.txt","host":"ask","message":"Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."}
+{"setup":"none","command":"echo a && touch g.txt","host":"ask","message":"touch in '{project}/g.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"none","command":"echo a | tee h.txt","host":"ask","message":"This Bash command contains multiple operations. The following part requires approval: tee h.txt"}
+{"setup":"none","command":"ls; rm -f i.txt","host":"ask","message":"rm in '{project}/i.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"allow-all","command":"echo hi","host":"allow"}
+{"setup":"allow-all","command":"ls","host":"allow"}
+{"setup":"allow-all","command":"cat a.txt","host":"allow"}
+{"setup":"allow-all","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"allow-all","command":"git status","host":"allow"}
+{"setup":"allow-all","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"allow-all","command":"cat /etc/hostname","host":"allow"}
+{"setup":"allow-all","command":"pwd","host":"allow"}
+{"setup":"allow-all","command":"wc -l a.txt","host":"allow"}
+{"setup":"allow-all","command":"grep a a.txt","host":"allow"}
+{"setup":"allow-all","command":"sort a.txt","host":"allow"}
+{"setup":"allow-all","command":"find . -name a.txt","host":"allow"}
+{"setup":"allow-all","command":"git log -1","host":"allow"}
+{"setup":"allow-all","command":"ls {outside}","host":"allow"}
+{"setup":"allow-all","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"allow-all","command":"echo $HOME","host":"allow"}
+{"setup":"allow-all","command":"echo $(pwd)","host":"allow"}
+{"setup":"allow-all","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"allow-all","command":"ls | grep a","host":"allow"}
+{"setup":"allow-all","command":"node -e 0","host":"allow"}
+{"setup":"allow-all","command":"python3 -c 0","host":"allow"}
+{"setup":"allow-all","command":"git add a.txt","host":"allow"}
+{"setup":"allow-all","command":"chmod +x j.txt","host":"allow"}
+{"setup":"allow-all","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"allow-all","command":"touch new.txt","host":"allow"}
+{"setup":"allow-all","command":"mkdir -p d/e","host":"allow"}
+{"setup":"allow-all","command":"echo x > out.txt","host":"allow"}
+{"setup":"allow-all","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"allow-all","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"allow-all","command":"rm -f f.txt","host":"allow"}
+{"setup":"allow-all","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"allow-all","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"allow-all","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"allow-all","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"allow-all","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"allow-all","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"allow-all","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"allow-all","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"allow-all","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"allow-all","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"allow-all","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"allow-all","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"allow-all","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"allow-all","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"allow-all","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"allow-all","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"allow-all","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"allow-all","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"allow-all","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"allow-all","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"prefix","command":"echo hi","host":"allow"}
+{"setup":"prefix","command":"ls","host":"allow"}
+{"setup":"prefix","command":"cat a.txt","host":"allow"}
+{"setup":"prefix","command":"cat {outside}/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"prefix","command":"git status","host":"allow"}
+{"setup":"prefix","command":"cat link-out/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"prefix","command":"cat /etc/hostname","host":"ask","message":"cat in '/etc/hostname' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"prefix","command":"pwd","host":"allow"}
+{"setup":"prefix","command":"wc -l a.txt","host":"allow"}
+{"setup":"prefix","command":"grep a a.txt","host":"allow"}
+{"setup":"prefix","command":"sort a.txt","host":"allow"}
+{"setup":"prefix","command":"find . -name a.txt","host":"allow"}
+{"setup":"prefix","command":"git log -1","host":"allow"}
+{"setup":"prefix","command":"ls {outside}","host":"ask","message":"ls in '{outside}' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '{project}'."}
+{"setup":"prefix","command":"head -n1 {outside}/secret.txt","host":"ask","message":"head in '{outside}/secret.txt' was blocked. For security, Claude Code may only read the beginning of files from the allowed working directories for this session: '{project}'."}
+{"setup":"prefix","command":"echo $HOME","host":"allow"}
+{"setup":"prefix","command":"echo $(pwd)","host":"ask","message":"A nested command in this command can't be checked before it runs"}
+{"setup":"prefix","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"prefix","command":"ls | grep a","host":"allow"}
+{"setup":"prefix","command":"node -e 0","host":"ask","message":"This command requires approval"}
+{"setup":"prefix","command":"python3 -c 0","host":"ask","message":"This command requires approval"}
+{"setup":"prefix","command":"git add a.txt","host":"ask","message":"This command requires approval"}
+{"setup":"prefix","command":"chmod +x j.txt","host":"ask","message":"This command requires approval"}
+{"setup":"prefix","command":"ln -s a.txt ln.txt","host":"ask","message":"This command requires approval"}
+{"setup":"prefix","command":"touch new.txt","host":"allow"}
+{"setup":"prefix","command":"mkdir -p d/e","host":"allow"}
+{"setup":"prefix","command":"echo x > out.txt","host":"ask","message":"Output redirection to '{project}/out.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"prefix","command":"cp a.txt b.txt","host":"ask","message":"Claude requested permissions to use Bash, but you haven't granted it yet."}
+{"setup":"prefix","command":"mv c.txt moved.txt","host":"ask","message":"mv in '{project}/c.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"prefix","command":"rm -f f.txt","host":"deny","message":"Permission to use Bash with command rm -f f.txt has been denied."}
+{"setup":"prefix","command":"sed -i s/a/b/ e.txt","host":"ask","message":"sed in '{project}/e.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"prefix","command":"printf %s hi > {project}/abs.txt","host":"ask","message":"Output redirection to '{project}/abs.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"prefix","command":"mkdir -p {outside}/m","host":"ask","message":"mkdir in '{outside}/m' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"prefix","command":"touch {outside}/t.txt","host":"ask","message":"touch in '{outside}/t.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"prefix","command":"echo x > {outside}/w.txt","host":"ask","message":"Output redirection to '{outside}/w.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"prefix","command":"rm -f {outside}/r.txt","host":"deny","message":"Permission to use Bash with command rm -f {outside}/r.txt has been denied."}
+{"setup":"prefix","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"prefix","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"prefix","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"prefix","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"prefix","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"prefix","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"prefix","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"prefix","command":"X={outside}/v.txt; echo x > \"$X\"","host":"ask","message":"Output redirection to '{outside}/v.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"prefix","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"ask","message":"Redirect target contains $(cmd) output — path is runtime-determined"}
+{"setup":"prefix","command":"cd {outside} && echo x > rel.txt","host":"ask","message":"This Bash command contains multiple operations. The following parts require approval: cd {outside}, echo x"}
+{"setup":"prefix","command":"cd sub && touch made.txt","host":"ask","message":"Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."}
+{"setup":"prefix","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"prefix","command":"echo a | tee h.txt","host":"ask","message":"This Bash command contains multiple operations. The following part requires approval: tee h.txt"}
+{"setup":"prefix","command":"ls; rm -f i.txt","host":"deny","message":"Permission to use Bash with command ls; rm -f i.txt has been denied."}
+{"setup":"exact","command":"echo hi","host":"allow"}
+{"setup":"exact","command":"ls","host":"allow"}
+{"setup":"exact","command":"cat a.txt","host":"allow"}
+{"setup":"exact","command":"cat {outside}/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"exact","command":"git status","host":"allow"}
+{"setup":"exact","command":"cat link-out/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"exact","command":"cat /etc/hostname","host":"ask","message":"cat in '/etc/hostname' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"exact","command":"pwd","host":"allow"}
+{"setup":"exact","command":"wc -l a.txt","host":"allow"}
+{"setup":"exact","command":"grep a a.txt","host":"allow"}
+{"setup":"exact","command":"sort a.txt","host":"allow"}
+{"setup":"exact","command":"find . -name a.txt","host":"allow"}
+{"setup":"exact","command":"git log -1","host":"allow"}
+{"setup":"exact","command":"ls {outside}","host":"ask","message":"ls in '{outside}' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '{project}'."}
+{"setup":"exact","command":"head -n1 {outside}/secret.txt","host":"ask","message":"head in '{outside}/secret.txt' was blocked. For security, Claude Code may only read the beginning of files from the allowed working directories for this session: '{project}'."}
+{"setup":"exact","command":"echo $HOME","host":"allow"}
+{"setup":"exact","command":"echo $(pwd)","host":"ask","message":"A nested command in this command can't be checked before it runs"}
+{"setup":"exact","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"exact","command":"ls | grep a","host":"allow"}
+{"setup":"exact","command":"node -e 0","host":"ask","message":"This command requires approval"}
+{"setup":"exact","command":"python3 -c 0","host":"ask","message":"This command requires approval"}
+{"setup":"exact","command":"git add a.txt","host":"ask","message":"This command requires approval"}
+{"setup":"exact","command":"chmod +x j.txt","host":"ask","message":"This command requires approval"}
+{"setup":"exact","command":"ln -s a.txt ln.txt","host":"ask","message":"This command requires approval"}
+{"setup":"exact","command":"touch new.txt","host":"allow"}
+{"setup":"exact","command":"mkdir -p d/e","host":"ask","message":"mkdir in '{project}/d/e' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"echo x > out.txt","host":"ask","message":"Output redirection to '{project}/out.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"cp a.txt b.txt","host":"ask","message":"cp in '{project}/a.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"mv c.txt moved.txt","host":"ask","message":"mv in '{project}/c.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"rm -f f.txt","host":"ask","message":"rm in '{project}/f.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"sed -i s/a/b/ e.txt","host":"ask","message":"sed in '{project}/e.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"printf %s hi > {project}/abs.txt","host":"ask","message":"Output redirection to '{project}/abs.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"mkdir -p {outside}/m","host":"ask","message":"mkdir in '{outside}/m' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"exact","command":"touch {outside}/t.txt","host":"ask","message":"touch in '{outside}/t.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"exact","command":"echo x > {outside}/w.txt","host":"ask","message":"Output redirection to '{outside}/w.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"exact","command":"rm -f {outside}/r.txt","host":"ask","message":"rm in '{outside}/r.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"exact","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"exact","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"exact","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"exact","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"exact","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"exact","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"exact","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"exact","command":"X={outside}/v.txt; echo x > \"$X\"","host":"ask","message":"Output redirection to '{outside}/v.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"exact","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"ask","message":"Redirect target contains $(cmd) output — path is runtime-determined"}
+{"setup":"exact","command":"cd {outside} && echo x > rel.txt","host":"ask","message":"This Bash command contains multiple operations. The following parts require approval: cd {outside}, echo x"}
+{"setup":"exact","command":"cd sub && touch made.txt","host":"ask","message":"Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."}
+{"setup":"exact","command":"echo a && touch g.txt","host":"ask","message":"touch in '{project}/g.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"exact","command":"echo a | tee h.txt","host":"ask","message":"This Bash command contains multiple operations. The following part requires approval: tee h.txt"}
+{"setup":"exact","command":"ls; rm -f i.txt","host":"ask","message":"rm in '{project}/i.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"accept-edits","command":"echo hi","host":"allow"}
+{"setup":"accept-edits","command":"ls","host":"allow"}
+{"setup":"accept-edits","command":"cat a.txt","host":"allow"}
+{"setup":"accept-edits","command":"cat {outside}/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"accept-edits","command":"git status","host":"allow"}
+{"setup":"accept-edits","command":"cat link-out/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"accept-edits","command":"cat /etc/hostname","host":"ask","message":"cat in '/etc/hostname' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"accept-edits","command":"pwd","host":"allow"}
+{"setup":"accept-edits","command":"wc -l a.txt","host":"allow"}
+{"setup":"accept-edits","command":"grep a a.txt","host":"allow"}
+{"setup":"accept-edits","command":"sort a.txt","host":"allow"}
+{"setup":"accept-edits","command":"find . -name a.txt","host":"allow"}
+{"setup":"accept-edits","command":"git log -1","host":"allow"}
+{"setup":"accept-edits","command":"ls {outside}","host":"ask","message":"ls in '{outside}' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '{project}'."}
+{"setup":"accept-edits","command":"head -n1 {outside}/secret.txt","host":"ask","message":"head in '{outside}/secret.txt' was blocked. For security, Claude Code may only read the beginning of files from the allowed working directories for this session: '{project}'."}
+{"setup":"accept-edits","command":"echo $HOME","host":"allow"}
+{"setup":"accept-edits","command":"echo $(pwd)","host":"ask","message":"A nested command in this command can't be checked before it runs"}
+{"setup":"accept-edits","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"accept-edits","command":"ls | grep a","host":"allow"}
+{"setup":"accept-edits","command":"node -e 0","host":"ask","message":"This command requires approval"}
+{"setup":"accept-edits","command":"python3 -c 0","host":"ask","message":"This command requires approval"}
+{"setup":"accept-edits","command":"git add a.txt","host":"ask","message":"This command requires approval"}
+{"setup":"accept-edits","command":"chmod +x j.txt","host":"ask","message":"This command requires approval"}
+{"setup":"accept-edits","command":"ln -s a.txt ln.txt","host":"ask","message":"This command requires approval"}
+{"setup":"accept-edits","command":"touch new.txt","host":"allow"}
+{"setup":"accept-edits","command":"mkdir -p d/e","host":"allow"}
+{"setup":"accept-edits","command":"echo x > out.txt","host":"allow"}
+{"setup":"accept-edits","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"accept-edits","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"accept-edits","command":"rm -f f.txt","host":"allow"}
+{"setup":"accept-edits","command":"sed -i s/a/b/ e.txt","host":"ask","message":"sed command requires approval (contains potentially dangerous operations)"}
+{"setup":"accept-edits","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"accept-edits","command":"mkdir -p {outside}/m","host":"ask","message":"mkdir in '{outside}/m' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"accept-edits","command":"touch {outside}/t.txt","host":"ask","message":"touch in '{outside}/t.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"accept-edits","command":"echo x > {outside}/w.txt","host":"ask","message":"Output redirection to '{outside}/w.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"accept-edits","command":"rm -f {outside}/r.txt","host":"ask","message":"rm in '{outside}/r.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"accept-edits","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"accept-edits","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"accept-edits","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"accept-edits","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"accept-edits","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"accept-edits","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"accept-edits","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"accept-edits","command":"X={outside}/v.txt; echo x > \"$X\"","host":"ask","message":"Output redirection to '{outside}/v.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"accept-edits","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"ask","message":"Redirect target contains $(cmd) output — path is runtime-determined"}
+{"setup":"accept-edits","command":"cd {outside} && echo x > rel.txt","host":"ask","message":"This Bash command contains multiple operations. The following parts require approval: cd {outside}, echo x"}
+{"setup":"accept-edits","command":"cd sub && touch made.txt","host":"ask","message":"Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."}
+{"setup":"accept-edits","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"accept-edits","command":"echo a | tee h.txt","host":"ask","message":"This Bash command contains multiple operations. The following part requires approval: tee h.txt"}
+{"setup":"accept-edits","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"dont-ask","command":"echo hi","host":"allow"}
+{"setup":"dont-ask","command":"ls","host":"allow"}
+{"setup":"dont-ask","command":"cat a.txt","host":"allow"}
+{"setup":"dont-ask","command":"cat {outside}/secret.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"git status","host":"allow"}
+{"setup":"dont-ask","command":"cat link-out/secret.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"cat /etc/hostname","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"pwd","host":"allow"}
+{"setup":"dont-ask","command":"wc -l a.txt","host":"allow"}
+{"setup":"dont-ask","command":"grep a a.txt","host":"allow"}
+{"setup":"dont-ask","command":"sort a.txt","host":"allow"}
+{"setup":"dont-ask","command":"find . -name a.txt","host":"allow"}
+{"setup":"dont-ask","command":"git log -1","host":"allow"}
+{"setup":"dont-ask","command":"ls {outside}","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"head -n1 {outside}/secret.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo $HOME","host":"allow"}
+{"setup":"dont-ask","command":"echo $(pwd)","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"dont-ask","command":"ls | grep a","host":"allow"}
+{"setup":"dont-ask","command":"node -e 0","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"python3 -c 0","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"git add a.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"chmod +x j.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"ln -s a.txt ln.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"touch new.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"mkdir -p d/e","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > out.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"cp a.txt b.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"mv c.txt moved.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"rm -f f.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"sed -i s/a/b/ e.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"printf %s hi > {project}/abs.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"mkdir -p {outside}/m","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"touch {outside}/t.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > {outside}/w.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"rm -f {outside}/r.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > .git/info/note","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x >> .bashrc","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > .claude/note.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > .mcp.json","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"touch .gitconfig","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > {outside}/.npmrc","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > link-out/via-link.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"X={outside}/v.txt; echo x > \"$X\"","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"cd {outside} && echo x > rel.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"cd sub && touch made.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo a && touch g.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"echo a | tee h.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"dont-ask","command":"ls; rm -f i.txt","host":"deny","message":"Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this den"}
+{"setup":"bypass","command":"echo hi","host":"allow"}
+{"setup":"bypass","command":"ls","host":"allow"}
+{"setup":"bypass","command":"cat a.txt","host":"allow"}
+{"setup":"bypass","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"bypass","command":"git status","host":"allow"}
+{"setup":"bypass","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"bypass","command":"cat /etc/hostname","host":"allow"}
+{"setup":"bypass","command":"pwd","host":"allow"}
+{"setup":"bypass","command":"wc -l a.txt","host":"allow"}
+{"setup":"bypass","command":"grep a a.txt","host":"allow"}
+{"setup":"bypass","command":"sort a.txt","host":"allow"}
+{"setup":"bypass","command":"find . -name a.txt","host":"allow"}
+{"setup":"bypass","command":"git log -1","host":"allow"}
+{"setup":"bypass","command":"ls {outside}","host":"allow"}
+{"setup":"bypass","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"bypass","command":"echo $HOME","host":"allow"}
+{"setup":"bypass","command":"echo $(pwd)","host":"allow"}
+{"setup":"bypass","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"bypass","command":"ls | grep a","host":"allow"}
+{"setup":"bypass","command":"node -e 0","host":"allow"}
+{"setup":"bypass","command":"python3 -c 0","host":"allow"}
+{"setup":"bypass","command":"git add a.txt","host":"allow"}
+{"setup":"bypass","command":"chmod +x j.txt","host":"allow"}
+{"setup":"bypass","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"bypass","command":"touch new.txt","host":"allow"}
+{"setup":"bypass","command":"mkdir -p d/e","host":"allow"}
+{"setup":"bypass","command":"echo x > out.txt","host":"allow"}
+{"setup":"bypass","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"bypass","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"bypass","command":"rm -f f.txt","host":"allow"}
+{"setup":"bypass","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"bypass","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"bypass","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"bypass","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"bypass","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"bypass","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"bypass","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"bypass","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"bypass","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"bypass","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"bypass","command":"touch .gitconfig","host":"allow"}
+{"setup":"bypass","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"bypass","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"bypass","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"bypass","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"bypass","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"bypass","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"bypass","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"bypass","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"bypass","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx","command":"echo hi","host":"allow"}
+{"setup":"sbx","command":"ls","host":"allow"}
+{"setup":"sbx","command":"cat a.txt","host":"allow"}
+{"setup":"sbx","command":"cat {outside}/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx","command":"git status","host":"allow"}
+{"setup":"sbx","command":"cat link-out/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx","command":"cat /etc/hostname","host":"ask","message":"cat in '/etc/hostname' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx","command":"pwd","host":"allow"}
+{"setup":"sbx","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx","command":"sort a.txt","host":"allow"}
+{"setup":"sbx","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx","command":"git log -1","host":"allow"}
+{"setup":"sbx","command":"ls {outside}","host":"ask","message":"ls in '{outside}' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '{project}'."}
+{"setup":"sbx","command":"head -n1 {outside}/secret.txt","host":"ask","message":"head in '{outside}/secret.txt' was blocked. For security, Claude Code may only read the beginning of files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx","command":"echo $HOME","host":"allow"}
+{"setup":"sbx","command":"echo $(pwd)","host":"ask","message":"A nested command in this command can't be checked before it runs"}
+{"setup":"sbx","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx","command":"ls | grep a","host":"allow"}
+{"setup":"sbx","command":"node -e 0","host":"ask","message":"This command requires approval"}
+{"setup":"sbx","command":"python3 -c 0","host":"ask","message":"This command requires approval"}
+{"setup":"sbx","command":"git add a.txt","host":"ask","message":"This command requires approval"}
+{"setup":"sbx","command":"chmod +x j.txt","host":"ask","message":"This command requires approval"}
+{"setup":"sbx","command":"ln -s a.txt ln.txt","host":"ask","message":"This command requires approval"}
+{"setup":"sbx","command":"touch new.txt","host":"ask","message":"touch in '{project}/new.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"mkdir -p d/e","host":"ask","message":"mkdir in '{project}/d/e' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"echo x > out.txt","host":"ask","message":"Output redirection to '{project}/out.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"cp a.txt b.txt","host":"ask","message":"cp in '{project}/a.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"mv c.txt moved.txt","host":"ask","message":"mv in '{project}/c.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"rm -f f.txt","host":"ask","message":"rm in '{project}/f.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"sed -i s/a/b/ e.txt","host":"ask","message":"sed in '{project}/e.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"printf %s hi > {project}/abs.txt","host":"ask","message":"Output redirection to '{project}/abs.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"mkdir -p {outside}/m","host":"ask","message":"mkdir in '{outside}/m' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx","command":"touch {outside}/t.txt","host":"ask","message":"touch in '{outside}/t.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx","command":"echo x > {outside}/w.txt","host":"ask","message":"Output redirection to '{outside}/w.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx","command":"rm -f {outside}/r.txt","host":"ask","message":"rm in '{outside}/r.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"sbx","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"sbx","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"sbx","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"sbx","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"sbx","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"sbx","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"sbx","command":"X={outside}/v.txt; echo x > \"$X\"","host":"ask","message":"Output redirection to '{outside}/v.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"ask","message":"Redirect target contains $(cmd) output — path is runtime-determined"}
+{"setup":"sbx","command":"cd {outside} && echo x > rel.txt","host":"ask","message":"This Bash command contains multiple operations. The following parts require approval: cd {outside}, echo x"}
+{"setup":"sbx","command":"cd sub && touch made.txt","host":"ask","message":"Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."}
+{"setup":"sbx","command":"echo a && touch g.txt","host":"ask","message":"touch in '{project}/g.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx","command":"echo a | tee h.txt","host":"ask","message":"This Bash command contains multiple operations. The following part requires approval: tee h.txt"}
+{"setup":"sbx","command":"ls; rm -f i.txt","host":"ask","message":"rm in '{project}/i.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-allow-all","command":"echo hi","host":"allow"}
+{"setup":"sbx-allow-all","command":"ls","host":"allow"}
+{"setup":"sbx-allow-all","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"git status","host":"allow"}
+{"setup":"sbx-allow-all","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-allow-all","command":"pwd","host":"allow"}
+{"setup":"sbx-allow-all","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"git log -1","host":"allow"}
+{"setup":"sbx-allow-all","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-allow-all","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-allow-all","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-allow-all","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-allow-all","command":"node -e 0","host":"allow"}
+{"setup":"sbx-allow-all","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-allow-all","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-allow-all","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"sbx-allow-all","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"sbx-allow-all","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"sbx-allow-all","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"sbx-allow-all","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"sbx-allow-all","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"sbx-allow-all","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"sbx-allow-all","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-allow-all","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-allow-all","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto","command":"ls","host":"allow"}
+{"setup":"sbx-auto","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto","command":"git status","host":"allow"}
+{"setup":"sbx-auto","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto","command":"pwd","host":"allow"}
+{"setup":"sbx-auto","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-auto","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-auto","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto-exact","command":"ls","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"git status","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto-exact","command":"pwd","host":"allow"}
+{"setup":"sbx-auto-exact","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto-exact","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto-exact","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto-exact","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto-exact","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto-exact","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto-exact","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto-exact","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto-exact","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto-exact","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"ls","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"git status","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"pwd","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cp a.txt b.txt","host":"ask","message":"Claude requested permissions to use Bash, but you haven't granted it yet."}
+{"setup":"sbx-auto-prefix","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"rm -f f.txt","host":"deny","message":"Permission to use Bash with command rm -f f.txt has been denied."}
+{"setup":"sbx-auto-prefix","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"rm -f {outside}/r.txt","host":"deny","message":"Permission to use Bash with command rm -f {outside}/r.txt has been denied."}
+{"setup":"sbx-auto-prefix","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto-prefix","command":"ls; rm -f i.txt","host":"deny","message":"Permission to use Bash with command ls; rm -f i.txt has been denied."}
+{"setup":"sbx-auto-excluded","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"ls","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"git status","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"pwd","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto-excluded","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"ls","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"git status","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"pwd","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto-accept-edits","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"ls","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"git status","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"pwd","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto-dont-ask","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo hi","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"ls","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"git status","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"pwd","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"git log -1","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"node -e 0","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > .git/info/note","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x >> .bashrc","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > .claude/note.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > .mcp.json","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"touch .gitconfig","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > {outside}/.npmrc","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > link-out/via-link.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-auto-bypass","command":"ls; rm -f i.txt","host":"allow"}
+{"setup":"sbx-noauto","command":"echo hi","host":"allow"}
+{"setup":"sbx-noauto","command":"ls","host":"allow"}
+{"setup":"sbx-noauto","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-noauto","command":"cat {outside}/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx-noauto","command":"git status","host":"allow"}
+{"setup":"sbx-noauto","command":"cat link-out/secret.txt","host":"ask","message":"cat in '{outside}/secret.txt' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx-noauto","command":"cat /etc/hostname","host":"ask","message":"cat in '/etc/hostname' was blocked. For security, Claude Code may only concatenate files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx-noauto","command":"pwd","host":"allow"}
+{"setup":"sbx-noauto","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-noauto","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-noauto","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-noauto","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-noauto","command":"git log -1","host":"allow"}
+{"setup":"sbx-noauto","command":"ls {outside}","host":"ask","message":"ls in '{outside}' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '{project}'."}
+{"setup":"sbx-noauto","command":"head -n1 {outside}/secret.txt","host":"ask","message":"head in '{outside}/secret.txt' was blocked. For security, Claude Code may only read the beginning of files from the allowed working directories for this session: '{project}'."}
+{"setup":"sbx-noauto","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-noauto","command":"echo $(pwd)","host":"ask","message":"A nested command in this command can't be checked before it runs"}
+{"setup":"sbx-noauto","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-noauto","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-noauto","command":"node -e 0","host":"ask","message":"This command requires approval"}
+{"setup":"sbx-noauto","command":"python3 -c 0","host":"ask","message":"This command requires approval"}
+{"setup":"sbx-noauto","command":"git add a.txt","host":"ask","message":"This command requires approval"}
+{"setup":"sbx-noauto","command":"chmod +x j.txt","host":"ask","message":"This command requires approval"}
+{"setup":"sbx-noauto","command":"ln -s a.txt ln.txt","host":"ask","message":"This command requires approval"}
+{"setup":"sbx-noauto","command":"touch new.txt","host":"ask","message":"touch in '{project}/new.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"mkdir -p d/e","host":"ask","message":"mkdir in '{project}/d/e' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"echo x > out.txt","host":"ask","message":"Output redirection to '{project}/out.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"cp a.txt b.txt","host":"ask","message":"cp in '{project}/a.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"mv c.txt moved.txt","host":"ask","message":"mv in '{project}/c.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"rm -f f.txt","host":"ask","message":"rm in '{project}/f.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"sed -i s/a/b/ e.txt","host":"ask","message":"sed in '{project}/e.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"printf %s hi > {project}/abs.txt","host":"ask","message":"Output redirection to '{project}/abs.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"mkdir -p {outside}/m","host":"ask","message":"mkdir in '{outside}/m' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx-noauto","command":"touch {outside}/t.txt","host":"ask","message":"touch in '{outside}/t.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx-noauto","command":"echo x > {outside}/w.txt","host":"ask","message":"Output redirection to '{outside}/w.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx-noauto","command":"rm -f {outside}/r.txt","host":"ask","message":"rm in '{outside}/r.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx-noauto","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"sbx-noauto","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"sbx-noauto","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"sbx-noauto","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"sbx-noauto","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"sbx-noauto","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"sbx-noauto","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"sbx-noauto","command":"X={outside}/v.txt; echo x > \"$X\"","host":"ask","message":"Output redirection to '{outside}/v.txt' needs approval. The path is outside the working directories for this session ('{project}'). Allowing runs the command as written."}
+{"setup":"sbx-noauto","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"ask","message":"Redirect target contains $(cmd) output — path is runtime-determined"}
+{"setup":"sbx-noauto","command":"cd {outside} && echo x > rel.txt","host":"ask","message":"This Bash command contains multiple operations. The following parts require approval: cd {outside}, echo x"}
+{"setup":"sbx-noauto","command":"cd sub && touch made.txt","host":"ask","message":"Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."}
+{"setup":"sbx-noauto","command":"echo a && touch g.txt","host":"ask","message":"touch in '{project}/g.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto","command":"echo a | tee h.txt","host":"ask","message":"This Bash command contains multiple operations. The following part requires approval: tee h.txt"}
+{"setup":"sbx-noauto","command":"ls; rm -f i.txt","host":"ask","message":"rm in '{project}/i.txt' needs approval. The path is inside the working directories for this session ('{project}'), and Claude Code asks before a shell command creates, changes or removes files there."}
+{"setup":"sbx-noauto-allow-all","command":"echo hi","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"ls","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cat a.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cat {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"git status","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cat link-out/secret.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cat /etc/hostname","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"pwd","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"wc -l a.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"grep a a.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"sort a.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"find . -name a.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"git log -1","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"ls {outside}","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"head -n1 {outside}/secret.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo $HOME","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo $(pwd)","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cat a.txt > /dev/null","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"ls | grep a","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"node -e 0","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"python3 -c 0","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"git add a.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"chmod +x j.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"ln -s a.txt ln.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"touch new.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"mkdir -p d/e","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo x > out.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cp a.txt b.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"mv c.txt moved.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"rm -f f.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"sed -i s/a/b/ e.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"printf %s hi > {project}/abs.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"mkdir -p {outside}/m","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"touch {outside}/t.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo x > {outside}/w.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"rm -f {outside}/r.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo x > .git/info/note","host":"ask","message":"Claude requested permissions to edit {project}/.git/info/note which is a sensitive file."}
+{"setup":"sbx-noauto-allow-all","command":"echo x >> .bashrc","host":"ask","message":"Claude requested permissions to edit {project}/.bashrc which is a sensitive file."}
+{"setup":"sbx-noauto-allow-all","command":"echo x > .claude/note.txt","host":"ask","message":"Claude requested permissions to edit {project}/.claude/note.txt which is a sensitive file."}
+{"setup":"sbx-noauto-allow-all","command":"echo x > .mcp.json","host":"ask","message":"Claude requested permissions to edit {project}/.mcp.json which is a sensitive file."}
+{"setup":"sbx-noauto-allow-all","command":"touch .gitconfig","host":"ask","message":"Claude requested permissions to edit {project}/.gitconfig which is a sensitive file."}
+{"setup":"sbx-noauto-allow-all","command":"echo x > {outside}/.npmrc","host":"ask","message":"Claude requested permissions to edit {outside}/.npmrc which is a sensitive file."}
+{"setup":"sbx-noauto-allow-all","command":"echo x > link-out/via-link.txt","host":"ask","message":"{project}/link-out/via-link.txt resolves through a symlink to {outside}/via-link.txt, which is outside the allowed working directories"}
+{"setup":"sbx-noauto-allow-all","command":"X={outside}/v.txt; echo x > \"$X\"","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo x > \"$(echo {outside})/sub.txt\"","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cd {outside} && echo x > rel.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"cd sub && touch made.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo a && touch g.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"echo a | tee h.txt","host":"allow"}
+{"setup":"sbx-noauto-allow-all","command":"ls; rm -f i.txt","host":"allow"}

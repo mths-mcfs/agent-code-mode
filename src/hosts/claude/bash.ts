@@ -6,6 +6,8 @@ export interface SimpleCommand {
   readonly denyForms: readonly string[];
   readonly staticPrefixes: readonly string[];
   readonly dynamic: boolean;
+  /** The command name and its arguments, as written. */
+  readonly words: readonly Operand[];
 }
 
 export interface BashAnalysis {
@@ -13,6 +15,8 @@ export interface BashAnalysis {
   readonly uncertain: readonly string[];
   readonly changesDirectory: boolean;
   readonly removals: readonly Removal[];
+  /** Files named by redirections (`>`, `>>`, `<`, `&>`...): here-documents, here-strings and file descriptors are left out. */
+  readonly redirects: readonly Operand[];
 }
 
 export interface Operand {
@@ -44,6 +48,8 @@ const MAX_WRAPPER_LEVELS = 64;
 const NAME_REBINDERS = new Set(['alias', 'hash', 'enable']);
 
 const REDIR_HDOC: ReadonlySet<number> = new Set([RedirOperator.Hdoc, RedirOperator.DashHdoc]);
+
+const REDIR_DUP: ReadonlySet<number> = new Set([RedirOperator.DplIn, RedirOperator.DplOut]);
 
 type WordValue = Operand;
 
@@ -148,6 +154,7 @@ export class BashAnalyzer {
   readonly #uncertain: string[] = [];
   #changesDirectory = false;
   readonly #removals: Removal[] = [];
+  readonly #redirects: Operand[] = [];
 
   static analyze(command: string): BashAnalysis {
     const analyzer = new BashAnalyzer();
@@ -157,6 +164,7 @@ export class BashAnalyzer {
       uncertain: [...new Set(analyzer.#uncertain)],
       changesDirectory: analyzer.#changesDirectory,
       removals: analyzer.#removals,
+      redirects: analyzer.#redirects,
     };
   }
 
@@ -187,7 +195,7 @@ export class BashAnalyzer {
           this.#declClause(node, ctx);
           break;
         case 'Redirect':
-          this.#redirect(node);
+          this.#redirect(node, ctx);
           break;
         case 'Stmt':
           if (node.coprocess) this.#uncertain.push('coprocesses are not analyzed');
@@ -232,11 +240,15 @@ export class BashAnalyzer {
   #declClause(decl: DeclClause, ctx: Ctx): void {
     const name = decl.variant?.value ?? 'declare';
     const raw = this.#text(decl, ctx);
-    this.#commands.push({ raw, denyForms: [raw, name], staticPrefixes: [name], dynamic: true });
+    this.#commands.push({ raw, denyForms: [raw, name], staticPrefixes: [name], dynamic: true, words: [] });
   }
 
-  #redirect(redir: Redirect): void {
+  #redirect(redir: Redirect, ctx: Ctx): void {
     if (REDIR_HDOC.has(redir.op) && redir.hdoc?.parts.some((p) => p.type !== 'Lit')) this.#uncertain.push('here-document with substitutions');
+    if (REDIR_HDOC.has(redir.op) || redir.op === RedirOperator.WordHdoc || redir.word === null) return;
+    const target = this.#word(redir.word, ctx);
+    if (REDIR_DUP.has(redir.op) && target.value !== undefined && /^(\d+-?|-)$/.test(target.value)) return;
+    this.#redirects.push(target);
   }
 
   #callExpr(call: CallExpr, ctx: Ctx): void {
@@ -309,7 +321,7 @@ export class BashAnalyzer {
         addForm(current);
       }
     }
-    this.#commands.push({ raw, denyForms: [...denyForms], staticPrefixes: [...staticPrefixes], dynamic });
+    this.#commands.push({ raw, denyForms: [...denyForms], staticPrefixes: [...staticPrefixes], dynamic, words });
   }
 
   #envSplitString(words: readonly WordValue[], ctx: Ctx): boolean {

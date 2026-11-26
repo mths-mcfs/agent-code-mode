@@ -79,7 +79,7 @@ async function setup(o: SetupOptions = {}): Promise<Setup> {
 
 const containment = { mode: 'none' } as const;
 
-const SANDBOX = { sandbox: { enabled: true } };
+const SANDBOX = { sandbox: { enabled: true, autoAllowBashIfSandboxed: true } };
 
 function bash(command: string, cwd: string): PreparedCall {
   return { id: 'c1', tool: 'bash', args: { command, cwd, timeoutMs: 120_000 }, effect: { command, shell: { path: '/bin/bash', args: ['-c'] }, cwd, timeoutMs: 120_000, containment } };
@@ -173,6 +173,98 @@ describe('Bash rules', () => {
     const strict = await setup({ user: { sandbox: { enabled: true, autoAllowBashIfSandboxed: false }, permissions: { allow: ['Bash(make test)'] } }, mode: 'default' });
     expect(check(strict, bash('make build', strict.project))).toBe('ask');
     expect(check(strict, bash('make test', strict.project))).toBe('allow');
+  });
+});
+
+describe('Bash parity with the host', () => {
+  it('auto-allows sandboxed commands only when autoAllowBashIfSandboxed is set to true, not when it is missing', async () => {
+    const kinds: Record<string, string> = {};
+    for (const [name, sandbox] of [['true', { enabled: true, autoAllowBashIfSandboxed: true }], ['false', { enabled: true, autoAllowBashIfSandboxed: false }], ['absent', { enabled: true }]] as const) {
+      const s = await setup({ user: { sandbox }, mode: 'default' });
+      kinds[name] = check(s, bash('touch new.txt', s.project));
+    }
+    expect(kinds).toEqual({ true: 'allow', false: 'ask', absent: 'ask' });
+  });
+
+  it.each([
+    ['cat /etc/hostname', 'a path outside the working directories'],
+    ['mkdir -p /tmp/acm-outside/m', 'a path outside the working directories'],
+    ['echo x > .mcp.json', 'a sensitive file'],
+    ['echo x >> .bashrc', 'a sensitive file'],
+    ['echo x > .git/info/note', 'a file in a sensitive directory'],
+    ['echo a && touch g.txt', 'a compound command'],
+    ['cd sub && touch made.txt', 'a cd'],
+    ['echo x > "$X"', 'a target only known at run time'],
+    ['dd if=a.txt of=/tmp/acm-outside/x', 'a path after ='],
+    ['sort -o/tmp/acm-outside/x a.txt', 'a path joined to an option'],
+    ['cat *.txt', 'a glob'],
+    ['cp -t .git a.txt', 'a -t destination in a sensitive directory'],
+    ['cp --target-directory=.git a.txt', 'a --target-directory= destination'],
+    ['dd if=a.txt of=.git/x', 'a dd of= destination'],
+    ['rsync a.txt .git/', 'an rsync destination'],
+    ['sed -i.bak s/a/b/ .bashrc', 'sed in place on a sensitive file'],
+    ['/tmp/acm-outside/run.sh', 'a program outside the working directories'],
+    ['cat sub/../a.txt', 'a `..` that a symlink before it could redirect'],
+  ])('an exact allow rule for `%s` still asks: %s', async (command) => {
+    const s = await setup({ user: { permissions: { allow: [`Bash(${command})`] } }, mode: 'default' });
+    expect(check(s, bash(command, s.project))).toBe('ask');
+  });
+
+  it('an exact allow rule still approves a plain command inside the working directories, and dontAsk denies what it would ask', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash(touch new.txt)', 'Bash(echo hi > out.txt)', 'Bash(cat /etc/hostname)'] } }, mode: 'default' });
+    expect(check(s, bash('touch new.txt', s.project))).toBe('allow');
+    expect(check(s, bash('echo hi > out.txt', s.project))).toBe('allow');
+    const d = await setup({ user: { permissions: { allow: ['Bash(cat /etc/hostname)'] } }, mode: 'dontAsk' });
+    expect(check(d, bash('cat /etc/hostname', d.project))).toBe('deny');
+  });
+
+  it.skipIf(!posix)('an exact allow rule asks when a path named inside resolves outside through a symlink', async () => {
+    const s = await setup({ user: { permissions: { allow: ['Bash(cat link-out/secret.txt)', 'Bash(echo x > link-out/w.txt)', 'Bash(cat a.txt)'] } }, mode: 'default', files: { 'a.txt': 'a' } });
+    const outside = path.join(s.base, 'outside');
+    await mkdir(outside, { recursive: true });
+    await writeFile(path.join(outside, 'secret.txt'), 's');
+    await symlink(outside, path.join(s.project, 'link-out'));
+    for (const command of ['cat link-out/secret.txt', 'echo x > link-out/w.txt']) {
+      expect(check(s, bash(command, s.project))).toBe('allow');
+      expect(await authorize(s, bash(command, s.project))).toMatchObject({ kind: 'ask', reason: expect.stringContaining('through a symlink') });
+    }
+    expect(await authorize(s, bash('cat a.txt', s.project))).toMatchObject({ kind: 'allow' });
+  });
+
+  it.skipIf(!posix)('a file named like an option, after `--`, in a redirection or as ./-x, is checked through its symlink too', async () => {
+    const commands = ['echo x > -out', 'echo x >> -out', 'echo x 2> -out', 'echo x &> -out', 'touch -- -out', 'cat ./-out', 'echo x > -rc'];
+    const s = await setup({ user: { permissions: { allow: commands.map((c) => `Bash(${c})`) } }, mode: 'default' });
+    const outside = path.join(s.base, 'outside');
+    await mkdir(outside, { recursive: true });
+    await symlink(path.join(outside, 'target'), path.join(s.project, '-out'));
+    await symlink(path.join(s.project, '.bashrc'), path.join(s.project, '-rc'));
+    for (const command of commands) {
+      expect(check(s, bash(command, s.project)), command).toBe('allow');
+      expect(await authorize(s, bash(command, s.project)), command).toMatchObject({ kind: 'ask', reason: expect.stringContaining('through a symlink') });
+    }
+  });
+
+  it.skipIf(!posix)('a word with a backslash asks, since it names one file whose symlink the path check would miss', async () => {
+    const command = "echo x > 'safe\\out'";
+    const s = await setup({ user: { permissions: { allow: [`Bash(${command})`] } }, mode: 'default' });
+    const outside = path.join(s.base, 'outside');
+    await mkdir(outside, { recursive: true });
+    await symlink(path.join(outside, 'target'), path.join(s.project, 'safe\\out'));
+    expect(check(s, bash(command, s.project))).toBe('ask');
+  });
+
+  it.skipIf(!posix)('a hook rewrite into a command whose path resolves outside through a symlink asks', async () => {
+    const s = await setup({
+      user: {
+        permissions: { allow: ['Bash(true)', 'Bash(cat link-out/secret.txt)'] },
+        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [exampleHook('update', JSON.stringify({ command: 'cat link-out/secret.txt' }))] }] },
+      },
+      mode: 'default',
+    });
+    const outside = path.join(s.base, 'outside');
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, path.join(s.project, 'link-out'));
+    expect(await authorize(s, bash('true', s.project))).toMatchObject({ kind: 'ask', reason: expect.stringContaining('hook rewrite') });
   });
 });
 
@@ -584,8 +676,8 @@ describe.skipIf(!posix)('PostToolUse hooks', () => {
     const s0 = await setup();
     const pidFile = path.join(s0.base, 'post.pid');
     const s = await setup({ user: { permissions: { allow: ['Bash(echo hi)'] }, hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `echo $$ > "${pidFile}"; exec sleep 30` }] }] } }, mode: 'bypassPermissions' });
-    const tools = new MemoryToolRuntime({ root: '/workspace' });
-    const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: { ...s.ctx, cwd: '/workspace', roots: ['/workspace'] }, policy: s.policy });
+    const tools = new MemoryToolRuntime({ root: s.project });
+    const dispatcher = new Dispatcher({ adapter: s.adapter, tools, ctx: s.ctx, policy: s.policy });
     const call = dispatcher.dispatch('bash', { command: 'echo hi' });
     for (let i = 0; i < 100 && !(await readFile(pidFile, 'utf8').catch(() => '')); i++) await new Promise((r) => setTimeout(r, 50));
     const pid = Number(await readFile(pidFile, 'utf8'));
@@ -627,7 +719,7 @@ describe.skipIf(!posix)('with the dispatcher', () => {
   it('re-prepares and re-checks a hook rewrite; a rewrite into a denied command is refused', async () => {
     const s = await setup({
       user: {
-        permissions: { deny: ['Bash(rm:*)'], allow: ['Bash(echo hi)'] },
+        permissions: { deny: ['Bash(rm:*)'], allow: ['Bash(echo hi)'], additionalDirectories: ['/workspace'] },
         hooks: {
           PreToolUse: [
             { matcher: 'Write', hooks: [exampleHook('update', JSON.stringify({ file_path: '/workspace/a.txt', content: 'sanitized' }))] },

@@ -79,7 +79,7 @@ export interface ClaudePolicy {
   readonly hookEnv: Readonly<Record<string, string>>;
   /** Set when a sandbox restriction cannot be expressed as bash containment: every bash call is denied. */
   readonly bashUnsupported: string | undefined;
-  /** `sandbox.autoAllowBashIfSandboxed` (default true): a contained command needs no allow rule. */
+  /** `sandbox.autoAllowBashIfSandboxed` set to true: a contained command needs no allow rule. Claude Code 2.1.332 treats a missing key as off. */
   readonly autoAllowSandboxedBash: boolean;
   /** Claude's sandbox isolates the filesystem (not `sandbox.filesystem.disabled`), so containment limits writes. */
   readonly sandboxLimitsWrites: boolean;
@@ -227,14 +227,79 @@ function blockedOutside(view: CallView, policy: ClaudePolicy): Decision | undefi
   return { kind: 'deny', source: 'rule', reason: `${NATIVE_TOOL[prepared.tool]} outside the working directories is blocked by settings` };
 }
 
-function bashApproval(prepared: PreparedCallOf<'bash'>, policy: ClaudePolicy, containment: BashContainment): Decision {
+/**
+ * What Claude Code calls sensitive files: writing one asks whatever rule
+ * covers the command. A directory name counts at any depth, a file name as
+ * the last segment, both case-insensitively.
+ */
+const SENSITIVE_DIRS = new Set(['.git', '.claude', '.vscode', '.idea', '.husky']);
+const SENSITIVE_FILES = new Set([
+  '.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.zshrc', '.zprofile', '.zshenv', '.zlogin',
+  '.profile', '.envrc', '.npmrc', '.ripgreprc', '.mcp.json', '.claude.json',
+]);
+
+function isSensitivePath(p: string): boolean {
+  const segments = toPosixPath(p).toLowerCase().split('/').filter((seg) => seg !== '');
+  if (segments.some((seg, i) => SENSITIVE_DIRS.has(seg) || (seg === '.config' && segments[i + 1] === 'git'))) return true;
+  return SENSITIVE_FILES.has(segments.at(-1) ?? '');
+}
+
+/**
+ * Every word an exact allow rule's command could use as a path, or why
+ * there is none to trust. Claude Code still asks under an exact rule for a
+ * compound command and for one that names a file outside the working
+ * directories or a sensitive file, so the rule approves only one plain
+ * command, all of whose words are known before it runs. Each argument, and
+ * a program named by a path, counts as a path, and so does the text after
+ * an `=` and between `:` there.
+ */
+function exactRuleWords(analysis: BashAnalysis): { words: string[] } | { why: string } {
+  if (analysis.uncertain.length > 0 || analysis.changesDirectory || analysis.commands.length !== 1) return { why: 'an exact allow rule approves one plain command, and this is several or changes directory' };
+  const [command] = analysis.commands;
+  if (command === undefined || command.dynamic) return { why: 'an exact allow rule approves a command whose words are all known before it runs' };
+  const words: string[] = [];
+  const [name, ...args] = command.words;
+  const program = name?.value?.includes('/') === true ? [name] : [];
+  for (const operand of [...program, ...args, ...analysis.redirects]) {
+    if (operand.value === undefined || operand.glob || operand.tilde === 'unknown' || operand.assignment === true) return { why: `\`${operand.raw}\` is only known at run time` };
+    const value = operand.tilde === 'literal' ? `./${operand.value}` : operand.value;
+    if (value.startsWith('-') && value.includes('/') && !value.includes('=')) return { why: `\`${operand.raw}\` may join an option to a path` };
+    // Off Windows a backslash is part of a file name, which the path check would read as a separator.
+    if (process.platform !== 'win32' && value.includes('\\')) return { why: `\`${operand.raw}\` holds a backslash, which is part of a file name here` };
+    // The kernel follows a symlink before the `..` after it, which a path resolved by name cannot.
+    if (value.split(/[/=:]/).includes('..')) return { why: `\`${operand.raw}\` climbs with \`..\`, which a symlink before it can redirect` };
+    // An option is a path too: after `--`, in a redirection or through a symlink named `-x`, it is a file.
+    words.push(value);
+    const eq = value.indexOf('=');
+    if (eq !== -1) words.push(...value.slice(eq + 1).split(':').filter((piece) => piece !== ''));
+  }
+  return { words };
+}
+
+function exactRuleReach(paths: readonly string[], dirs: readonly string[]): string | undefined {
+  const outside = paths.find((p) => !dirs.some((d) => isInsidePath(p, d)));
+  if (outside !== undefined) return `${outside} is outside the working directories`;
+  const sensitive = paths.find(isSensitivePath);
+  return sensitive === undefined ? undefined : `${sensitive} is a sensitive file`;
+}
+
+function autoAllowsContained(policy: ClaudePolicy, containment: BashContainment): boolean {
+  return containment.mode === 'sandbox' && policy.sandboxLimitsWrites && (policy.autoAllowSandboxedBash || policy.mode === 'bypassPermissions');
+}
+
+function bashApproval(prepared: PreparedCallOf<'bash'>, analysis: BashAnalysis, policy: ClaudePolicy, containment: BashContainment): Decision {
   const contained = containment.mode === 'sandbox' && policy.sandboxLimitsWrites;
   if (policy.blockReadsOutside) return { kind: 'ask', reason: 'blockReadsOutsideWorkingDirectories is set and the files a shell command reads cannot be established' };
   if (policy.blockWritesOutside && !contained) return { kind: 'ask', reason: "blockWritesOutsideWorkingDirectories is set and the files a shell command writes cannot be established outside Claude's sandbox" };
+  if (autoAllowsContained(policy, containment)) return { kind: 'allow' };
   const command = prepared.effect.command.trim();
   const exact = policy.rules.allow.some((r) => r.tool === 'Bash' && r.matcher.type === 'bash' && !r.matcher.spec.includes('*') && r.matcher.spec.trim() === command);
-  if (exact) return { kind: 'allow' };
-  if (contained && (policy.autoAllowSandboxedBash || policy.mode === 'bypassPermissions')) return { kind: 'allow' };
+  if (exact) {
+    const named = exactRuleWords(analysis);
+    if ('why' in named) return { kind: 'ask', reason: named.why };
+    const reach = exactRuleReach(named.words.map((w) => resolveCommandPath(w, prepared.effect.cwd, policy.home)), policy.workingDirs);
+    return reach === undefined ? { kind: 'allow' } : { kind: 'ask', reason: `an exact allow rule names this command, but ${reach}` };
+  }
   return {
     kind: 'ask',
     reason: contained
@@ -609,7 +674,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         postHooks: post,
         hookEnv: { CLAUDE_PROJECT_DIR: projectRoot },
         bashUnsupported,
-        autoAllowSandboxedBash: firstSetting(docs, (s) => s.sandbox?.autoAllowBashIfSandboxed) !== false,
+        autoAllowSandboxedBash: firstSetting(docs, (s) => s.sandbox?.autoAllowBashIfSandboxed) === true,
         sandboxLimitsWrites,
         blockReadsOutside,
         blockWritesOutside,
@@ -674,7 +739,7 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     const readOnly = view.prepared.tool === 'read' || view.prepared.tool === 'grep' || view.prepared.tool === 'glob';
     if (policy.mode === 'plan' && !readOnly) return modeDecision(view, policy);
     if (view.prepared.tool === 'bash') {
-      const approval = bashApproval(view.prepared, policy, snapshot.bashContainment);
+      const approval = bashApproval(view.prepared, view.analysis ?? BashAnalyzer.analyze(view.prepared.effect.command), policy, snapshot.bashContainment);
       return approval.kind === 'ask' ? askOrDeny(approval.reason) : approval;
     }
     if (allowedByRule(view, policy.rules.allow)) return { kind: 'allow' };
@@ -723,9 +788,49 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
     };
   }
 
+  /**
+   * The words of a command an exact allow rule approved, with symlinks
+   * resolved (I/O, so not in `checkStatic`): Claude Code asks when a path
+   * named inside the working directories resolves outside them or to a
+   * sensitive file, and so does a target whose real path cannot be known.
+   */
+  async #exactRuleRealReach(view: CallView, snapshot: PolicySnapshot<ClaudePolicy>): Promise<Decision | undefined> {
+    const policy = snapshot.payload;
+    if (view.prepared.tool !== 'bash' || view.analysis === undefined || autoAllowsContained(policy, snapshot.bashContainment)) return undefined;
+    const named = exactRuleWords(view.analysis);
+    if ('why' in named) return undefined;
+    const cwd = view.prepared.effect.cwd;
+    const real = await Promise.all(named.words.map((w) => realTarget(toPosixPath(resolveCommandPath(w, cwd, policy.home)))));
+    const dirs = [...policy.workingDirs, ...(await Promise.all(policy.workingDirs.map((d) => realTarget(toPosixPath(d))))).flatMap((d) => (d === undefined ? [] : [nativePath(d)]))];
+    const unknown = real.findIndex((r) => r === undefined);
+    const reason =
+      unknown === -1
+        ? exactRuleReach(real.flatMap((r) => (r === undefined ? [] : [nativePath(r)])), dirs)
+        : `the real path of ${named.words[unknown] ?? ''} cannot be established`;
+    if (reason === undefined) return undefined;
+    const message = `an exact allow rule names this command, but through a symlink ${reason}`;
+    return policy.mode === 'dontAsk' ? { kind: 'deny', source: 'rule', reason: `dontAsk mode denies what would ask: ${message}` } : { kind: 'ask', reason: message };
+  }
+
+  /**
+   * The dispatcher re-checks a hook's rewrite with `checkStatic`, which does
+   * no I/O: the symlink check of an exact rule's command runs here instead,
+   * on a rewrite the static rules allow (one they refuse keeps that refusal).
+   */
+  async #symlinkReachOfStaticallyAllowedRewrite(prepared: PreparedCallOf<'bash'>, command: string, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>): Promise<Decision | undefined> {
+    const rewritten: PreparedCall = { ...prepared, args: { ...prepared.args, command }, effect: { ...prepared.effect, command } };
+    const view = this.#view(rewritten, ctx, snapshot.payload);
+    if (this.#decide(view, snapshot).kind !== 'allow') return undefined;
+    const reached = await this.#exactRuleRealReach(view, snapshot);
+    if (reached === undefined || reached.kind === 'deny') return reached;
+    return { kind: 'ask', reason: `hook rewrite: ${reached.reason}` };
+  }
+
   async authorize(prepared: PreparedCall, ctx: SessionContext, snapshot: PolicySnapshot<ClaudePolicy>, signal: AbortSignal): Promise<Decision> {
     const policy = snapshot.payload;
     const view = this.#view(prepared, ctx, policy);
+    const reached = await this.#exactRuleRealReach(view, snapshot);
+    if (reached) return reached;
     const hooks = this.#select(policy.preHooks, view, policy);
     const unsupported = hooks.find((h) => h.unsupported !== undefined);
     if (unsupported) {
@@ -754,6 +859,8 @@ export class ClaudeHostAdapter implements HostAdapter<ClaudePolicy> {
         if (combined.updatedInput === undefined) return { kind: 'allow', ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
         const mapped = mapUpdatedInput(prepared, combined.updatedInput);
         if ('error' in mapped) return { kind: 'deny', source: 'hook', reason: mapped.error };
+        const rewrite = prepared.tool === 'bash' && 'command' in mapped.args && typeof mapped.args.command === 'string' ? await this.#symlinkReachOfStaticallyAllowedRewrite(prepared, mapped.args.command, ctx, snapshot) : undefined;
+        if (rewrite) return rewrite;
         return { kind: 'allow', updatedArgs: mapped.args, ...(combined.reason === undefined ? {} : { reason: combined.reason }) };
       }
     }
