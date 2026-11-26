@@ -20,6 +20,8 @@ export interface Operand {
   readonly raw: string;
   readonly glob: boolean;
   readonly tilde?: 'literal' | 'unknown';
+  /** Written as `NAME=VALUE` with a value known only at run time because of a tilde: still an assignment to `env`. */
+  readonly assignment?: true;
 }
 
 export interface Removal {
@@ -209,6 +211,13 @@ export class BashAnalyzer {
     // Brace expansion (`{a,b}`, `{1..3}`) can turn one word into several: only known at run time.
     const brace = word.parts.some((p) => p.type === 'Lit' && hasUnescaped(p.value, '{')) && /\{[\s\S]*(,|\.\.)[\s\S]*\}/.test(raw);
     if (brace) return { value: undefined, raw, glob };
+    // Outside POSIX mode, bash also expands an unquoted `~` after the `=` or a `:` of an argument written as an
+    // assignment (`a+=~`, `dd if=~/x`): only known at run time.
+    const assignment = word.parts[0]?.type === 'Lit' && /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/.test(word.parts[0].value);
+    if (assignment && word.parts.some((p) => p.type === 'Lit' && hasUnescaped(p.value, '~'))) {
+      // Still an assignment to `env` only when the tilde is all that is unknown: `$X` in `FOO=a~$X` word-splits.
+      return value === undefined ? { value, raw, glob } : { value: undefined, raw, glob, assignment: true };
+    }
     // Bash expands a leading `~` only when it is unquoted: `~` alone or `~/` is home; other prefixes are unknown here.
     let tilde: Operand['tilde'];
     if (value?.startsWith('~')) {
@@ -294,7 +303,7 @@ export class BashAnalyzer {
       current = unwrapped.inner;
       addForm(current);
       let skip = 0;
-      while (skip < current.length - 1 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(current[skip]?.value ?? '')) skip++;
+      while (skip < current.length - 1 && isAssignment(current[skip])) skip++;
       if (skip > 0) {
         current = current.slice(skip);
         addForm(current);
@@ -445,18 +454,22 @@ const OPTIONS_WITH_VALUE: Record<string, ReadonlySet<string>> = {
   time: new Set(['-f', '--format', '-o', '--output']),
 };
 
+function isAssignment(word: WordValue | undefined): boolean {
+  return word?.assignment === true || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word?.value ?? '');
+}
+
 function unwrap(name: string, words: readonly WordValue[]): { inner: readonly WordValue[] } | undefined {
   if (!WRAPPERS.has(name)) return undefined;
   const withValue = OPTIONS_WITH_VALUE[name] ?? new Set<string>();
   let i = 1;
   for (; i < words.length; i++) {
+    if (name === 'env' && isAssignment(words[i])) continue;
     const v = words[i]?.value;
     if (v === undefined) return { inner: words.slice(i) };
     if (v === '--') {
       i++;
       break;
     }
-    if (name === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(v)) continue;
     if (name === 'nice' && /^-\d+$/.test(v)) continue;
     if (v.startsWith('-') && v.length > 1) {
       const flag = v.includes('=') ? v.slice(0, v.indexOf('=')) : v;
